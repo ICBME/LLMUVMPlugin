@@ -1,0 +1,8 @@
+[project]
+name = "rtlagent-pyuvm"
+version = "0.1.0"
+readme = "README.md"
+requires-python = "<3.14, >3.11"
+dependencies = [
+    "pyuvm>=4.0.1",
+]
