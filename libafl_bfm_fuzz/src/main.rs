@@ -183,17 +183,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     };
 
     let mandatory = config.target.mandatory_cases();
-    let directed = match (&config.target, &config.directives_path) {
-        (Target::TinyAlu, Some(path)) => load_tinyalu_directive_cases(path)?,
-        (_, Some(path)) => {
-            eprintln!(
-                "warning: directives are currently TinyALU-specific; ignoring {} for {}",
-                path.display(),
-                config.target.name()
-            );
-            Vec::new()
-        }
-        (_, None) => Vec::new(),
+    let directed = match &config.directives_path {
+        Some(path) => load_directive_cases(config.target, path)?,
+        None => Vec::new(),
     };
     let random_seeds = config
         .target
@@ -755,23 +747,19 @@ fn dedupe_cases(cases: Vec<ExportCase>) -> Vec<ExportCase> {
     deduped
 }
 
-fn load_tinyalu_directive_cases(path: &Path) -> Result<Vec<ExportCase>, Box<dyn Error>> {
+fn load_directive_cases(target: Target, path: &Path) -> Result<Vec<ExportCase>, Box<dyn Error>> {
     let text = fs::read_to_string(path)?;
     let value: Value = serde_json::from_str(&text)?;
-    Ok(tinyalu_directive_cases_from_value(&value))
+    Ok(match target {
+        Target::TinyAlu => tinyalu_directive_cases_from_value(&value),
+        Target::Aes => aes_directive_cases_from_value(&value),
+        Target::Sha256 => sha256_directive_cases_from_value(&value),
+    })
 }
 
 fn tinyalu_directive_cases_from_value(value: &Value) -> Vec<ExportCase> {
-    let directives = if let Some(items) = value.as_array() {
-        items.as_slice()
-    } else if let Some(items) = value.get("directives").and_then(Value::as_array) {
-        items.as_slice()
-    } else {
-        &[]
-    };
-
     let mut cases = Vec::new();
-    for (idx, directive) in directives.iter().enumerate() {
+    for (idx, directive) in directive_items(value).iter().enumerate() {
         let origin = directive
             .get("name")
             .and_then(Value::as_str)
@@ -804,6 +792,337 @@ fn tinyalu_directive_cases_from_value(value: &Value) -> Vec<ExportCase> {
         }
     }
     cases
+}
+
+fn aes_directive_cases_from_value(value: &Value) -> Vec<ExportCase> {
+    let mut cases = Vec::new();
+    for (idx, directive) in directive_items(value).iter().enumerate() {
+        let origin = directive_origin(directive, idx);
+        for case in explicit_aes_cases(directive) {
+            cases.push(export_case(FuzzCase::Aes(case), &origin));
+        }
+
+        let key_lens = resolve_key_lens(directive);
+        let encdecs = resolve_aes_directions(directive);
+        let key_patterns =
+            resolve_patterns(directive, "key_patterns", &["zero", "ff", "increment"]);
+        let block_patterns = resolve_patterns(
+            directive,
+            "block_patterns",
+            &["zero", "ff", "alternating", "walking_one"],
+        );
+
+        for key_len in key_lens {
+            for encdec in &encdecs {
+                for key_pattern in &key_patterns {
+                    for block_pattern in &block_patterns {
+                        let key = pattern_bytes(key_pattern, if key_len == 128 { 16 } else { 32 });
+                        let block_vec = pattern_bytes(block_pattern, 16);
+                        let mut block = [0u8; 16];
+                        block.copy_from_slice(&block_vec);
+                        cases.push(export_case(
+                            FuzzCase::Aes(AesCase {
+                                key_len,
+                                encdec: *encdec,
+                                key,
+                                block,
+                            }),
+                            &origin,
+                        ));
+                        if cases.len() >= 128 {
+                            return cases;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    cases
+}
+
+fn sha256_directive_cases_from_value(value: &Value) -> Vec<ExportCase> {
+    let mut cases = Vec::new();
+    for (idx, directive) in directive_items(value).iter().enumerate() {
+        let origin = directive_origin(directive, idx);
+        for case in explicit_sha_cases(directive) {
+            cases.push(export_case(FuzzCase::Sha256(case), &origin));
+        }
+
+        let modes = resolve_sha_modes(directive);
+        let lengths = resolve_lengths(directive, &[0, 1, 55, 56, 57, 63, 64, 65, 127]);
+        let patterns = resolve_patterns(
+            directive,
+            "byte_patterns",
+            &["zero", "ff", "increment", "alternating"],
+        );
+        for mode in modes {
+            for len in &lengths {
+                for pattern in &patterns {
+                    cases.push(export_case(
+                        FuzzCase::Sha256(Sha256Case {
+                            mode,
+                            message: pattern_bytes(pattern, *len),
+                        }),
+                        &origin,
+                    ));
+                    if cases.len() >= 128 {
+                        return cases;
+                    }
+                }
+            }
+        }
+    }
+    cases
+}
+
+fn directive_items(value: &Value) -> &[Value] {
+    if let Some(items) = value.as_array() {
+        items.as_slice()
+    } else if let Some(items) = value.get("directives").and_then(Value::as_array) {
+        items.as_slice()
+    } else {
+        &[]
+    }
+}
+
+fn directive_origin(directive: &Value, idx: usize) -> String {
+    directive
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("directive_{idx}"))
+}
+
+fn explicit_aes_cases(directive: &Value) -> Vec<AesCase> {
+    let items = directive
+        .get("cases")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| std::slice::from_ref(directive));
+    let mut cases = Vec::new();
+    for item in items {
+        let Some(key_len) = parse_key_len(item.get("key_len").unwrap_or(&Value::Null)) else {
+            continue;
+        };
+        let Some(encdec) = item.get("encdec").and_then(parse_aes_direction) else {
+            continue;
+        };
+        let Some(key) = item.get("key").and_then(parse_hex_bytes) else {
+            continue;
+        };
+        let Some(block_vec) = item.get("block").and_then(parse_hex_bytes) else {
+            continue;
+        };
+        let expected_key_len = if key_len == 128 { 16 } else { 32 };
+        if key.len() != expected_key_len || block_vec.len() != 16 {
+            continue;
+        }
+        let mut block = [0u8; 16];
+        block.copy_from_slice(&block_vec);
+        cases.push(AesCase {
+            key_len,
+            encdec,
+            key,
+            block,
+        });
+    }
+    cases
+}
+
+fn explicit_sha_cases(directive: &Value) -> Vec<Sha256Case> {
+    let items = directive
+        .get("cases")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| std::slice::from_ref(directive));
+    let mut cases = Vec::new();
+    for item in items {
+        let Some(mode) = item.get("mode").and_then(parse_sha_mode) else {
+            continue;
+        };
+        let Some(message) = item.get("message").and_then(parse_hex_bytes) else {
+            continue;
+        };
+        cases.push(Sha256Case { mode, message });
+    }
+    cases
+}
+
+fn resolve_key_lens(directive: &Value) -> Vec<u16> {
+    let raw = directive
+        .get("key_lens")
+        .or_else(|| directive.get("key_len"))
+        .unwrap_or(&Value::Null);
+    let mut values = parse_array_or_one(raw)
+        .into_iter()
+        .filter_map(parse_key_len)
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        values.extend([128, 256]);
+    }
+    values.sort_unstable();
+    values.dedup();
+    values
+}
+
+fn resolve_aes_directions(directive: &Value) -> Vec<AesDirection> {
+    let raw = directive
+        .get("encdecs")
+        .or_else(|| directive.get("encdec"))
+        .unwrap_or(&Value::Null);
+    let mut values = parse_array_or_one(raw)
+        .into_iter()
+        .filter_map(parse_aes_direction)
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        values.extend([AesDirection::Encipher, AesDirection::Decipher]);
+    }
+    values.sort_unstable();
+    values.dedup();
+    values
+}
+
+fn resolve_sha_modes(directive: &Value) -> Vec<ShaMode> {
+    let raw = directive
+        .get("modes")
+        .or_else(|| directive.get("mode"))
+        .unwrap_or(&Value::Null);
+    let mut values = parse_array_or_one(raw)
+        .into_iter()
+        .filter_map(parse_sha_mode)
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        values.extend([ShaMode::Sha256, ShaMode::Sha224]);
+    }
+    values.sort_unstable();
+    values.dedup();
+    values
+}
+
+fn resolve_lengths(directive: &Value, defaults: &[usize]) -> Vec<usize> {
+    let raw = directive
+        .get("message_lengths")
+        .or_else(|| directive.get("lengths"))
+        .or_else(|| directive.get("message_len"))
+        .unwrap_or(&Value::Null);
+    let mut values = parse_array_or_one(raw)
+        .into_iter()
+        .filter_map(parse_usize_value)
+        .map(|len| len.min(127))
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        values.extend(defaults);
+    }
+    values.sort_unstable();
+    values.dedup();
+    values
+}
+
+fn resolve_patterns(directive: &Value, key: &str, defaults: &[&str]) -> Vec<String> {
+    let mut values = parse_array_or_one(directive.get(key).unwrap_or(&Value::Null))
+        .into_iter()
+        .filter_map(Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        values.extend(defaults.iter().map(|item| (*item).to_string()));
+    }
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn parse_array_or_one(value: &Value) -> Vec<&Value> {
+    match value {
+        Value::Array(items) => items.iter().collect(),
+        Value::Null => Vec::new(),
+        other => vec![other],
+    }
+}
+
+fn parse_key_len(value: &Value) -> Option<u16> {
+    match value {
+        Value::Number(number) => number.as_u64().and_then(|raw| match raw {
+            128 => Some(128),
+            256 => Some(256),
+            _ => None,
+        }),
+        Value::String(text) => match text.trim() {
+            "128" | "AES_128" | "aes128" | "aes-128" => Some(128),
+            "256" | "AES_256" | "aes256" | "aes-256" => Some(256),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn parse_aes_direction(value: &Value) -> Option<AesDirection> {
+    match value {
+        Value::Number(number) => match number.as_u64()? {
+            0 => Some(AesDirection::Decipher),
+            1 => Some(AesDirection::Encipher),
+            _ => None,
+        },
+        Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "encipher" | "encrypt" | "enc" | "1" => Some(AesDirection::Encipher),
+            "decipher" | "decrypt" | "dec" | "0" => Some(AesDirection::Decipher),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn parse_sha_mode(value: &Value) -> Option<ShaMode> {
+    match value {
+        Value::Number(number) => match number.as_u64()? {
+            0 => Some(ShaMode::Sha224),
+            1 => Some(ShaMode::Sha256),
+            _ => None,
+        },
+        Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "sha224" | "sha-224" | "224" => Some(ShaMode::Sha224),
+            "sha256" | "sha-256" | "256" => Some(ShaMode::Sha256),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn parse_usize_value(value: &Value) -> Option<usize> {
+    match value {
+        Value::Number(number) => number.as_u64().and_then(|raw| usize::try_from(raw).ok()),
+        Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+fn parse_hex_bytes(value: &Value) -> Option<Vec<u8>> {
+    let text = value.as_str()?.trim();
+    let text = text.strip_prefix("0x").unwrap_or(text);
+    if text.len() % 2 != 0 {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|idx| u8::from_str_radix(&text[idx..idx + 2], 16).ok())
+        .collect()
+}
+
+fn pattern_bytes(pattern: &str, len: usize) -> Vec<u8> {
+    match pattern {
+        "zero" | "zeros" => vec![0x00; len],
+        "ff" | "ones" | "max" => vec![0xff; len],
+        "alternating" | "aa55" => (0..len)
+            .map(|idx| if idx % 2 == 0 { 0xaa } else { 0x55 })
+            .collect(),
+        "55aa" => (0..len)
+            .map(|idx| if idx % 2 == 0 { 0x55 } else { 0xaa })
+            .collect(),
+        "walking_one" => (0..len).map(|idx| 1u8 << (idx % 8)).collect(),
+        "increment" | "counter" => (0..len).map(|idx| idx as u8).collect(),
+        "decrement" => (0..len).map(|idx| 0xffu8.wrapping_sub(idx as u8)).collect(),
+        _ => (0..len).map(|idx| (idx as u8).wrapping_mul(17)).collect(),
+    }
 }
 
 fn resolve_ops(directive: &Value) -> Vec<u8> {

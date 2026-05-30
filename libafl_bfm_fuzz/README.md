@@ -45,3 +45,32 @@ make -C libafl_bfm_fuzz check-all
 
 `check-all` runs the Rust unit tests, Python syntax checks, and corpus generation
 for TinyALU, AES, and SHA256.
+
+## Coverage-guided feedback
+
+The framework can run Verilator coverage, summarize uncovered RTL, ask an LLM
+for mutation guidance, and feed the resulting directives back into LibAFL.
+
+Heuristic-only feedback, which works without an API key:
+
+```sh
+UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz TARGET=aes feedback-fuzz
+UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz TARGET=sha256 feedback-fuzz
+```
+
+LLM-assisted feedback:
+
+```sh
+OPENAI_API_KEY=... OPENAI_MODEL=... \
+  UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz TARGET=aes llm-feedback-fuzz
+```
+
+Artifacts are written under `coverage/`:
+
+- `<target>_coverage_summary.json`: compact uncovered-line and corpus summary.
+- `<target>_llm_prompt.json`: prompt payload for offline/manual LLM review.
+- `<target>_llm_response.json`: raw model response when LLM feedback is enabled.
+- `<target>_mutation_directives.json`: validated directives consumed by LibAFL.
+
+If `OPENAI_API_KEY` is missing or the model call fails, the script keeps the fuzz
+loop moving by writing deterministic heuristic directives.

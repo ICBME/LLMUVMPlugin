@@ -1,7 +1,7 @@
 CWD=$(shell pwd)
 TARGET ?= tinyalu
 LIBAFL_MANIFEST ?= $(CWD)/Cargo.toml
-COVERAGE_FEEDBACK ?= $(CWD)/../TinyALU_reg_fuzz/coverage_feedback.py
+COVERAGE_FEEDBACK ?= $(CWD)/coverage_feedback.py
 RTL_COVERAGE ?= 0
 COVERAGE_DIR ?= $(CWD)/coverage
 COVERAGE_DAT ?= $(COVERAGE_DIR)/$(TARGET)_coverage.dat
@@ -9,12 +9,15 @@ COVERAGE_INFO ?= $(COVERAGE_DIR)/$(TARGET)_coverage.info
 COVERAGE_ANNOTATED ?= $(COVERAGE_DIR)/$(TARGET)_annotated
 COVERAGE_SUMMARY ?= $(COVERAGE_DIR)/$(TARGET)_coverage_summary.json
 LLM_PROMPT ?= $(COVERAGE_DIR)/$(TARGET)_llm_prompt.json
+LLM_RESPONSE ?= $(COVERAGE_DIR)/$(TARGET)_llm_response.json
 MUTATION_DIRECTIVES ?= $(COVERAGE_DIR)/$(TARGET)_mutation_directives.json
 FUZZ_CORPUS ?= $(COVERAGE_DIR)/$(TARGET)_corpus.jsonl
 FUZZ_DIRECTIVES ?=
 LIBAFL_ITERS ?= 256
 LIBAFL_MAX_SEEDS ?= 32
 LIBAFL_SEED ?= 1
+LLM_FEEDBACK ?= 0
+LLM_MODEL ?=
 CARGO ?= cargo
 PYTHON ?= python3
 
@@ -89,7 +92,7 @@ clean::
 	@true
 endif
 
-.PHONY: generate-corpus check check-corpus check-all coverage-run coverage-report coverage-feedback feedback-fuzz
+.PHONY: generate-corpus check check-corpus check-all coverage-run coverage-report coverage-feedback llm-coverage-feedback feedback-fuzz llm-feedback-fuzz
 
 generate-corpus:
 	mkdir -p $(dir $(FUZZ_CORPUS))
@@ -104,7 +107,7 @@ generate-corpus:
 
 check:
 	$(CARGO) test --manifest-path $(LIBAFL_MANIFEST)
-	$(PYTHON) -m py_compile validate_corpus.py py/fuzz_bfm/*.py
+	$(PYTHON) -m py_compile coverage_feedback.py validate_corpus.py py/fuzz_bfm/*.py
 	$(MAKE) TARGET=$(TARGET) LIBAFL_ITERS=8 LIBAFL_MAX_SEEDS=8 generate-corpus
 
 check-corpus:
@@ -114,12 +117,13 @@ check-corpus:
 
 check-all:
 	$(CARGO) test --manifest-path $(LIBAFL_MANIFEST)
-	$(PYTHON) -m py_compile validate_corpus.py py/fuzz_bfm/*.py
+	$(PYTHON) -m py_compile coverage_feedback.py validate_corpus.py py/fuzz_bfm/*.py
 	$(MAKE) check-corpus
 
 coverage-run:
 	mkdir -p $(COVERAGE_DIR)
 	$(MAKE) TARGET=$(TARGET) clean
+	$(RM) -r $(CWD)/sim_build
 	$(MAKE) TARGET=$(TARGET) RTL_COVERAGE=1 sim
 
 coverage-report: coverage-run
@@ -129,12 +133,22 @@ coverage-report: coverage-run
 
 coverage-feedback: coverage-report
 	$(PYTHON) $(COVERAGE_FEEDBACK) \
+		--target $(TARGET) \
 		--coverage-info $(COVERAGE_INFO) \
 		--corpus $(FUZZ_CORPUS) \
 		--summary-out $(COVERAGE_SUMMARY) \
 		--directives-out $(MUTATION_DIRECTIVES) \
-		--prompt-out $(LLM_PROMPT)
+		--prompt-out $(LLM_PROMPT) \
+		--llm-response-out $(LLM_RESPONSE) \
+		$(if $(filter 1,$(LLM_FEEDBACK)),--llm,) \
+		$(if $(LLM_MODEL),--model $(LLM_MODEL),)
+
+llm-coverage-feedback:
+	$(MAKE) TARGET=$(TARGET) LLM_FEEDBACK=1 coverage-feedback
 
 feedback-fuzz: coverage-feedback
 	$(MAKE) TARGET=$(TARGET) FUZZ_DIRECTIVES=$(MUTATION_DIRECTIVES) \
 		FUZZ_CORPUS=$(COVERAGE_DIR)/$(TARGET)_feedback_corpus.jsonl sim
+
+llm-feedback-fuzz:
+	$(MAKE) TARGET=$(TARGET) LLM_FEEDBACK=1 feedback-fuzz
