@@ -107,7 +107,7 @@ generate-corpus:
 
 check:
 	$(CARGO) test --manifest-path $(LIBAFL_MANIFEST)
-	$(PYTHON) -m py_compile coverage_feedback.py validate_corpus.py py/fuzz_bfm/*.py
+	$(PYTHON) -m py_compile coverage_feedback.py validate_corpus.py py/fuzz_bfm/*.py py/fuzz_feedback/*.py
 	$(MAKE) TARGET=$(TARGET) LIBAFL_ITERS=8 LIBAFL_MAX_SEEDS=8 generate-corpus
 
 check-corpus:
@@ -117,7 +117,7 @@ check-corpus:
 
 check-all:
 	$(CARGO) test --manifest-path $(LIBAFL_MANIFEST)
-	$(PYTHON) -m py_compile coverage_feedback.py validate_corpus.py py/fuzz_bfm/*.py
+	$(PYTHON) -m py_compile coverage_feedback.py validate_corpus.py py/fuzz_bfm/*.py py/fuzz_feedback/*.py
 	$(MAKE) check-corpus
 
 coverage-run:
@@ -135,6 +135,7 @@ coverage-feedback: coverage-report
 	$(PYTHON) $(COVERAGE_FEEDBACK) \
 		--target $(TARGET) \
 		--coverage-info $(COVERAGE_INFO) \
+		--coverage-dat $(COVERAGE_DAT) \
 		--corpus $(FUZZ_CORPUS) \
 		--summary-out $(COVERAGE_SUMMARY) \
 		--directives-out $(MUTATION_DIRECTIVES) \

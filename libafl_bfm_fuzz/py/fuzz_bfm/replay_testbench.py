@@ -8,20 +8,9 @@ from cocotb.clock import Clock
 import pyuvm
 from pyuvm import uvm_test
 
-from .aes_driver import AesDriver
 from .corpus import load_cases
-from .sha256_driver import Sha256Driver
-from .tinyalu_driver import TinyAluDriver
-
-
-def build_driver(target: str):
-    if target == "tinyalu":
-        return TinyAluDriver()
-    if target == "aes":
-        return AesDriver()
-    if target == "sha256":
-        return Sha256Driver()
-    raise ValueError(f"unsupported target {target!r}")
+from .plugin_loader import build_driver
+from .target_config import load_target_config
 
 
 @pyuvm.test()
@@ -33,13 +22,15 @@ class LibAflBfmReplayTest(uvm_test):
             cocotb.start_soon(clock.start())
 
             target = os.getenv("FUZZ_TARGET", "tinyalu")
+            config = load_target_config(target)
             corpus = Path(os.getenv("LIBAFL_CORPUS", f"coverage/{target}_corpus.jsonl"))
-            cases = load_cases(corpus, target)
-            driver = build_driver(target)
+            cases = load_cases(corpus, target, config=config)
+            driver = build_driver(config)
 
             self.logger.info(
-                "LibAFL BFM replay: target=%s corpus=%s total_cases=%d",
+                "LibAFL BFM replay: target=%s driver=%s corpus=%s total_cases=%d",
                 target,
+                config.driver,
                 corpus,
                 len(cases),
             )
@@ -58,4 +49,3 @@ class LibAflBfmReplayTest(uvm_test):
                 )
         finally:
             self.drop_objection()
-

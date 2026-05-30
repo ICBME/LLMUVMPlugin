@@ -3,3 +3,25 @@ toplevel = "aes"
 driver = "fuzz_bfm.aes_driver:AesDriver"
 bus = "secworks memory-mapped cs/we/address/write_data/read_data"
 schema = "semantic JSONL: target,key_len,encdec,key,block,origin"
+
+[[field]]
+name = "key_len"
+kind = "int"
+min = 128
+max = 256
+choices = [128, 256]
+
+[[field]]
+name = "encdec"
+kind = "enum"
+choices = ["encipher", "decipher"]
+
+[[field]]
+name = "key"
+kind = "hex"
+hex_len_by = { key_len = { "128" = 16, "256" = 32 } }
+
+[[field]]
+name = "block"
+kind = "hex"
+hex_len = 16

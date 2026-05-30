@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .target_config import FieldSpec, TargetConfig, load_target_config
+
 
 SUPPORTED_TARGETS = {"tinyalu", "aes", "sha256"}
 
@@ -16,9 +18,10 @@ class FuzzCase:
     line_no: int
 
 
-def load_cases(path: Path, target: str) -> list[FuzzCase]:
-    if target not in SUPPORTED_TARGETS:
-        raise ValueError(f"unsupported target {target!r}; expected one of {sorted(SUPPORTED_TARGETS)}")
+def load_cases(path: Path, target: str, config: TargetConfig | None = None) -> list[FuzzCase]:
+    config = config or _try_load_config(target)
+    if config is None and target not in SUPPORTED_TARGETS:
+        raise ValueError(f"unsupported target {target!r}; provide a target config or use one of {sorted(SUPPORTED_TARGETS)}")
     if not path.exists():
         raise FileNotFoundError(f"LibAFL corpus {path} does not exist. Run generate-corpus first.")
 
@@ -30,7 +33,7 @@ def load_cases(path: Path, target: str) -> list[FuzzCase]:
         case_target = str(data.get("target", "tinyalu"))
         if case_target != target:
             raise ValueError(f"{path}:{line_no}: expected target {target!r}, got {case_target!r}")
-        validate_case(path, line_no, case_target, data)
+        validate_case(path, line_no, case_target, data, config=config)
         cases.append(FuzzCase(target=case_target, data=data, line_no=line_no))
 
     if not cases:
@@ -38,8 +41,16 @@ def load_cases(path: Path, target: str) -> list[FuzzCase]:
     return cases
 
 
-def validate_case(path: Path, line_no: int, target: str, data: dict[str, Any]) -> None:
-    if target == "tinyalu":
+def validate_case(
+    path: Path,
+    line_no: int,
+    target: str,
+    data: dict[str, Any],
+    config: TargetConfig | None = None,
+) -> None:
+    if config is not None and config.fields:
+        _validate_config_fields(path, line_no, data, config.fields)
+    elif target == "tinyalu":
         _validate_int(path, line_no, data, "a", 0, 0xFF)
         _validate_int(path, line_no, data, "b", 0, 0xFF)
         _validate_int(path, line_no, data, "op", 1, 4)
@@ -108,3 +119,36 @@ def _validate_hex(
         raise ValueError(f"{path}:{line_no}: {key} must be {expected_len} bytes")
     return raw
 
+
+def _validate_config_fields(
+    path: Path,
+    line_no: int,
+    data: dict[str, Any],
+    fields: tuple[FieldSpec, ...],
+) -> None:
+    for field in fields:
+        if field.kind == "int":
+            minimum = field.minimum if field.minimum is not None else -(2**63)
+            maximum = field.maximum if field.maximum is not None else 2**63 - 1
+            value = _validate_int(path, line_no, data, field.name, minimum, maximum)
+            if field.choices and value not in {int(choice) for choice in field.choices}:
+                raise ValueError(f"{path}:{line_no}: {field.name} must be one of {field.choices}")
+        elif field.kind == "enum":
+            if data.get(field.name) not in set(field.choices):
+                raise ValueError(f"{path}:{line_no}: {field.name} must be one of {field.choices}")
+        elif field.kind == "hex":
+            expected_len = field.hex_len
+            if field.hex_len_by:
+                selector_name, selector_map = next(iter(field.hex_len_by.items()))
+                expected_len = int(selector_map[str(data[selector_name])])
+            _validate_hex(path, line_no, data, field.name, expected_len)
+        else:
+            if field.name not in data:
+                raise ValueError(f"{path}:{line_no}: missing required field {field.name}")
+
+
+def _try_load_config(target: str) -> TargetConfig | None:
+    try:
+        return load_target_config(target)
+    except (FileNotFoundError, RuntimeError, ValueError):
+        return None

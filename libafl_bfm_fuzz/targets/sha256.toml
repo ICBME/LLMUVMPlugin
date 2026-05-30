@@ -3,3 +3,12 @@ toplevel = "sha256"
 driver = "fuzz_bfm.sha256_driver:Sha256Driver"
 bus = "secworks memory-mapped cs/we/address/write_data/read_data"
 schema = "semantic JSONL: target,mode,message,origin"
+
+[[field]]
+name = "mode"
+kind = "enum"
+choices = ["sha224", "sha256"]
+
+[[field]]
+name = "message"
+kind = "hex"
