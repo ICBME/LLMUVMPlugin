@@ -1,0 +1,4 @@
+name = "tinyalu"
+toplevel = "tinyalu"
+driver = "fuzz_bfm.tinyalu_driver:TinyAluDriver"
+schema = "semantic JSONL: target,a,b,op,origin"

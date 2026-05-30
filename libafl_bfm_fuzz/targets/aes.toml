@@ -1,0 +1,5 @@
+name = "aes"
+toplevel = "aes"
+driver = "fuzz_bfm.aes_driver:AesDriver"
+bus = "secworks memory-mapped cs/we/address/write_data/read_data"
+schema = "semantic JSONL: target,key_len,encdec,key,block,origin"

@@ -1,0 +1,5 @@
+name = "sha256"
+toplevel = "sha256"
+driver = "fuzz_bfm.sha256_driver:Sha256Driver"
+bus = "secworks memory-mapped cs/we/address/write_data/read_data"
+schema = "semantic JSONL: target,mode,message,origin"

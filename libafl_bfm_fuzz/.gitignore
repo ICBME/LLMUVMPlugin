@@ -1,0 +1,10 @@
+/target
+/coverage
+/crashes
+/sim_build
+/results.xml
+__pycache__/
+py/fuzz_bfm/__pycache__/
+*.vcd
+*.fst
+*.log
