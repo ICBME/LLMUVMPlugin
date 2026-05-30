@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .rtl_structure_coverage import build_rtl_structure_coverage
+from fuzz_uvm.functional_coverage import build_functional_coverage_from_jsonl
 
 
 OP_NAMES = {1: "ADD", 2: "AND", 3: "XOR", 4: "MUL"}
@@ -121,5 +122,6 @@ def build_summary(
             coverage_info=coverage_info,
             coverage_dat=coverage_dat,
         ),
+        "uvm_functional_coverage": build_functional_coverage_from_jsonl(corpus, target),
         "stimulus_summary": parse_corpus(corpus, target),
     }

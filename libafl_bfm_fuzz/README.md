@@ -17,6 +17,9 @@ corpus-generation and BFM-replay framework.
 - `py/fuzz_bfm/mem_bus_bfm.py` drives secworks-style memory-mapped wrappers.
 - `py/fuzz_bfm/aes_driver.py` and `py/fuzz_bfm/sha256_driver.py` adapt AES/SHA256
   semantic cases onto that memory-mapped BFM.
+- `py/fuzz_uvm/` contains the reusable pyUVM replay environment: sequence item,
+  corpus replay sequence, sequencer/driver wiring, scoreboard, and functional
+  coverage subscriber.
 - `py/fuzz_feedback/` contains coverage parsing, heuristic advisors, optional
   LLM calls, directive validation, and the CLI used by `coverage_feedback.py`.
 - `py/fuzz_feedback/rtl_structure_coverage.py` defines RTL structural coverage
@@ -25,6 +28,12 @@ corpus-generation and BFM-replay framework.
 The replay path no longer hardcodes `tinyalu/aes/sha256` driver classes in the
 testbench. Adding a DUT now starts with a new target manifest and driver plugin;
 the cocotb entry point stays unchanged.
+
+The cocotb entry point is now a thin compatibility wrapper over the generic
+`fuzz_uvm` environment. Existing target drivers still implement the simple
+`reset()`/`execute(case)` protocol, while the UVM layer provides reusable
+sequence, driver, scoreboard, and functional coverage structure for future
+multi-step sequences and LLM-generated directives.
 
 ## Generate corpora
 
@@ -83,7 +92,10 @@ Artifacts are written under `coverage/`:
 - `<target>_coverage_summary.json`: compact uncovered-line and corpus summary.
   It includes `rtl_structure_coverage` with line, branch, expression, toggle,
   FSM, and user coverage slots. The kinds present depend on what Verilator
-  emitted for the DUT.
+  emitted for the DUT. It also includes `uvm_functional_coverage`, a semantic
+  bin/cross summary derived from the replay corpus.
+- `<target>_uvm_functional_coverage.json`: functional coverage observed by the
+  generic pyUVM replay subscriber during simulation.
 - `<target>_llm_prompt.json`: prompt payload for offline/manual LLM review.
 - `<target>_llm_response.json`: raw model response when LLM feedback is enabled.
 - `<target>_mutation_directives.json`: validated directives consumed by LibAFL.
@@ -108,3 +120,7 @@ choices = ["encipher", "decipher"]
 
 Supported field validators are `int`, `enum`, and `hex`; `hex` fields may use
 `hex_len` or `hex_len_by` to express fixed and selector-dependent byte lengths.
+Manifests may also reserve optional plugin hooks such as `oracle`, `monitor`,
+`coverage_model`, and `sequence_schema`; these are loaded into `TargetConfig`
+for future LLM-driven sequence compilation without changing the replay entry
+point.

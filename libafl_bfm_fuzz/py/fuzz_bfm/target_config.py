@@ -33,6 +33,10 @@ class TargetConfig:
     toplevel: str | None = None
     bfm_ir: Path | None = None
     coverage_hints: str | None = None
+    oracle: str | None = None
+    monitor: str | None = None
+    coverage_model: str | None = None
+    sequence_schema: str | None = None
     fields: tuple[FieldSpec, ...] = ()
 
 
@@ -55,6 +59,10 @@ def load_target_config(target: str, targets_dir: Path | None = None) -> TargetCo
         toplevel=str(data["toplevel"]) if "toplevel" in data else None,
         bfm_ir=(path.parent / str(bfm_ir)).resolve() if bfm_ir else None,
         coverage_hints=str(data["coverage_hints"]) if "coverage_hints" in data else None,
+        oracle=str(data["oracle"]) if "oracle" in data else None,
+        monitor=str(data["monitor"]) if "monitor" in data else None,
+        coverage_model=str(data["coverage_model"]) if "coverage_model" in data else None,
+        sequence_schema=str(data["sequence_schema"]) if "sequence_schema" in data else None,
         fields=tuple(_field_from_dict(item) for item in data.get("field", ())),
     )
 
