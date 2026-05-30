@@ -1,0 +1,8 @@
+/target/
+/coverage/
+/crashes/
+/sim_build/
+/results.xml
+*.vcd
+*.fst
+*.log
