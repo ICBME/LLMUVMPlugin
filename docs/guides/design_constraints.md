@@ -27,10 +27,15 @@
 
 ## LLM 约束
 
-- LLM 只能生成 mutation directives。
-- LLM 输出必须经过 directive validation 和 schema decode。
-- LLM 不应绕过 target manifest。
-- Prompt 中可以包含 coverage summary，但不应要求框架核心理解目标协议。
+- 覆盖反馈路径中，LLM 只能生成 mutation directives。
+- ref model / scoreboard 生成路径中，LLM 只能生成 candidate artifact，不得直接更新
+  final artifact 或 replay core。
+- LLM 输出必须经过对应验证：directive validation、schema decode、静态检查、插件契约
+  检查和必要的 golden case 检查。
+- LLM 不应绕过 target manifest；最终接入仍通过 `bfm_ir`、`ref_model`、`scoreboard`
+  等 manifest 字段完成。
+- Prompt 中可以包含 coverage summary、IR、manifest 和 spec，但不应要求框架核心理解
+  目标协议。
 
 ## 插件约束
 
@@ -47,3 +52,5 @@
 3. Sequence plugin：支持多阶段初始化、burst 和 stateful replay。
 4. Mutator schema：支持字段权重、边界值、交叉约束和依赖关系。
 5. Coverage schema：用 manifest 声明通用 coverpoint/cross。
+6. DSL codegen：在直接生成 Python 难以稳定时，将 ref model / scoreboard 语义收敛到
+   可验证 DSL。

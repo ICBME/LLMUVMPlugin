@@ -7,12 +7,13 @@
 
 1. [总体架构](architecture/overview.md)
 2. [IR 与运行时架构](architecture/ir_runtime.md)
-3. [Fuzz/Replay 架构](architecture/fuzz_replay.md)
-4. [Target Manifest 参考](reference/target_manifest.md)
-5. [插件契约](reference/plugin_contracts.md)
-6. [Corpus 与 Mutation Directives](reference/corpus_directives.md)
-7. [接入新 DUT 指南](guides/add_new_dut.md)
-8. [设计约束](guides/design_constraints.md)
+3. [LLM Plugin Codegen 架构](architecture/llm_plugin_codegen.md)
+4. [Fuzz/Replay 架构](architecture/fuzz_replay.md)
+5. [Target Manifest 参考](reference/target_manifest.md)
+6. [插件契约](reference/plugin_contracts.md)
+7. [Corpus 与 Mutation Directives](reference/corpus_directives.md)
+8. [接入新 DUT 指南](guides/add_new_dut.md)
+9. [设计约束](guides/design_constraints.md)
 
 ## 文档层次
 
@@ -37,3 +38,5 @@
 - DUT 专用协议、reference model、scoreboard 和 coverage model 均通过插件接入。
 - Manifest 是 Rust corpus generator 和 Python replay/validation 之间的共享契约。
 - IR 只描述语义名到 HDL path 的映射，不表达协议行为。
+- LLM 生成的 ref model / scoreboard 先作为 candidate artifact，经验证后才能提升为
+  manifest 指向的 final artifact。

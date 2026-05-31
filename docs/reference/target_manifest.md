@@ -56,6 +56,20 @@ hex_len = 16
 - `bfm_ir`：指向 `rtlagent_bfm` IR 文件。
 - `sequence_schema`：保留给 sequence plugin/schema 扩展。
 
+## LLM 生成产物接入
+
+第一版无 DSL codegen 流程中，LLM 生成的 ref model / scoreboard 先写入
+candidate 目录。验证通过后，工具会将候选产物提升到 final 目录，并更新 manifest：
+
+```toml
+bfm_ir = "generated/final/my_dut_ir.json"
+ref_model = "generated.my_dut_ref_model:MyRefModel"
+scoreboard = "generated.my_dut_scoreboard:MyScoreboard"
+```
+
+这些字段与手写 plugin 使用同一加载路径。未验证的 candidate artifact 不应被 manifest
+引用。
+
 ## Field Schema
 
 `int`

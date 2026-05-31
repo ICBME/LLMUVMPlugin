@@ -1,0 +1,198 @@
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+from rtlagent_bfm.codegen.artifacts import ArtifactBundle, ArtifactBundleError
+from rtlagent_bfm.codegen.manifest import update_manifest_text
+from rtlagent_bfm.codegen.pipeline import CodegenPipelineConfig, finalize_bundle
+from rtlagent_bfm.codegen.prompt import build_generation_prompt
+from rtlagent_bfm.codegen.validation import (
+    ArtifactValidationError,
+    GoldenCase,
+    validate_artifact_dir,
+)
+
+
+MINIMAL_IR = {
+    "design": {"top": "demo_top"},
+    "interfaces": {
+        "control": {
+            "protocol": "demo",
+            "clock": "clk",
+            "reset": "rst",
+            "signals": {"req": "req"},
+        }
+    },
+    "bindings": {
+        "clk": {"role": "clock", "hdl_path": "clk"},
+        "rst": {"role": "reset", "hdl_path": "rst_n", "active": "low"},
+        "req": {"role": "control.req", "hdl_path": "req_i", "width": 1},
+    },
+}
+
+
+class TestCodegenPipeline(unittest.TestCase):
+    def test_artifact_bundle_rejects_path_escape(self):
+        with self.assertRaisesRegex(ArtifactBundleError, "escape"):
+            ArtifactBundle.from_dict(
+                {
+                    "files": [
+                        {
+                            "path": "../generated/ref_model.py",
+                            "content": "class RefModel: pass\n",
+                        }
+                    ]
+                }
+            )
+
+    def test_static_validation_rejects_process_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp)
+            plugin = artifact_dir / "bad.py"
+            plugin.write_text("import subprocess\nsubprocess.run(['true'])\n")
+
+            with self.assertRaisesRegex(ArtifactValidationError, "subprocess"):
+                validate_artifact_dir(artifact_dir, target="demo")
+
+    def test_finalize_bundle_validates_promotes_and_updates_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "demo.toml"
+            manifest.write_text(
+                "\n".join(
+                    [
+                        'name = "demo"',
+                        'driver = "demo_driver:Driver"',
+                        "",
+                        "[[field]]",
+                        'name = "op"',
+                        'kind = "enum"',
+                        'choices = ["read", "write"]',
+                    ]
+                )
+                + "\n"
+            )
+            bundle_path = root / "llm_bundle.json"
+            bundle_path.write_text(json.dumps(_valid_bundle()))
+
+            copied = finalize_bundle(
+                CodegenPipelineConfig(
+                    bundle_path=bundle_path,
+                    candidate_dir=root / "candidates" / "run_001",
+                    final_dir=root / "final",
+                    target="demo",
+                    ref_model="generated.ref_model:DemoRefModel",
+                    scoreboard="generated.scoreboard:DemoScoreboard",
+                    manifest_path=manifest,
+                    bfm_ir="generated/final/demo_ir.json",
+                    golden_cases=(
+                        GoldenCase(
+                            target="demo",
+                            data={"target": "demo", "op": "write", "value": 7},
+                            expected="write:7",
+                        ),
+                    ),
+                )
+            )
+
+            self.assertEqual(len(copied), 3)
+            self.assertTrue((root / "final" / "generated" / "ref_model.py").exists())
+            manifest_text = manifest.read_text()
+            self.assertIn('bfm_ir = "generated/final/demo_ir.json"', manifest_text)
+            self.assertIn('ref_model = "generated.ref_model:DemoRefModel"', manifest_text)
+            self.assertIn('scoreboard = "generated.scoreboard:DemoScoreboard"', manifest_text)
+
+    def test_generation_prompt_includes_validated_ir_and_specs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "demo.toml"
+            ir_path = root / "demo_ir.json"
+            spec_path = root / "spec.md"
+            contracts = root / "plugin_contracts.md"
+            manifest.write_text('name = "demo"\ndriver = "demo_driver:Driver"\n')
+            ir_path.write_text(json.dumps(MINIMAL_IR))
+            spec_path.write_text("# Demo spec\nwrite returns op:value\n")
+            contracts.write_text("Reference model and scoreboard plugin contracts.\n")
+
+            prompt = build_generation_prompt(
+                manifest_path=manifest,
+                ir_path=ir_path,
+                spec_paths=[spec_path],
+                plugin_contracts_path=contracts,
+            )
+
+            self.assertEqual(prompt["workflow"], "ir_then_direct_plugin_candidate")
+            self.assertIn("Demo spec", prompt["inputs"]["specs"][0]["content"])
+            self.assertIn("demo_ir.json", prompt["inputs"]["bfm_ir"]["path"])
+
+    def test_manifest_update_replaces_existing_top_level_keys(self):
+        updated = update_manifest_text(
+            "\n".join(
+                [
+                    'name = "demo"',
+                    'ref_model = "old:Ref"',
+                    "",
+                    "[signals]",
+                    'ref_model = "not_top_level"',
+                ]
+            )
+            + "\n",
+            {
+                "ref_model": "new:Ref",
+                "scoreboard": "new:Scoreboard",
+            },
+        )
+
+        self.assertIn('ref_model = "new:Ref"', updated)
+        self.assertIn('scoreboard = "new:Scoreboard"', updated)
+        self.assertIn('ref_model = "not_top_level"', updated)
+
+
+def _valid_bundle():
+    return {
+        "files": [
+            {"path": "generated/__init__.py", "content": ""},
+            {
+                "path": "generated/ref_model.py",
+                "content": "\n".join(
+                    [
+                        "class DemoRefModel:",
+                        "    def __init__(self, target=None, config=None):",
+                        "        self.target = target",
+                        "",
+                        "    def predict(self, case):",
+                        "        return {'expected': f\"{case.data['op']}:{case.data['value']}\"}",
+                        "",
+                    ]
+                ),
+            },
+            {
+                "path": "generated/scoreboard.py",
+                "content": "\n".join(
+                    [
+                        "class DemoScoreboard:",
+                        "    def __init__(self, target=None, config=None):",
+                        "        self.target = target",
+                        "        self.records = []",
+                        "",
+                        "    def write(self, record):",
+                        "        self.records.append(record)",
+                        "",
+                        "    def check(self):",
+                        "        return None",
+                        "",
+                        "    def summary(self):",
+                        "        return {'target': self.target, 'checked': len(self.records), 'failures': 0}",
+                        "",
+                    ]
+                ),
+            },
+        ],
+        "assumptions": ["demo reference behavior"],
+        "required_tests": ["write golden case"],
+    }
+
+
+if __name__ == "__main__":
+    unittest.main()

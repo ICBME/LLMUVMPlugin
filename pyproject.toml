@@ -7,3 +7,6 @@ dependencies = [
     "hypothesis>=6.155.0",
     "pyuvm>=4.0.1",
 ]
+
+[project.scripts]
+rtlagent-codegen = "rtlagent_bfm.codegen.cli:main"

@@ -51,6 +51,16 @@ async def execute(self, case) -> ReplayResult:
 如果没有 expected，但只想 smoke replay，请使用自定义 scoreboard，默认 scoreboard
 会要求 expected 存在。
 
+也可以使用第一版无 DSL LLM codegen 生成 ref model / scoreboard 初版：
+
+1. 使用已生成 IR、manifest 和 spec 生成 LLM prompt。
+2. 将 LLM 返回的 file bundle 写入 candidate 目录。
+3. 运行静态、插件契约和 golden case 验证。
+4. 验证通过后提升到 final 目录，并更新 manifest 中的 `bfm_ir`、`ref_model` 和
+   `scoreboard`。
+
+详见 [LLM Plugin Codegen 架构](../architecture/llm_plugin_codegen.md)。
+
 ## 5. 编写 Target Manifest
 
 最小结构：

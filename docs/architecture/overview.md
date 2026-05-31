@@ -11,6 +11,12 @@ source bundle / RTL / docs / registers
        agent-generated IR
               |
               v
+   LLM candidate plugin artifacts
+              |
+              v
+  validation + final artifact promotion
+              |
+              v
     rtlagent_bfm runtime layer
               |
               v
@@ -26,6 +32,8 @@ source bundle / RTL / docs / registers
 系统分为两条主线：
 
 - `rtlagent_bfm`：提供 IR、HDL path resolver 和生成 BFM 的运行时访问层。
+- `rtlagent_bfm.codegen`：提供第一版无 DSL 的 LLM plugin candidate 写入、
+  校验、提升和 manifest 接入工具。
 - `libafl_bfm_fuzz`：提供 corpus generation、JSONL validation、pyUVM replay、
   scoreboard/ref-model hook、functional coverage 和 coverage feedback。
 
@@ -83,6 +91,8 @@ JSONL corpus ----------------------> pyUVM sequence
 
 - Manifest 描述 case schema 和插件位置。
 - IR 描述语义信号与 HDL path 的绑定。
+- LLM 生成的 ref model / scoreboard 必须先通过 candidate validation，再作为
+  final plugin 由 manifest 接入。
 - Rust generator 只理解 manifest field schema，不理解 DUT 语义。
 - pyUVM replay 只理解 `reset()` / `execute(case)` driver 协议。
 - coverage feedback 只能产生符合 schema 的 directives。
