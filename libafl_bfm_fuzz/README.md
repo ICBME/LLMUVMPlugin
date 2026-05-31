@@ -4,6 +4,10 @@ This directory contains the reusable LibAFL corpus-generation and pyUVM replay
 framework. Target-specific DUT behavior lives outside the framework as explicit
 plugins selected by a target manifest.
 
+Detailed architecture, module boundaries, plugin contracts, and design
+constraints are documented in
+[`../docs/README.md`](../docs/README.md).
+
 ## Shape
 
 - `src/main.rs` is the binary entry point.
