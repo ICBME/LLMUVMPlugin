@@ -17,9 +17,11 @@ corpus-generation and BFM-replay framework.
 - `py/fuzz_bfm/mem_bus_bfm.py` drives secworks-style memory-mapped wrappers.
 - `py/fuzz_bfm/aes_driver.py` and `py/fuzz_bfm/sha256_driver.py` adapt AES/SHA256
   semantic cases onto that memory-mapped BFM.
-- `py/fuzz_uvm/` contains the reusable pyUVM replay environment: sequence item,
-  corpus replay sequence, sequencer/driver wiring, scoreboard, and functional
-  coverage subscriber.
+- `py/fuzz_uvm/` contains the reusable pyUVM replay layers:
+  `context.py` loads target/corpus configuration, `transactions.py` defines
+  replay records and sequence items, `sequences.py` turns corpus cases into UVM
+  traffic, `components.py` owns driver/scoreboard/coverage components, `env.py`
+  wires the reusable environment, and `replay.py` remains the thin test entry.
 - `py/fuzz_feedback/` contains coverage parsing, heuristic advisors, optional
   LLM calls, directive validation, and the CLI used by `coverage_feedback.py`.
 - `py/fuzz_feedback/rtl_structure_coverage.py` defines RTL structural coverage
