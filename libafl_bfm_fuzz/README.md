@@ -8,7 +8,8 @@ corpus-generation and BFM-replay framework.
 - `src/main.rs` is only the binary entry point; `src/app.rs` owns the current
   LibAFL corpus generator.
 - `targets/*.toml` declares target metadata, clock/signal mapping, corpus field
-  validation, and Python driver/coverage plugins for each DUT.
+  validation, and Python driver/ref-model/scoreboard/coverage plugins for each
+  DUT.
 - `py/fuzz_bfm/corpus.py` validates the shared JSONL schema.
 - `py/fuzz_bfm/target_config.py` loads target manifests.
 - `py/fuzz_bfm/plugin_loader.py` dynamically loads manifest plugins.
@@ -21,8 +22,9 @@ corpus-generation and BFM-replay framework.
 - `py/fuzz_uvm/` contains the reusable pyUVM replay layers:
   `context.py` loads target/corpus configuration, `transactions.py` defines
   replay records and sequence items, `sequences.py` turns corpus cases into UVM
-  traffic, `components.py` owns driver/scoreboard/coverage components, `env.py`
-  wires the reusable environment, and `replay.py` remains the thin test entry.
+  traffic, `ref_models.py` and `scoreboards.py` define plugin contracts,
+  `components.py` owns driver/scoreboard/coverage components, `env.py` wires the
+  reusable environment, and `replay.py` remains the thin test entry.
 - `py/fuzz_feedback/` contains coverage parsing, heuristic advisors, optional
   LLM calls, directive validation, and the CLI used by `coverage_feedback.py`.
 - `py/fuzz_feedback/rtl_structure_coverage.py` defines RTL structural coverage
@@ -30,14 +32,15 @@ corpus-generation and BFM-replay framework.
 
 The replay path no longer hardcodes `tinyalu/aes/sha256` driver or coverage
 classes in the testbench. Adding a DUT now starts with a target manifest, a
-driver plugin, and optionally a functional coverage plugin; the cocotb entry
-point stays unchanged.
+driver plugin, and optionally ref-model, scoreboard, and functional coverage
+plugins; the cocotb entry point stays unchanged.
 
 The cocotb entry point is now a thin compatibility wrapper over the generic
 `fuzz_uvm` environment. Existing target drivers still implement the simple
 `reset()`/`execute(case)` protocol, while the UVM layer provides reusable
-sequence, driver, scoreboard, clocking, and functional coverage structure for
-future multi-step sequences and LLM-generated directives.
+sequence, driver, ref-model prediction, scoreboard comparison, clocking, and
+functional coverage structure for future multi-step sequences and LLM-generated
+directives.
 
 ## Generate corpora
 
@@ -60,8 +63,9 @@ UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz TARGET=sha256 sim
 ```
 
 TinyALU is the first smoke-test target because it reuses the existing project
-BFM. AES and SHA256 use the shared memory-mapped BFM and compare against Python
-oracles.
+BFM. AES and SHA256 use the shared memory-mapped BFM; expected values are
+provided by manifest-selected ref-model plugins and checked by the scoreboard
+plugin.
 
 ## Validate framework pieces
 
@@ -126,6 +130,8 @@ toplevel = "aes"
 clock = "clk"
 clock_period_ns = 1.0
 driver = "fuzz_bfm.aes_driver:AesDriver"
+ref_model = "fuzz_uvm.llm_ref_models:AesRefModel"
+scoreboard = "fuzz_uvm.scoreboards:ResultScoreboard"
 coverage_model = "fuzz_uvm.functional_coverage:AesCoverageModel"
 
 [signals]
@@ -146,7 +152,9 @@ choices = ["encipher", "decipher"]
 Supported field validators are `int`, `enum`, and `hex`; `hex` fields may use
 `hex_len` or `hex_len_by` to express fixed and selector-dependent byte lengths.
 `clock`, `clock_period_ns`, and `[signals]` keep DUT naming out of the reusable
-UVM test. Manifests may also reserve optional plugin hooks such as `oracle`,
-`monitor`, `coverage_model`, and `sequence_schema`; these are loaded into
-`TargetConfig` for future LLM-driven sequence compilation without changing the
-replay entry point.
+UVM test. `ref_model` and `scoreboard` are the main hooks for LLM-generated
+verification components: drivers can return actual DUT results, ref models fill
+expected values, and scoreboards own the pass/fail decision. Manifests may also
+reserve optional plugin hooks such as `oracle`, `monitor`, `coverage_model`, and
+`sequence_schema`; these are loaded into `TargetConfig` for future LLM-driven
+sequence compilation without changing the replay entry point.

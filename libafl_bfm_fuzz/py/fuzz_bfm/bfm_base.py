@@ -9,8 +9,8 @@ from .corpus import FuzzCase
 @dataclass(frozen=True)
 class ReplayResult:
     actual: str
-    expected: str
-    detail: str
+    expected: str | None = None
+    detail: str = ""
 
 
 class TargetDriver(Protocol):
@@ -19,4 +19,3 @@ class TargetDriver(Protocol):
 
     async def execute(self, case: FuzzCase) -> ReplayResult:
         ...
-
