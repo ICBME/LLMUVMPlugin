@@ -1,5 +1,6 @@
 CWD=$(shell pwd)
-TARGET ?= tinyalu
+TARGET ?= dut
+TARGET_CONFIG ?=
 LIBAFL_MANIFEST ?= $(CWD)/Cargo.toml
 COVERAGE_FEEDBACK ?= $(CWD)/coverage_feedback.py
 RTL_COVERAGE ?= 0
@@ -16,54 +17,27 @@ FUZZ_DIRECTIVES ?=
 LIBAFL_ITERS ?= 256
 LIBAFL_MAX_SEEDS ?= 32
 LIBAFL_SEED ?= 1
-UVM_SMOKE_ITERS ?= 8
-UVM_SMOKE_MAX_SEEDS ?= 8
 LLM_FEEDBACK ?= 0
 LLM_MODEL ?=
 CARGO ?= cargo
 PYTHON ?= python3
-
-TINYA_REG_DIR ?= $(abspath $(CWD)/../pyuvm/examples/TinyALU_reg)
-TINYA_TINYALU_SV ?= $(TINYA_REG_DIR)/hdl/verilog/tinyalu.sv
-TINYA_REG_SV ?= $(TINYA_REG_DIR)/hdl/verilog/TinyALUreg.sv
-AES_DIR ?= $(abspath $(CWD)/../example/aes)
-SHA256_DIR ?= $(abspath $(CWD)/../example/sha256)
+EXTRA_PYTHONPATH ?=
 
 export COCOTB_REDUCED_LOG_FMT = 1
-export PYTHONPATH := $(CWD)/py:$(TINYA_REG_DIR):$(AES_DIR)/src/model/python:$(SHA256_DIR)/src/model:$(PYTHONPATH)
+export PYTHONPATH := $(CWD)/py:$(EXTRA_PYTHONPATH):$(PYTHONPATH)
 export LIBAFL_CORPUS := $(FUZZ_CORPUS)
 export FUZZ_TARGET := $(TARGET)
+ifneq ($(strip $(TARGET_CONFIG)),)
+export FUZZ_TARGET_CONFIG := $(TARGET_CONFIG)
+endif
 
 SIM ?= verilator
 TOPLEVEL_LANG ?= verilog
+TOPLEVEL ?= $(TARGET)
+VERILOG_SOURCES ?=
 SIM_BUILD ?= sim_build/$(TARGET)
 CCACHE_DISABLE ?= 1
 export CCACHE_DISABLE
-
-ifeq ($(TARGET),tinyalu)
-TOPLEVEL = tinyalu
-VERILOG_SOURCES = $(TINYA_TINYALU_SV) $(TINYA_REG_SV)
-else ifeq ($(TARGET),aes)
-TOPLEVEL = aes
-VERILOG_SOURCES = \
-	$(AES_DIR)/src/rtl/aes_core.v \
-	$(AES_DIR)/src/rtl/aes.v \
-	$(AES_DIR)/src/rtl/aes_key_mem.v \
-	$(AES_DIR)/src/rtl/aes_encipher_block.v \
-	$(AES_DIR)/src/rtl/aes_inv_sbox.v \
-	$(AES_DIR)/src/rtl/aes_sbox.v \
-	$(AES_DIR)/src/rtl/aes_decipher_block.v
-EXTRA_ARGS += -Wno-UNOPTFLAT
-else ifeq ($(TARGET),sha256)
-TOPLEVEL = sha256
-VERILOG_SOURCES = \
-	$(SHA256_DIR)/src/rtl/sha256.v \
-	$(SHA256_DIR)/src/rtl/sha256_core.v \
-	$(SHA256_DIR)/src/rtl/sha256_k_constants.v \
-	$(SHA256_DIR)/src/rtl/sha256_w_mem.v
-else
-$(error TARGET must be one of tinyalu, aes, sha256; got $(TARGET))
-endif
 
 ifeq ($(SIM), verilator)
 COMPILE_ARGS += --timing
@@ -82,10 +56,12 @@ GHDL_ARGS := --ieee=synopsys
 COCOTB_HDL_TIMEUNIT = 1ns
 COCOTB_HDL_TIMEPRECISION = 1ps
 
+.PHONY: generate-corpus check check-corpus check-uvm check-all coverage-run coverage-report coverage-feedback llm-coverage-feedback feedback-fuzz llm-feedback-fuzz require-target-config require-rtl
+
 COCOTB_MAKEFILES := $(shell cocotb-config --makefiles 2>/dev/null)
 ifneq ($(COCOTB_MAKEFILES),)
 include $(COCOTB_MAKEFILES)/Makefile.sim
-sim: generate-corpus
+sim: require-rtl generate-corpus
 else
 sim:
 	@echo "cocotb-config was not found; run this target inside the pyuvm/cocotb environment." >&2
@@ -94,12 +70,23 @@ clean::
 	@true
 endif
 
-.PHONY: generate-corpus check check-corpus check-uvm check-all coverage-run coverage-report coverage-feedback llm-coverage-feedback feedback-fuzz llm-feedback-fuzz
+require-target-config:
+	@if [ -z "$(TARGET_CONFIG)" ] && [ ! -f "$(CWD)/targets/$(TARGET).toml" ]; then \
+		echo "Set TARGET_CONFIG=/path/to/target.toml or provide targets/$(TARGET).toml." >&2; \
+		false; \
+	fi
 
-generate-corpus:
+require-rtl:
+	@if [ -z "$(strip $(VERILOG_SOURCES))" ]; then \
+		echo "Set VERILOG_SOURCES and TOPLEVEL for the DUT replay simulation." >&2; \
+		false; \
+	fi
+
+generate-corpus: require-target-config
 	mkdir -p $(dir $(FUZZ_CORPUS))
 	$(CARGO) run --quiet --manifest-path $(LIBAFL_MANIFEST) -- \
 		--target $(TARGET) \
+		$(if $(TARGET_CONFIG),--target-config $(TARGET_CONFIG),) \
 		--corpus-out $(FUZZ_CORPUS) \
 		--iters $(LIBAFL_ITERS) \
 		--max-seeds $(LIBAFL_MAX_SEEDS) \
@@ -110,28 +97,18 @@ generate-corpus:
 check:
 	$(CARGO) test --manifest-path $(LIBAFL_MANIFEST)
 	$(PYTHON) -m py_compile coverage_feedback.py validate_corpus.py py/fuzz_bfm/*.py py/fuzz_feedback/*.py py/fuzz_uvm/*.py
-	$(MAKE) TARGET=$(TARGET) LIBAFL_ITERS=8 LIBAFL_MAX_SEEDS=8 generate-corpus
 
-check-corpus:
-	$(MAKE) TARGET=tinyalu LIBAFL_ITERS=8 LIBAFL_MAX_SEEDS=8 generate-corpus
-	$(MAKE) TARGET=aes LIBAFL_ITERS=8 LIBAFL_MAX_SEEDS=8 generate-corpus
-	$(MAKE) TARGET=sha256 LIBAFL_ITERS=8 LIBAFL_MAX_SEEDS=8 generate-corpus
+check-corpus: generate-corpus
 
-check-uvm:
-	$(MAKE) TARGET=tinyalu SIM_BUILD=sim_build/tinyalu LIBAFL_ITERS=$(UVM_SMOKE_ITERS) LIBAFL_MAX_SEEDS=$(UVM_SMOKE_MAX_SEEDS) sim
-	$(MAKE) TARGET=aes SIM_BUILD=sim_build/aes LIBAFL_ITERS=$(UVM_SMOKE_ITERS) LIBAFL_MAX_SEEDS=$(UVM_SMOKE_MAX_SEEDS) sim
-	$(MAKE) TARGET=sha256 SIM_BUILD=sim_build/sha256 LIBAFL_ITERS=$(UVM_SMOKE_ITERS) LIBAFL_MAX_SEEDS=$(UVM_SMOKE_MAX_SEEDS) sim
+check-uvm: sim
 
-check-all:
-	$(CARGO) test --manifest-path $(LIBAFL_MANIFEST)
-	$(PYTHON) -m py_compile coverage_feedback.py validate_corpus.py py/fuzz_bfm/*.py py/fuzz_feedback/*.py py/fuzz_uvm/*.py
-	$(MAKE) check-corpus
+check-all: check
 
-coverage-run:
+coverage-run: require-rtl
 	mkdir -p $(COVERAGE_DIR)
-	$(MAKE) TARGET=$(TARGET) clean
+	$(MAKE) TARGET=$(TARGET) TARGET_CONFIG="$(TARGET_CONFIG)" clean
 	$(RM) -r $(CWD)/sim_build
-	$(MAKE) TARGET=$(TARGET) RTL_COVERAGE=1 sim
+	$(MAKE) TARGET=$(TARGET) TARGET_CONFIG="$(TARGET_CONFIG)" RTL_COVERAGE=1 VERILOG_SOURCES="$(VERILOG_SOURCES)" TOPLEVEL="$(TOPLEVEL)" sim
 
 coverage-report: coverage-run
 	mkdir -p $(COVERAGE_ANNOTATED)
@@ -152,11 +129,11 @@ coverage-feedback: coverage-report
 		$(if $(LLM_MODEL),--model $(LLM_MODEL),)
 
 llm-coverage-feedback:
-	$(MAKE) TARGET=$(TARGET) LLM_FEEDBACK=1 coverage-feedback
+	$(MAKE) TARGET=$(TARGET) TARGET_CONFIG="$(TARGET_CONFIG)" LLM_FEEDBACK=1 coverage-feedback
 
 feedback-fuzz: coverage-feedback
-	$(MAKE) TARGET=$(TARGET) FUZZ_DIRECTIVES=$(MUTATION_DIRECTIVES) \
-		FUZZ_CORPUS=$(COVERAGE_DIR)/$(TARGET)_feedback_corpus.jsonl sim
+	$(MAKE) TARGET=$(TARGET) TARGET_CONFIG="$(TARGET_CONFIG)" FUZZ_DIRECTIVES=$(MUTATION_DIRECTIVES) \
+		FUZZ_CORPUS=$(COVERAGE_DIR)/$(TARGET)_feedback_corpus.jsonl VERILOG_SOURCES="$(VERILOG_SOURCES)" TOPLEVEL="$(TOPLEVEL)" sim
 
 llm-feedback-fuzz:
-	$(MAKE) TARGET=$(TARGET) LLM_FEEDBACK=1 feedback-fuzz
+	$(MAKE) TARGET=$(TARGET) TARGET_CONFIG="$(TARGET_CONFIG)" LLM_FEEDBACK=1 feedback-fuzz

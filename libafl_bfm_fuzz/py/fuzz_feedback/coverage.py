@@ -7,10 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from .rtl_structure_coverage import build_rtl_structure_coverage
+from fuzz_bfm.target_config import FieldSpec, load_target_config
 from fuzz_uvm.functional_coverage import build_functional_coverage_from_jsonl
-
-
-OP_NAMES = {1: "ADD", 2: "AND", 3: "XOR", 4: "MUL"}
 
 
 @dataclass(frozen=True)
@@ -53,13 +51,14 @@ def parse_lcov_info(path: Path) -> tuple[list[UncoveredLine], dict[str, int]]:
 def parse_corpus(path: Path, target: str) -> dict[str, Any]:
     total = 0
     origins: Counter[str] = Counter()
-    summary: dict[str, Any] = {"target": target, "total_cases": 0, "origin_counts": {}}
-    target_counts: dict[str, Counter[str]] = {
-        "op_counts": Counter(),
-        "key_len_counts": Counter(),
-        "encdec_counts": Counter(),
-        "mode_counts": Counter(),
-        "message_length_buckets": Counter(),
+    field_counts: dict[str, Counter[str]] = {}
+    config = _try_load_target_config(target)
+    fields = config.fields if config is not None else ()
+    summary: dict[str, Any] = {
+        "target": target,
+        "total_cases": 0,
+        "origin_counts": {},
+        "field_counts": {},
     }
 
     if not path.exists():
@@ -71,36 +70,40 @@ def parse_corpus(path: Path, target: str) -> dict[str, Any]:
         data = json.loads(line)
         total += 1
         origins[str(data.get("origin", "unknown"))] += 1
-        if str(data.get("target", "tinyalu")) != target:
+        if str(data.get("target", target)) != target:
             continue
-        if target == "tinyalu":
-            target_counts["op_counts"][OP_NAMES.get(int(data["op"]), str(data["op"]))] += 1
-        elif target == "aes":
-            target_counts["key_len_counts"][str(data["key_len"])] += 1
-            target_counts["encdec_counts"][str(data["encdec"])] += 1
-        elif target == "sha256":
-            target_counts["mode_counts"][str(data["mode"])] += 1
-            msg_len = len(bytes.fromhex(str(data["message"])))
-            target_counts["message_length_buckets"][length_bucket(msg_len)] += 1
+        for field in fields:
+            if field.name in data:
+                field_counts.setdefault(field.name, Counter())[field_summary_value(field, data[field.name])] += 1
 
     summary["total_cases"] = total
     summary["origin_counts"] = dict(origins)
-    for key, counts in target_counts.items():
-        if counts:
-            summary[key] = dict(counts)
+    summary["field_counts"] = {
+        field_name: dict(counts) for field_name, counts in sorted(field_counts.items())
+    }
     return summary
 
 
-def length_bucket(length: int) -> str:
-    if length == 0:
-        return "0"
-    if length <= 55:
-        return "1..55"
-    if length <= 64:
-        return "56..64"
-    if length <= 127:
-        return "65..127"
-    return "128+"
+def field_summary_value(field: FieldSpec, value: Any) -> str:
+    if field.kind == "hex":
+        try:
+            raw = bytes.fromhex(str(value))
+        except ValueError:
+            return "invalid_hex"
+        return f"{byte_pattern(raw)}:{len(raw)}"
+    return str(value)
+
+
+def byte_pattern(data: bytes) -> str:
+    if not data:
+        return "empty"
+    if all(byte == 0 for byte in data):
+        return "zero"
+    if all(byte == 0xFF for byte in data):
+        return "ff"
+    if data == bytes(idx & 0xFF for idx in range(len(data))):
+        return "increment"
+    return "mixed"
 
 
 def build_summary(
@@ -125,3 +128,10 @@ def build_summary(
         "uvm_functional_coverage": build_functional_coverage_from_jsonl(corpus, target),
         "stimulus_summary": parse_corpus(corpus, target),
     }
+
+
+def _try_load_target_config(target: str):
+    try:
+        return load_target_config(target)
+    except (FileNotFoundError, RuntimeError, ValueError):
+        return None

@@ -17,7 +17,7 @@ class ScoreboardFailure:
 
 
 class ResultScoreboard:
-    """LLM-generated result scoreboard for actual/expected replay records."""
+    """Default result scoreboard for actual/expected replay records."""
 
     def __init__(self, target: str, config: TargetConfig | None = None):
         self.target = target

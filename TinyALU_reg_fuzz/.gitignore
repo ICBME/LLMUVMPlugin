@@ -1,7 +1,0 @@
-__pycache__/
-.hypothesis/
-coverage/
-coverage.dat
-dump.vcd
-results.xml
-sim_build/

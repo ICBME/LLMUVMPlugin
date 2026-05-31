@@ -1,160 +1,121 @@
 # LibAFL + BFM fuzz framework
 
-This folder upgrades the TinyALU-specific LibAFL prototype into a reusable
-corpus-generation and BFM-replay framework.
+This directory contains the reusable LibAFL corpus-generation and pyUVM replay
+framework. Target-specific DUT behavior lives outside the framework as explicit
+plugins selected by a target manifest.
 
 ## Shape
 
-- `src/main.rs` is only the binary entry point; `src/app.rs` owns the current
-  LibAFL corpus generator.
-- `targets/*.toml` declares target metadata, clock/signal mapping, corpus field
-  validation, and Python driver/ref-model/scoreboard/coverage plugins for each
-  DUT.
-- `py/fuzz_bfm/corpus.py` validates the shared JSONL schema.
+- `src/main.rs` is the binary entry point.
+- `src/app.rs` is a schema-driven LibAFL corpus generator. It reads a target
+  manifest, mutates generic byte inputs, decodes them through the manifest
+  `[[field]]` schema, and writes JSONL cases.
 - `py/fuzz_bfm/target_config.py` loads target manifests.
+- `py/fuzz_bfm/corpus.py` validates JSONL cases against manifest fields.
 - `py/fuzz_bfm/plugin_loader.py` dynamically loads manifest plugins.
-- `py/fuzz_uvm/testbench.py` is the cocotb/pyUVM replay entry point;
-  `py/fuzz_bfm/replay_testbench.py` remains as a compatibility wrapper.
-- `py/fuzz_bfm/tinyalu_driver.py` drives the existing TinyALU BFM.
-- `py/fuzz_bfm/mem_bus_bfm.py` drives secworks-style memory-mapped wrappers.
-- `py/fuzz_bfm/aes_driver.py` and `py/fuzz_bfm/sha256_driver.py` adapt AES/SHA256
-  semantic cases onto that memory-mapped BFM.
-- `py/fuzz_uvm/` contains the reusable pyUVM replay layers:
-  `context.py` loads target/corpus configuration, `transactions.py` defines
-  replay records and sequence items, `sequences.py` turns corpus cases into UVM
-  traffic, `ref_models.py` and `scoreboards.py` define plugin contracts,
-  `components.py` owns driver/scoreboard/coverage components, `env.py` wires the
-  reusable environment, and `replay.py` remains the thin test entry.
-- `py/fuzz_feedback/` contains coverage parsing, heuristic advisors, optional
-  LLM calls, directive validation, and the CLI used by `coverage_feedback.py`.
-- `py/fuzz_feedback/rtl_structure_coverage.py` defines RTL structural coverage
-  separately from future UVM functional coverage.
+- `py/fuzz_uvm/testbench.py` is the cocotb/pyUVM replay entry point.
+- `py/fuzz_uvm/` contains reusable replay context, sequence items, sequences,
+  driver/ref-model/scoreboard hooks, functional coverage, and environment
+  wiring.
+- `py/fuzz_feedback/` contains RTL coverage parsing, generic mutation advice,
+  optional LLM calls, directive validation, and the CLI used by
+  `coverage_feedback.py`.
 
-The replay path no longer hardcodes `tinyalu/aes/sha256` driver or coverage
-classes in the testbench. Adding a DUT now starts with a target manifest, a
-driver plugin, and optionally ref-model, scoreboard, and functional coverage
-plugins; the cocotb entry point stays unchanged.
+Framework code does not include DUT-specific BFMs, reference models, vectors, or
+hardcoded example paths. A DUT is added by providing a target manifest plus
+driver/ref-model/coverage plugins generated or maintained outside this core.
 
-The cocotb entry point is now a thin compatibility wrapper over the generic
-`fuzz_uvm` environment. Existing target drivers still implement the simple
-`reset()`/`execute(case)` protocol, while the UVM layer provides reusable
-sequence, driver, ref-model prediction, scoreboard comparison, clocking, and
-functional coverage structure for future multi-step sequences and LLM-generated
-directives.
+## Target Manifest
 
-## Generate corpora
-
-```sh
-make -C libafl_bfm_fuzz TARGET=tinyalu generate-corpus
-make -C libafl_bfm_fuzz TARGET=aes generate-corpus
-make -C libafl_bfm_fuzz TARGET=sha256 generate-corpus
-```
-
-The JSONL cases are written to `libafl_bfm_fuzz/coverage/<target>_corpus.jsonl`.
-
-## Replay against RTL
-
-Run from an environment that has cocotb, pyUVM, Verilator, and Rust available:
-
-```sh
-UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz TARGET=tinyalu sim
-UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz TARGET=aes sim
-UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz TARGET=sha256 sim
-```
-
-TinyALU is the first smoke-test target because it reuses the existing project
-BFM. AES and SHA256 use the shared memory-mapped BFM; expected values are
-provided by manifest-selected ref-model plugins and checked by the scoreboard
-plugin.
-
-## Validate framework pieces
-
-```sh
-make -C libafl_bfm_fuzz check-all
-```
-
-`check-all` runs the Rust unit tests, Python syntax checks, and corpus generation
-for TinyALU, AES, and SHA256.
-
-Run the pyUVM replay smoke across all built-in DUTs:
-
-```sh
-UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz check-uvm
-```
-
-`check-uvm` generates a small corpus for TinyALU, AES, and SHA256, then replays
-each corpus through the same generic pyUVM environment.
-
-## Coverage-guided feedback
-
-The framework can run Verilator coverage, summarize uncovered RTL, ask an LLM
-for mutation guidance, and feed the resulting directives back into LibAFL.
-
-Heuristic-only feedback, which works without an API key:
-
-```sh
-UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz TARGET=aes feedback-fuzz
-UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz TARGET=sha256 feedback-fuzz
-```
-
-LLM-assisted feedback:
-
-```sh
-OPENAI_API_KEY=... OPENAI_MODEL=... \
-  UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz TARGET=aes llm-feedback-fuzz
-```
-
-Artifacts are written under `coverage/`:
-
-- `<target>_coverage_summary.json`: compact uncovered-line and corpus summary.
-  It includes `rtl_structure_coverage` with line, branch, expression, toggle,
-  FSM, and user coverage slots. The kinds present depend on what Verilator
-  emitted for the DUT. It also includes `uvm_functional_coverage`, a semantic
-  bin/cross summary derived from the replay corpus.
-- `<target>_uvm_functional_coverage.json`: functional coverage observed by the
-  generic pyUVM replay subscriber during simulation.
-- `<target>_llm_prompt.json`: prompt payload for offline/manual LLM review.
-- `<target>_llm_response.json`: raw model response when LLM feedback is enabled.
-- `<target>_mutation_directives.json`: validated directives consumed by LibAFL.
-
-If `OPENAI_API_KEY` is missing or the model call fails, the script keeps the fuzz
-loop moving by writing deterministic heuristic directives.
-
-## Target plugin manifests
-
-Each target manifest names the driver and the semantic JSONL fields:
+The manifest names the replay driver and declares the semantic JSONL fields:
 
 ```toml
-name = "aes"
-toplevel = "aes"
+name = "my_dut"
+toplevel = "my_dut_top"
 clock = "clk"
 clock_period_ns = 1.0
-driver = "fuzz_bfm.aes_driver:AesDriver"
-ref_model = "fuzz_uvm.llm_ref_models:AesRefModel"
+reset = "reset_n"
+driver = "my_project.my_driver:MyDriver"
+ref_model = "my_project.my_ref_model:MyRefModel"
 scoreboard = "fuzz_uvm.scoreboards:ResultScoreboard"
-coverage_model = "fuzz_uvm.functional_coverage:AesCoverageModel"
 
 [signals]
 clk = "clk"
 reset_n = "reset_n"
-cs = "cs"
-we = "we"
-address = "address"
-write_data = "write_data"
-read_data = "read_data"
 
 [[field]]
-name = "encdec"
+name = "op"
 kind = "enum"
-choices = ["encipher", "decipher"]
+choices = ["read", "write"]
+
+[[field]]
+name = "addr"
+kind = "int"
+min = 0
+max = 4095
+
+[[field]]
+name = "payload"
+kind = "hex"
+hex_len = 16
 ```
 
-Supported field validators are `int`, `enum`, and `hex`; `hex` fields may use
-`hex_len` or `hex_len_by` to express fixed and selector-dependent byte lengths.
-`clock`, `clock_period_ns`, and `[signals]` keep DUT naming out of the reusable
-UVM test. `ref_model` and `scoreboard` are the main hooks for LLM-generated
-verification components: drivers can return actual DUT results, ref models fill
-expected values, and scoreboards own the pass/fail decision. Manifests may also
-reserve optional plugin hooks such as `oracle`, `monitor`, `coverage_model`, and
-`sequence_schema`; these are loaded into `TargetConfig` for future LLM-driven
-sequence compilation without changing the replay entry point.
+Supported field validators are `int`, `enum`, `hex`, and `any`. `hex` fields
+may use `hex_len` or `hex_len_by` to express fixed and selector-dependent byte
+lengths.
+
+## Generate Corpora
+
+Use either `TARGET_CONFIG` or a file under `targets/<target>.toml`:
+
+```sh
+make -C libafl_bfm_fuzz TARGET=my_dut TARGET_CONFIG=/path/to/my_dut.toml generate-corpus
+```
+
+The JSONL cases are written to `libafl_bfm_fuzz/coverage/<target>_corpus.jsonl`
+unless `FUZZ_CORPUS` is set.
+
+## Replay Against RTL
+
+Provide the target manifest, DUT source list, top-level module, and any extra
+Python import path needed by your plugins:
+
+```sh
+UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz \
+  TARGET=my_dut \
+  TARGET_CONFIG=/path/to/my_dut.toml \
+  VERILOG_SOURCES="/path/to/rtl/a.v /path/to/rtl/b.v" \
+  TOPLEVEL=my_dut_top \
+  EXTRA_PYTHONPATH=/path/to/plugin/python \
+  sim
+```
+
+The replay driver plugin implements the simple `reset()` and `execute(case)`
+protocol. Optional ref-model and scoreboard plugins fill expected values and own
+pass/fail policy.
+
+## Validate Framework Pieces
+
+```sh
+make -C libafl_bfm_fuzz check
+```
+
+`check` runs Rust unit tests and Python syntax checks. Corpus and UVM replay
+checks require a target manifest and, for simulation, the RTL source list.
+
+## Coverage-Guided Feedback
+
+The framework can run Verilator coverage, summarize uncovered RTL, optionally
+ask an LLM for mutation guidance, and feed generic directives back into LibAFL:
+
+```sh
+UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz \
+  TARGET=my_dut \
+  TARGET_CONFIG=/path/to/my_dut.toml \
+  VERILOG_SOURCES="/path/to/rtl/a.v /path/to/rtl/b.v" \
+  TOPLEVEL=my_dut_top \
+  feedback-fuzz
+```
+
+Artifacts are written under `coverage/`, including structural RTL coverage,
+schema-driven UVM functional coverage, prompt payloads, and mutation directives.

@@ -1,8 +1,9 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher},
     env,
     error::Error,
     fs::{self, File},
+    hash::{Hash, Hasher},
     io::Write,
     path::{Path, PathBuf},
     ptr::write,
@@ -23,72 +24,67 @@ use libafl::{
     state::{HasCorpus, StdState},
 };
 use libafl_bolts::{AsSlice, current_nanos, nonnull_raw_mut, rands::StdRand, tuples::tuple_list};
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde_json::{Map, Value};
 
-const TINYALU_OPS: [u8; 4] = [1, 2, 3, 4];
 const BYTE_EDGES: [u8; 8] = [0x00, 0x01, 0x02, 0x03, 0x7f, 0x80, 0xfe, 0xff];
+const DEFAULT_INPUT_LEN: usize = 256;
+const MAX_DIRECTIVE_CASES: usize = 256;
+const MAX_HEX_LEN: usize = 4096;
 const SIGNALS_LEN: usize = 64;
 
 static mut SIGNALS: [u8; SIGNALS_LEN] = [0; SIGNALS_LEN];
 static mut SIGNALS_PTR: *mut u8 = &raw mut SIGNALS as _;
 
+#[derive(Clone, Debug)]
+struct TargetSchema {
+    name: String,
+    fields: Vec<FieldSchema>,
+}
+
+#[derive(Clone, Debug)]
+struct FieldSchema {
+    name: String,
+    kind: FieldKind,
+    minimum: Option<i64>,
+    maximum: Option<i64>,
+    choices: Vec<CaseValue>,
+    hex_len: Option<usize>,
+    hex_len_by: BTreeMap<String, BTreeMap<String, usize>>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Target {
-    TinyAlu,
-    Aes,
-    Sha256,
+enum FieldKind {
+    Int,
+    Enum,
+    Hex,
+    Any,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum CaseValue {
+    Int(i64),
+    Text(String),
+    Hex(Vec<u8>),
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum FuzzCase {
-    TinyAlu(TinyAluCase),
-    Aes(AesCase),
-    Sha256(Sha256Case),
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct TinyAluCase {
-    a: u8,
-    b: u8,
-    op: u8,
-}
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct AesCase {
-    key_len: u16,
-    encdec: AesDirection,
-    key: Vec<u8>,
-    block: [u8; 16],
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum AesDirection {
-    Encipher,
-    Decipher,
-}
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct Sha256Case {
-    mode: ShaMode,
-    message: Vec<u8>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum ShaMode {
-    Sha224,
-    Sha256,
+struct GenericCase {
+    values: BTreeMap<String, CaseValue>,
 }
 
 #[derive(Clone, Debug)]
 struct ExportCase {
-    case: FuzzCase,
+    case: GenericCase,
     origin: String,
 }
 
 #[derive(Debug)]
 struct Config {
-    target: Target,
+    target: String,
+    target_config: Option<PathBuf>,
     corpus_out: PathBuf,
+    corpus_overridden: bool,
     crashes_dir: PathBuf,
     directives_path: Option<PathBuf>,
     iters: u64,
@@ -96,11 +92,38 @@ struct Config {
     seed: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct TargetConfigFile {
+    name: Option<String>,
+    #[serde(default)]
+    field: Vec<FieldConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FieldConfig {
+    name: String,
+    #[serde(default = "default_field_kind")]
+    kind: String,
+    #[serde(default, rename = "min")]
+    minimum: Option<i64>,
+    #[serde(default, rename = "max")]
+    maximum: Option<i64>,
+    #[serde(default)]
+    choices: Vec<toml::Value>,
+    #[serde(default)]
+    hex_len: Option<usize>,
+    #[serde(default)]
+    hex_len_by: BTreeMap<String, BTreeMap<String, usize>>,
+}
+
 impl Default for Config {
     fn default() -> Self {
+        let target = env::var("FUZZ_TARGET").unwrap_or_else(|_| "dut".to_string());
         Self {
-            target: Target::TinyAlu,
-            corpus_out: PathBuf::from("coverage/tinyalu_corpus.jsonl"),
+            corpus_out: PathBuf::from(format!("coverage/{target}_corpus.jsonl")),
+            target,
+            target_config: env::var_os("FUZZ_TARGET_CONFIG").map(PathBuf::from),
+            corpus_overridden: false,
             crashes_dir: PathBuf::from("crashes"),
             directives_path: None,
             iters: env_u64("LIBAFL_ITERS", 256),
@@ -113,7 +136,6 @@ impl Default for Config {
 impl Config {
     fn from_args() -> Result<Option<Self>, Box<dyn Error>> {
         let mut config = Self::default();
-        let mut corpus_overridden = false;
         let mut args = env::args().skip(1);
 
         while let Some(arg) = args.next() {
@@ -123,11 +145,15 @@ impl Config {
                     return Ok(None);
                 }
                 "--target" => {
-                    config.target = Target::parse(&require_value(&mut args, "--target")?)?;
+                    config.target = require_value(&mut args, "--target")?;
+                }
+                "--target-config" => {
+                    config.target_config =
+                        Some(PathBuf::from(require_value(&mut args, "--target-config")?));
                 }
                 "--corpus-out" => {
                     config.corpus_out = PathBuf::from(require_value(&mut args, "--corpus-out")?);
-                    corpus_overridden = true;
+                    config.corpus_overridden = true;
                 }
                 "--crashes-dir" => {
                     config.crashes_dir = PathBuf::from(require_value(&mut args, "--crashes-dir")?);
@@ -149,9 +175,6 @@ impl Config {
             }
         }
 
-        if let Ok(target) = env::var("FUZZ_TARGET") {
-            config.target = Target::parse(&target)?;
-        }
         if let Ok(path) = env::var("LIBAFL_DIRECTIVES")
             && config.directives_path.is_none()
         {
@@ -159,11 +182,7 @@ impl Config {
         }
         if let Ok(path) = env::var("LIBAFL_CORPUS_OUT") {
             config.corpus_out = PathBuf::from(path);
-            corpus_overridden = true;
-        }
-        if !corpus_overridden {
-            config.corpus_out =
-                PathBuf::from(format!("coverage/{}_corpus.jsonl", config.target.name()));
+            config.corpus_overridden = true;
         }
 
         Ok(Some(config))
@@ -181,21 +200,25 @@ fn run() -> Result<(), Box<dyn Error>> {
     let Some(config) = Config::from_args()? else {
         return Ok(());
     };
+    let schema = TargetSchema::load(&config.target, config.target_config.as_deref())?;
+    let corpus_out = if config.corpus_overridden {
+        config.corpus_out.clone()
+    } else {
+        PathBuf::from(format!("coverage/{}_corpus.jsonl", schema.name))
+    };
 
-    let mandatory = config.target.mandatory_cases();
+    let mandatory = schema.mandatory_cases();
     let directed = match &config.directives_path {
-        Some(path) => load_directive_cases(config.target, path)?,
+        Some(path) => load_directive_cases(&schema, path)?,
         None => Vec::new(),
     };
-    let random_seeds = config
-        .target
-        .pseudo_random_seed_cases(config.seed, config.max_seed_cases);
+    let random_seeds = schema.pseudo_random_seed_cases(config.seed, config.max_seed_cases);
 
     let seed_inputs: Vec<BytesInput> = mandatory
         .iter()
         .chain(directed.iter())
         .chain(random_seeds.iter())
-        .map(|case| BytesInput::new(config.target.case_to_input(&case.case)))
+        .map(|case| BytesInput::new(case.case.to_seed_input()))
         .collect();
     let seed_count = seed_inputs.len();
 
@@ -216,10 +239,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     let scheduler = QueueScheduler::new();
     let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
 
-    let target = config.target;
+    let observed_schema = schema.clone();
     let mut harness = |input: &BytesInput| {
         let bytes = input.target_bytes();
-        target.observe_input(bytes.as_slice())
+        observed_schema.observe_input(bytes.as_slice())
     };
     let mut executor = InProcessExecutor::new(
         &mut harness,
@@ -257,483 +280,588 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     for id in state.corpus().ids() {
         let input = state.corpus().cloned_input_for_id(id)?;
-        if let Some(case) = config.target.decode_case(input.as_ref()) {
-            export_cases.push(ExportCase {
-                case,
-                origin: "libafl_corpus".to_string(),
-            });
-        }
+        export_cases.push(ExportCase {
+            case: schema.decode_case(input.as_ref()),
+            origin: "libafl_corpus".to_string(),
+        });
     }
 
-    let written = write_jsonl(&config.corpus_out, &dedupe_cases(export_cases))?;
+    let written = write_jsonl(&corpus_out, &schema, &dedupe_cases(export_cases))?;
     println!(
         "LibAFL {} corpus: wrote {written} cases to {}",
-        config.target.name(),
-        config.corpus_out.display()
+        schema.name,
+        corpus_out.display()
     );
     Ok(())
 }
 
-impl Target {
-    fn parse(text: &str) -> Result<Self, Box<dyn Error>> {
-        match text.trim().to_ascii_lowercase().as_str() {
-            "tinyalu" | "tinyalu_reg" => Ok(Self::TinyAlu),
-            "aes" => Ok(Self::Aes),
-            "sha256" | "sha224" | "sha2" => Ok(Self::Sha256),
-            other => Err(format!("unknown fuzz target: {other}").into()),
-        }
+impl TargetSchema {
+    fn load(target: &str, explicit_path: Option<&Path>) -> Result<Self, Box<dyn Error>> {
+        let path = resolve_target_config_path(target, explicit_path)?;
+        let text = fs::read_to_string(&path)?;
+        Self::from_toml(target, &text).map_err(|err| format!("{}: {err}", path.display()).into())
     }
 
-    fn name(self) -> &'static str {
-        match self {
-            Self::TinyAlu => "tinyalu",
-            Self::Aes => "aes",
-            Self::Sha256 => "sha256",
+    fn from_toml(target: &str, text: &str) -> Result<Self, Box<dyn Error>> {
+        let raw: TargetConfigFile = toml::from_str(text)?;
+        if raw.field.is_empty() {
+            return Err("target config must define at least one [[field]]".into());
         }
+        let fields = raw
+            .field
+            .into_iter()
+            .map(FieldSchema::from_config)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            name: raw.name.unwrap_or_else(|| target.to_string()),
+            fields,
+        })
     }
 
-    fn decode_case(self, bytes: &[u8]) -> Option<FuzzCase> {
-        match self {
-            Self::TinyAlu => TinyAluCase::decode(bytes).map(FuzzCase::TinyAlu),
-            Self::Aes => AesCase::decode(bytes).map(FuzzCase::Aes),
-            Self::Sha256 => Sha256Case::decode(bytes).map(FuzzCase::Sha256),
+    fn decode_case(&self, bytes: &[u8]) -> GenericCase {
+        let mut cursor = ByteCursor::new(bytes);
+        let mut case = GenericCase {
+            values: BTreeMap::new(),
+        };
+        for field in &self.fields {
+            let value = field.decode(&mut cursor, &case.values);
+            case.values.insert(field.name.clone(), value);
         }
+        self.normalize_case(&mut case);
+        case
     }
 
-    fn case_to_input(self, case: &FuzzCase) -> Vec<u8> {
-        match (self, case) {
-            (Self::TinyAlu, FuzzCase::TinyAlu(case)) => case.to_input(),
-            (Self::Aes, FuzzCase::Aes(case)) => case.to_input(),
-            (Self::Sha256, FuzzCase::Sha256(case)) => case.to_input(),
-            _ => unreachable!("target and case kind must match"),
+    fn default_case(&self) -> GenericCase {
+        let mut case = GenericCase {
+            values: BTreeMap::new(),
+        };
+        for field in &self.fields {
+            let value = field.default_value(&case.values);
+            case.values.insert(field.name.clone(), value);
         }
+        self.normalize_case(&mut case);
+        case
     }
 
-    fn observe_input(self, bytes: &[u8]) -> ExitKind {
+    fn mandatory_cases(&self) -> Vec<ExportCase> {
+        let base = self.default_case();
+        let mut cases = vec![export_case(base.clone(), "schema_default")];
+        for field in &self.fields {
+            for value in field.interesting_values(&base.values) {
+                let mut case = base.clone();
+                case.values.insert(field.name.clone(), value);
+                self.normalize_case(&mut case);
+                cases.push(export_case(case, "schema_edge"));
+            }
+        }
+        dedupe_cases(cases)
+    }
+
+    fn pseudo_random_seed_cases(&self, seed: u64, count: usize) -> Vec<ExportCase> {
+        let mut rng = Lcg::new(seed);
+        (0..count)
+            .map(|idx| {
+                let mut input = vec![0; DEFAULT_INPUT_LEN];
+                for (byte_idx, byte) in input.iter_mut().enumerate() {
+                    *byte = biased_byte(&mut rng, idx + byte_idx);
+                }
+                export_case(self.decode_case(&input), "libafl_seed")
+            })
+            .collect()
+    }
+
+    fn observe_input(&self, bytes: &[u8]) -> ExitKind {
         signals_clear();
         signals_set(0);
-        match self.decode_case(bytes) {
-            Some(FuzzCase::TinyAlu(case)) => observe_tinyalu(case),
-            Some(FuzzCase::Aes(case)) => observe_aes(&case),
-            Some(FuzzCase::Sha256(case)) => observe_sha256(&case),
-            _ => signals_set(SIGNALS_LEN - 1),
+        let case = self.decode_case(bytes);
+        for (name, value) in &case.values {
+            signals_set(1 + stable_slot(name, value) % (SIGNALS_LEN - 1));
         }
         ExitKind::Ok
     }
 
-    fn mandatory_cases(self) -> Vec<ExportCase> {
-        match self {
-            Self::TinyAlu => tinyalu_mandatory_cases(),
-            Self::Aes => aes_mandatory_cases(),
-            Self::Sha256 => sha256_mandatory_cases(),
+    fn normalize_case(&self, case: &mut GenericCase) {
+        let mut updates = Vec::new();
+        for field in &self.fields {
+            let value = match case.values.get(&field.name).cloned() {
+                Some(value) if field.accepts(&value) => field.normalize_value(value, &case.values),
+                _ => field.default_value(&case.values),
+            };
+            updates.push((field.name.clone(), value));
+        }
+        for (name, value) in updates {
+            case.values.insert(name, value);
         }
     }
 
-    fn pseudo_random_seed_cases(self, seed: u64, count: usize) -> Vec<ExportCase> {
-        let mut rng = Lcg::new(seed);
-        match self {
-            Self::TinyAlu => (0..count)
-                .map(|idx| {
-                    export_case(
-                        FuzzCase::TinyAlu(TinyAluCase {
-                            a: biased_byte(&mut rng, idx),
-                            b: biased_byte(&mut rng, idx + 3),
-                            op: TINYALU_OPS[(rng.next_u64() as usize) % TINYALU_OPS.len()],
-                        }),
-                        "libafl_seed",
-                    )
-                })
-                .collect(),
-            Self::Aes => (0..count)
-                .map(|idx| {
-                    let key_len = if rng.next_u64() & 1 == 0 { 128 } else { 256 };
-                    let key_size = if key_len == 128 { 16 } else { 32 };
-                    let mut key = vec![0; key_size];
-                    for (byte_idx, byte) in key.iter_mut().enumerate() {
-                        *byte = biased_byte(&mut rng, idx + byte_idx);
+    fn directive_cases_from_value(&self, value: &Value) -> Vec<ExportCase> {
+        let mut cases = Vec::new();
+        for (idx, directive) in directive_items(value).iter().enumerate() {
+            let origin = directive_origin(directive, idx);
+            for case in self.explicit_cases(directive) {
+                cases.push(export_case(case, &origin));
+                if cases.len() >= MAX_DIRECTIVE_CASES {
+                    return cases;
+                }
+            }
+
+            let overlays = self.directive_overlays(directive);
+            if overlays.is_empty() {
+                continue;
+            }
+            let mut expanded = vec![self.default_case()];
+            for field in &self.fields {
+                let Some(values) = overlays.get(&field.name) else {
+                    continue;
+                };
+                let mut next = Vec::new();
+                for case in &expanded {
+                    for value in values {
+                        let mut case = case.clone();
+                        case.values.insert(field.name.clone(), value.clone());
+                        self.normalize_case(&mut case);
+                        next.push(case);
+                        if next.len() >= MAX_DIRECTIVE_CASES {
+                            break;
+                        }
                     }
-                    let mut block = [0u8; 16];
-                    for (byte_idx, byte) in block.iter_mut().enumerate() {
-                        *byte = biased_byte(&mut rng, idx + byte_idx + 11);
+                    if next.len() >= MAX_DIRECTIVE_CASES {
+                        break;
                     }
-                    export_case(
-                        FuzzCase::Aes(AesCase {
-                            key_len,
-                            encdec: if rng.next_u64() & 1 == 0 {
-                                AesDirection::Encipher
-                            } else {
-                                AesDirection::Decipher
-                            },
-                            key,
-                            block,
-                        }),
-                        "libafl_seed",
-                    )
-                })
-                .collect(),
-            Self::Sha256 => (0..count)
-                .map(|idx| {
-                    let len = (rng.next_u64() as usize) % 128;
-                    let mut message = Vec::with_capacity(len);
-                    for byte_idx in 0..len {
-                        message.push(biased_byte(&mut rng, idx + byte_idx));
-                    }
-                    export_case(
-                        FuzzCase::Sha256(Sha256Case {
-                            mode: if rng.next_u64() & 1 == 0 {
-                                ShaMode::Sha256
-                            } else {
-                                ShaMode::Sha224
-                            },
-                            message,
-                        }),
-                        "libafl_seed",
-                    )
-                })
-                .collect(),
+                }
+                expanded = next;
+            }
+            for case in expanded {
+                cases.push(export_case(case, &origin));
+                if cases.len() >= MAX_DIRECTIVE_CASES {
+                    return cases;
+                }
+            }
         }
+        cases
+    }
+
+    fn explicit_cases(&self, directive: &Value) -> Vec<GenericCase> {
+        let items = directive
+            .get("cases")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_else(|| {
+                if self
+                    .fields
+                    .iter()
+                    .any(|field| directive.get(&field.name).is_some())
+                {
+                    std::slice::from_ref(directive)
+                } else {
+                    &[]
+                }
+            });
+        let mut cases = Vec::new();
+        for item in items {
+            let mut case = self.default_case();
+            let mut seen_field = false;
+            for field in &self.fields {
+                if let Some(value) = item
+                    .get(&field.name)
+                    .and_then(|value| field.value_from_json(value, &case.values))
+                {
+                    case.values.insert(field.name.clone(), value);
+                    seen_field = true;
+                }
+            }
+            if seen_field {
+                self.normalize_case(&mut case);
+                cases.push(case);
+            }
+        }
+        cases
+    }
+
+    fn directive_overlays(&self, directive: &Value) -> BTreeMap<String, Vec<CaseValue>> {
+        let mut overlays = BTreeMap::new();
+        let base = self.default_case();
+        for field in &self.fields {
+            let mut values = Vec::new();
+            for key in [&field.name, &format!("{}_values", field.name)] {
+                for item in parse_array_or_one(directive.get(key).unwrap_or(&Value::Null)) {
+                    if let Some(value) = field.value_from_json(item, &base.values) {
+                        values.push(value);
+                    }
+                }
+            }
+            if field.kind == FieldKind::Hex {
+                let pattern_key = format!("{}_patterns", field.name);
+                for item in parse_array_or_one(directive.get(&pattern_key).unwrap_or(&Value::Null))
+                {
+                    if let Some(pattern) = item.as_str() {
+                        let len = field.hex_len(&base.values).unwrap_or(16);
+                        values.push(CaseValue::Hex(pattern_bytes(pattern, len)));
+                    }
+                }
+            }
+            dedupe_values(&mut values);
+            if !values.is_empty() {
+                overlays.insert(field.name.clone(), values);
+            }
+        }
+        overlays
     }
 }
 
-impl TinyAluCase {
-    fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 3 {
-            return None;
-        }
-        Some(Self {
-            a: bytes[0],
-            b: bytes[1],
-            op: TINYALU_OPS[usize::from(bytes[2] % TINYALU_OPS.len() as u8)],
-        })
-    }
-
-    fn to_input(self) -> Vec<u8> {
-        let op_selector = TINYALU_OPS
+impl FieldSchema {
+    fn from_config(config: FieldConfig) -> Result<Self, Box<dyn Error>> {
+        let kind = FieldKind::parse(&config.kind);
+        let choices = config
+            .choices
             .iter()
-            .position(|op| *op == self.op)
-            .unwrap_or(0) as u8;
-        vec![self.a, self.b, op_selector]
-    }
-}
-
-impl AesCase {
-    fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 50 {
-            return None;
-        }
-        let key_len = if bytes[0] & 1 == 0 { 128 } else { 256 };
-        let key_size = if key_len == 128 { 16 } else { 32 };
-        let key = bytes[2..2 + key_size].to_vec();
-        let mut block = [0u8; 16];
-        block.copy_from_slice(&bytes[34..50]);
-        Some(Self {
-            key_len,
-            encdec: if bytes[1] & 1 == 0 {
-                AesDirection::Encipher
-            } else {
-                AesDirection::Decipher
-            },
-            key,
-            block,
+            .filter_map(|value| kind.choice_from_toml(value))
+            .collect();
+        Ok(Self {
+            name: config.name,
+            kind,
+            minimum: config.minimum,
+            maximum: config.maximum,
+            choices,
+            hex_len: config.hex_len,
+            hex_len_by: config.hex_len_by,
         })
     }
 
-    fn to_input(&self) -> Vec<u8> {
-        let mut input = vec![if self.key_len == 128 { 0 } else { 1 }, self.encdec.bit()];
-        let mut key = [0u8; 32];
-        key[..self.key.len()].copy_from_slice(&self.key);
-        input.extend_from_slice(&key);
-        input.extend_from_slice(&self.block);
-        input
-    }
-}
-
-impl AesDirection {
-    fn bit(self) -> u8 {
-        match self {
-            Self::Encipher => 0,
-            Self::Decipher => 1,
+    fn decode(
+        &self,
+        cursor: &mut ByteCursor<'_>,
+        values: &BTreeMap<String, CaseValue>,
+    ) -> CaseValue {
+        match self.kind {
+            FieldKind::Int => {
+                if !self.choices.is_empty() {
+                    return self.choices[(cursor.next_u64() as usize) % self.choices.len()].clone();
+                }
+                let min = self.minimum.unwrap_or(0);
+                let max = self.maximum.unwrap_or(min.saturating_add(255));
+                let (lo, hi) = if min <= max { (min, max) } else { (max, min) };
+                let span = (i128::from(hi) - i128::from(lo) + 1).min(i128::from(u64::MAX)) as u64;
+                let offset = if span == 0 {
+                    0
+                } else {
+                    cursor.next_u64() % span
+                };
+                CaseValue::Int(lo.saturating_add(offset as i64))
+            }
+            FieldKind::Enum => {
+                if self.choices.is_empty() {
+                    CaseValue::Text("default".to_string())
+                } else {
+                    self.choices[(cursor.next_u64() as usize) % self.choices.len()].clone()
+                }
+            }
+            FieldKind::Hex => {
+                let len = self
+                    .hex_len(values)
+                    .unwrap_or_else(|| usize::from(cursor.next_u8() % 32));
+                CaseValue::Hex(cursor.take(len.min(MAX_HEX_LEN)))
+            }
+            FieldKind::Any => CaseValue::Text(cursor.next_u64().to_string()),
         }
     }
 
-    fn name(self) -> &'static str {
-        match self {
-            Self::Encipher => "encipher",
-            Self::Decipher => "decipher",
+    fn default_value(&self, values: &BTreeMap<String, CaseValue>) -> CaseValue {
+        match self.kind {
+            FieldKind::Int => self
+                .choices
+                .first()
+                .cloned()
+                .unwrap_or_else(|| CaseValue::Int(self.minimum.unwrap_or(0))),
+            FieldKind::Enum => self
+                .choices
+                .first()
+                .cloned()
+                .unwrap_or_else(|| CaseValue::Text("default".to_string())),
+            FieldKind::Hex => CaseValue::Hex(vec![0; self.hex_len(values).unwrap_or(16)]),
+            FieldKind::Any => CaseValue::Text("default".to_string()),
         }
     }
-}
 
-impl Sha256Case {
-    fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 2 {
-            return None;
-        }
-        let max_len = bytes.len().saturating_sub(2).min(127);
-        let len = usize::from(bytes[1]).min(max_len);
-        Some(Self {
-            mode: if bytes[0] & 1 == 0 {
-                ShaMode::Sha256
-            } else {
-                ShaMode::Sha224
+    fn interesting_values(&self, values: &BTreeMap<String, CaseValue>) -> Vec<CaseValue> {
+        let mut result = match self.kind {
+            FieldKind::Int | FieldKind::Enum if !self.choices.is_empty() => self.choices.clone(),
+            FieldKind::Int => {
+                let min = self.minimum.unwrap_or(0);
+                let max = self.maximum.unwrap_or(min.saturating_add(255));
+                let mut values = vec![CaseValue::Int(min), CaseValue::Int(max)];
+                if min <= 0 && 0 <= max {
+                    values.push(CaseValue::Int(0));
+                }
+                values
+            }
+            FieldKind::Enum => vec![CaseValue::Text("default".to_string())],
+            FieldKind::Hex => {
+                let len = self.hex_len(values).unwrap_or(16).min(MAX_HEX_LEN);
+                vec![
+                    CaseValue::Hex(vec![0; len]),
+                    CaseValue::Hex(vec![0xff; len]),
+                    CaseValue::Hex((0..len).map(|idx| idx as u8).collect()),
+                ]
+            }
+            FieldKind::Any => vec![
+                CaseValue::Text("default".to_string()),
+                CaseValue::Text("alt".to_string()),
+            ],
+        };
+        dedupe_values(&mut result);
+        result
+    }
+
+    fn value_from_json(
+        &self,
+        value: &Value,
+        current_values: &BTreeMap<String, CaseValue>,
+    ) -> Option<CaseValue> {
+        let parsed = match self.kind {
+            FieldKind::Int => match value {
+                Value::Number(number) => number.as_i64().map(CaseValue::Int),
+                Value::String(text) => parse_i64_text(text).map(CaseValue::Int),
+                _ => None,
             },
-            message: bytes[2..2 + len].to_vec(),
-        })
-    }
-
-    fn to_input(&self) -> Vec<u8> {
-        let mut input = vec![self.mode.bit(), self.message.len().min(127) as u8];
-        input.extend_from_slice(&self.message[..self.message.len().min(127)]);
-        input
-    }
-}
-
-impl ShaMode {
-    fn bit(self) -> u8 {
-        match self {
-            Self::Sha256 => 0,
-            Self::Sha224 => 1,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Sha256 => "sha256",
-            Self::Sha224 => "sha224",
-        }
-    }
-}
-
-fn observe_tinyalu(case: TinyAluCase) {
-    signals_set(usize::from(case.op));
-    if case.a == 0 {
-        signals_set(5);
-    }
-    if case.b == 0 {
-        signals_set(6);
-    }
-    if case.a == 0xff {
-        signals_set(7);
-    }
-    if case.b == 0xff {
-        signals_set(8);
-    }
-    if matches!(case.a, 0x7f | 0x80) {
-        signals_set(9);
-    }
-    if matches!(case.b, 0x7f | 0x80) {
-        signals_set(10);
-    }
-    if case.op == 1 && u16::from(case.a) + u16::from(case.b) >= 0x100 {
-        signals_set(11);
-    }
-    if case.op == 4 && case.a != 0 && case.b != 0 {
-        signals_set(12);
-    }
-    if matches!(
-        (case.a, case.b),
-        (0x55, 0xaa) | (0xaa, 0x55) | (0x0f, 0xf0) | (0xf0, 0x0f)
-    ) {
-        signals_set(13);
-    }
-    if case.a == case.b {
-        signals_set(14);
-    }
-    if case.a ^ case.b == 0xff {
-        signals_set(15);
-    }
-}
-
-fn observe_aes(case: &AesCase) {
-    signals_set(if case.key_len == 128 { 20 } else { 21 });
-    signals_set(match case.encdec {
-        AesDirection::Encipher => 22,
-        AesDirection::Decipher => 23,
-    });
-    if case.key.iter().all(|byte| *byte == 0) {
-        signals_set(24);
-    }
-    if case.block.iter().all(|byte| *byte == 0) {
-        signals_set(25);
-    }
-    if case.key.iter().all(|byte| *byte == 0xff) || case.block.iter().all(|byte| *byte == 0xff) {
-        signals_set(26);
-    }
-    if case.block.windows(2).any(|pair| pair[0] == pair[1]) {
-        signals_set(27);
-    }
-}
-
-fn observe_sha256(case: &Sha256Case) {
-    signals_set(match case.mode {
-        ShaMode::Sha256 => 32,
-        ShaMode::Sha224 => 33,
-    });
-    match case.message.len() {
-        0 => signals_set(34),
-        1..=55 => signals_set(35),
-        56..=64 => signals_set(36),
-        _ => signals_set(37),
-    }
-    if case.message.iter().all(|byte| *byte == 0) {
-        signals_set(38);
-    }
-    if case.message.iter().any(|byte| *byte >= 0x80) {
-        signals_set(39);
-    }
-}
-
-fn tinyalu_mandatory_cases() -> Vec<ExportCase> {
-    let mut cases = Vec::new();
-    for op in TINYALU_OPS {
-        cases.push(export_case(
-            FuzzCase::TinyAlu(TinyAluCase { a: 0, b: 0, op }),
-            "mandatory_op",
-        ));
-        cases.push(export_case(
-            FuzzCase::TinyAlu(TinyAluCase {
-                a: 0xff,
-                b: 0xff,
-                op,
-            }),
-            "mandatory_max",
-        ));
-    }
-    for op in TINYALU_OPS {
-        for (a, b) in [
-            (0x00, 0xff),
-            (0xff, 0x00),
-            (0x7f, 0x80),
-            (0x55, 0xaa),
-            (0xaa, 0x55),
-        ] {
-            cases.push(export_case(
-                FuzzCase::TinyAlu(TinyAluCase { a, b, op }),
-                "directed_pair",
-            ));
-        }
-    }
-    cases
-}
-
-fn aes_mandatory_cases() -> Vec<ExportCase> {
-    let vectors = [
-        (
-            128,
-            AesDirection::Encipher,
-            hex_bytes("2b7e151628aed2a6abf7158809cf4f3c"),
-            hex_block("6bc1bee22e409f96e93d7e117393172a"),
-            "nist_aes128_enc",
-        ),
-        (
-            128,
-            AesDirection::Decipher,
-            hex_bytes("2b7e151628aed2a6abf7158809cf4f3c"),
-            hex_block("3ad77bb40d7a3660a89ecaf32466ef97"),
-            "nist_aes128_dec",
-        ),
-        (
-            256,
-            AesDirection::Encipher,
-            hex_bytes("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4"),
-            hex_block("6bc1bee22e409f96e93d7e117393172a"),
-            "nist_aes256_enc",
-        ),
-        (
-            256,
-            AesDirection::Decipher,
-            hex_bytes("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4"),
-            hex_block("f3eed1bdb5d2a03c064b5a7e3db181f8"),
-            "nist_aes256_dec",
-        ),
-    ];
-
-    vectors
-        .into_iter()
-        .map(|(key_len, encdec, key, block, origin)| {
-            export_case(
-                FuzzCase::Aes(AesCase {
-                    key_len,
-                    encdec,
-                    key,
-                    block,
+            FieldKind::Enum => scalar_to_string(value).map(CaseValue::Text),
+            FieldKind::Hex => match value {
+                Value::String(text) => {
+                    if let Some(pattern) = text.strip_prefix("pattern:") {
+                        let len = self.hex_len(current_values).unwrap_or(16);
+                        Some(CaseValue::Hex(pattern_bytes(pattern, len)))
+                    } else {
+                        parse_hex_bytes(text).map(CaseValue::Hex)
+                    }
+                }
+                Value::Object(map) => map.get("pattern").and_then(Value::as_str).map(|pattern| {
+                    CaseValue::Hex(pattern_bytes(
+                        pattern,
+                        self.hex_len(current_values).unwrap_or(16),
+                    ))
                 }),
-                origin,
-            )
-        })
-        .collect()
-}
+                _ => None,
+            },
+            FieldKind::Any => scalar_to_string(value).map(CaseValue::Text),
+        }?;
+        if self.choices.is_empty() || self.choices.contains(&parsed) {
+            Some(self.normalize_value(parsed, current_values))
+        } else {
+            None
+        }
+    }
 
-fn sha256_mandatory_cases() -> Vec<ExportCase> {
-    [
-        (ShaMode::Sha256, b"".as_slice(), "sha256_empty"),
-        (ShaMode::Sha256, b"abc".as_slice(), "sha256_abc"),
-        (ShaMode::Sha224, b"".as_slice(), "sha224_empty"),
-        (ShaMode::Sha224, b"abc".as_slice(), "sha224_abc"),
-        (
-            ShaMode::Sha256,
-            b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq".as_slice(),
-            "sha256_two_blocks",
-        ),
-    ]
-    .into_iter()
-    .map(|(mode, message, origin)| {
-        export_case(
-            FuzzCase::Sha256(Sha256Case {
-                mode,
-                message: message.to_vec(),
-            }),
-            origin,
+    fn accepts(&self, value: &CaseValue) -> bool {
+        matches!(
+            (self.kind, value),
+            (FieldKind::Int, CaseValue::Int(_))
+                | (FieldKind::Enum, CaseValue::Text(_))
+                | (FieldKind::Hex, CaseValue::Hex(_))
+                | (FieldKind::Any, _)
         )
-    })
-    .collect()
+    }
+
+    fn normalize_value(
+        &self,
+        value: CaseValue,
+        current_values: &BTreeMap<String, CaseValue>,
+    ) -> CaseValue {
+        match (self.kind, value) {
+            (FieldKind::Int, CaseValue::Int(raw)) => {
+                if !self.choices.is_empty() {
+                    return CaseValue::Int(raw);
+                }
+                let min = self.minimum.unwrap_or(i64::MIN);
+                let max = self.maximum.unwrap_or(i64::MAX);
+                CaseValue::Int(raw.clamp(min, max))
+            }
+            (FieldKind::Hex, CaseValue::Hex(mut bytes)) => {
+                if let Some(len) = self.hex_len(current_values) {
+                    bytes.resize(len.min(MAX_HEX_LEN), 0);
+                }
+                CaseValue::Hex(bytes)
+            }
+            (_, value) => value,
+        }
+    }
+
+    fn hex_len(&self, values: &BTreeMap<String, CaseValue>) -> Option<usize> {
+        if let Some(len) = self.hex_len {
+            return Some(len);
+        }
+        for (selector, choices) in &self.hex_len_by {
+            let Some(value) = values.get(selector) else {
+                return choices.values().copied().max();
+            };
+            if let Some(len) = choices.get(&value.selector_key()) {
+                return Some(*len);
+            }
+            return choices.values().copied().max();
+        }
+        None
+    }
 }
 
-fn export_case(case: FuzzCase, origin: &str) -> ExportCase {
+impl FieldKind {
+    fn parse(text: &str) -> Self {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "int" | "integer" => Self::Int,
+            "enum" | "choice" | "choices" => Self::Enum,
+            "hex" | "bytes" | "byte_string" => Self::Hex,
+            _ => Self::Any,
+        }
+    }
+
+    fn choice_from_toml(self, value: &toml::Value) -> Option<CaseValue> {
+        match self {
+            Self::Int => value
+                .as_integer()
+                .map(CaseValue::Int)
+                .or_else(|| value.as_str().and_then(parse_i64_text).map(CaseValue::Int)),
+            Self::Enum => toml_scalar_to_string(value).map(CaseValue::Text),
+            Self::Hex => value.as_str().and_then(parse_hex_bytes).map(CaseValue::Hex),
+            Self::Any => toml_scalar_to_string(value).map(CaseValue::Text),
+        }
+    }
+}
+
+impl CaseValue {
+    fn to_json(&self) -> Value {
+        match self {
+            Self::Int(value) => Value::from(*value),
+            Self::Text(value) => Value::String(value.clone()),
+            Self::Hex(value) => Value::String(bytes_to_hex(value)),
+        }
+    }
+
+    fn seed_bytes(&self) -> Vec<u8> {
+        match self {
+            Self::Int(value) => value.to_le_bytes().to_vec(),
+            Self::Text(value) => value.as_bytes().to_vec(),
+            Self::Hex(value) => value.clone(),
+        }
+    }
+
+    fn selector_key(&self) -> String {
+        match self {
+            Self::Int(value) => value.to_string(),
+            Self::Text(value) => value.clone(),
+            Self::Hex(value) => bytes_to_hex(value),
+        }
+    }
+}
+
+impl GenericCase {
+    fn to_json(&self, target: &str, origin: &str) -> Value {
+        let mut map = Map::new();
+        map.insert("target".to_string(), Value::String(target.to_string()));
+        for (name, value) in &self.values {
+            map.insert(name.clone(), value.to_json());
+        }
+        map.insert("origin".to_string(), Value::String(origin.to_string()));
+        Value::Object(map)
+    }
+
+    fn to_seed_input(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for (name, value) in &self.values {
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.push(0);
+            bytes.extend(value.seed_bytes());
+            bytes.push(0xff);
+        }
+        if bytes.is_empty() { vec![0] } else { bytes }
+    }
+}
+
+struct ByteCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> ByteCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn next_u8(&mut self) -> u8 {
+        if self.bytes.is_empty() {
+            self.offset = self.offset.saturating_add(1);
+            return 0;
+        }
+        let value = self.bytes[self.offset % self.bytes.len()];
+        self.offset = self.offset.saturating_add(1);
+        value
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut raw = [0u8; 8];
+        for byte in &mut raw {
+            *byte = self.next_u8();
+        }
+        u64::from_le_bytes(raw)
+    }
+
+    fn take(&mut self, len: usize) -> Vec<u8> {
+        (0..len).map(|_| self.next_u8()).collect()
+    }
+}
+
+fn resolve_target_config_path(
+    target: &str,
+    explicit_path: Option<&Path>,
+) -> Result<PathBuf, Box<dyn Error>> {
+    if let Some(path) = explicit_path {
+        if !path.exists() {
+            return Err(format!("target config does not exist: {}", path.display()).into());
+        }
+        return Ok(path.to_path_buf());
+    }
+
+    let root = env::var_os("FUZZ_TARGETS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("targets"));
+    let path = root.join(format!("{target}.toml"));
+    if !path.exists() {
+        return Err(format!(
+            "target config not found for {target:?}: {}; set --target-config or FUZZ_TARGET_CONFIG",
+            path.display()
+        )
+        .into());
+    }
+    Ok(path)
+}
+
+fn load_directive_cases(
+    schema: &TargetSchema,
+    path: &Path,
+) -> Result<Vec<ExportCase>, Box<dyn Error>> {
+    let text = fs::read_to_string(path)?;
+    let value: Value = serde_json::from_str(&text)?;
+    Ok(schema.directive_cases_from_value(&value))
+}
+
+fn export_case(case: GenericCase, origin: &str) -> ExportCase {
     ExportCase {
         case,
         origin: origin.to_string(),
     }
 }
 
-fn write_jsonl(path: &Path, cases: &[ExportCase]) -> Result<usize, Box<dyn Error>> {
+fn write_jsonl(
+    path: &Path,
+    schema: &TargetSchema,
+    cases: &[ExportCase],
+) -> Result<usize, Box<dyn Error>> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let mut file = File::create(path)?;
     for case in cases {
-        serde_json::to_writer(&mut file, &case.to_json())?;
+        serde_json::to_writer(&mut file, &case.case.to_json(&schema.name, &case.origin))?;
         writeln!(file)?;
     }
     Ok(cases.len())
-}
-
-impl ExportCase {
-    fn to_json(&self) -> Value {
-        match &self.case {
-            FuzzCase::TinyAlu(case) => json!({
-                "target": "tinyalu",
-                "a": case.a,
-                "b": case.b,
-                "op": case.op,
-                "origin": self.origin,
-            }),
-            FuzzCase::Aes(case) => json!({
-                "target": "aes",
-                "key_len": case.key_len,
-                "encdec": case.encdec.name(),
-                "key": bytes_to_hex(&case.key),
-                "block": bytes_to_hex(&case.block),
-                "origin": self.origin,
-            }),
-            FuzzCase::Sha256(case) => json!({
-                "target": "sha256",
-                "mode": case.mode.name(),
-                "message": bytes_to_hex(&case.message),
-                "origin": self.origin,
-            }),
-        }
-    }
 }
 
 fn dedupe_cases(cases: Vec<ExportCase>) -> Vec<ExportCase> {
@@ -747,132 +875,9 @@ fn dedupe_cases(cases: Vec<ExportCase>) -> Vec<ExportCase> {
     deduped
 }
 
-fn load_directive_cases(target: Target, path: &Path) -> Result<Vec<ExportCase>, Box<dyn Error>> {
-    let text = fs::read_to_string(path)?;
-    let value: Value = serde_json::from_str(&text)?;
-    Ok(match target {
-        Target::TinyAlu => tinyalu_directive_cases_from_value(&value),
-        Target::Aes => aes_directive_cases_from_value(&value),
-        Target::Sha256 => sha256_directive_cases_from_value(&value),
-    })
-}
-
-fn tinyalu_directive_cases_from_value(value: &Value) -> Vec<ExportCase> {
-    let mut cases = Vec::new();
-    for (idx, directive) in directive_items(value).iter().enumerate() {
-        let origin = directive
-            .get("name")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("directive_{idx}"));
-        let ops = resolve_ops(directive);
-        let mut pairs = Vec::new();
-
-        if let Some(operand_pairs) = directive.get("operand_pairs").and_then(Value::as_array) {
-            for pair in operand_pairs {
-                if let (Some(a), Some(b)) = (
-                    pair.get("a").and_then(parse_u8_value),
-                    pair.get("b").and_then(parse_u8_value),
-                ) {
-                    pairs.push((a, b));
-                }
-            }
-        }
-        if pairs.is_empty() {
-            pairs.extend([(0x00, 0x00), (0xff, 0xff), (0x55, 0xaa), (0x7f, 0x80)]);
-        }
-
-        for op in ops {
-            for (a, b) in &pairs {
-                cases.push(export_case(
-                    FuzzCase::TinyAlu(TinyAluCase { a: *a, b: *b, op }),
-                    &origin,
-                ));
-            }
-        }
-    }
-    cases
-}
-
-fn aes_directive_cases_from_value(value: &Value) -> Vec<ExportCase> {
-    let mut cases = Vec::new();
-    for (idx, directive) in directive_items(value).iter().enumerate() {
-        let origin = directive_origin(directive, idx);
-        for case in explicit_aes_cases(directive) {
-            cases.push(export_case(FuzzCase::Aes(case), &origin));
-        }
-
-        let key_lens = resolve_key_lens(directive);
-        let encdecs = resolve_aes_directions(directive);
-        let key_patterns =
-            resolve_patterns(directive, "key_patterns", &["zero", "ff", "increment"]);
-        let block_patterns = resolve_patterns(
-            directive,
-            "block_patterns",
-            &["zero", "ff", "alternating", "walking_one"],
-        );
-
-        for key_len in key_lens {
-            for encdec in &encdecs {
-                for key_pattern in &key_patterns {
-                    for block_pattern in &block_patterns {
-                        let key = pattern_bytes(key_pattern, if key_len == 128 { 16 } else { 32 });
-                        let block_vec = pattern_bytes(block_pattern, 16);
-                        let mut block = [0u8; 16];
-                        block.copy_from_slice(&block_vec);
-                        cases.push(export_case(
-                            FuzzCase::Aes(AesCase {
-                                key_len,
-                                encdec: *encdec,
-                                key,
-                                block,
-                            }),
-                            &origin,
-                        ));
-                        if cases.len() >= 128 {
-                            return cases;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    cases
-}
-
-fn sha256_directive_cases_from_value(value: &Value) -> Vec<ExportCase> {
-    let mut cases = Vec::new();
-    for (idx, directive) in directive_items(value).iter().enumerate() {
-        let origin = directive_origin(directive, idx);
-        for case in explicit_sha_cases(directive) {
-            cases.push(export_case(FuzzCase::Sha256(case), &origin));
-        }
-
-        let modes = resolve_sha_modes(directive);
-        let lengths = resolve_lengths(directive, &[0, 1, 55, 56, 57, 63, 64, 65, 127]);
-        let patterns = resolve_patterns(
-            directive,
-            "byte_patterns",
-            &["zero", "ff", "increment", "alternating"],
-        );
-        for mode in modes {
-            for len in &lengths {
-                for pattern in &patterns {
-                    cases.push(export_case(
-                        FuzzCase::Sha256(Sha256Case {
-                            mode,
-                            message: pattern_bytes(pattern, *len),
-                        }),
-                        &origin,
-                    ));
-                    if cases.len() >= 128 {
-                        return cases;
-                    }
-                }
-            }
-        }
-    }
-    cases
+fn dedupe_values(values: &mut Vec<CaseValue>) {
+    let mut seen = BTreeSet::new();
+    values.retain(|value| seen.insert(value.clone()));
 }
 
 fn directive_items(value: &Value) -> &[Value] {
@@ -893,145 +898,6 @@ fn directive_origin(directive: &Value, idx: usize) -> String {
         .unwrap_or_else(|| format!("directive_{idx}"))
 }
 
-fn explicit_aes_cases(directive: &Value) -> Vec<AesCase> {
-    let items = directive
-        .get("cases")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_else(|| std::slice::from_ref(directive));
-    let mut cases = Vec::new();
-    for item in items {
-        let Some(key_len) = parse_key_len(item.get("key_len").unwrap_or(&Value::Null)) else {
-            continue;
-        };
-        let Some(encdec) = item.get("encdec").and_then(parse_aes_direction) else {
-            continue;
-        };
-        let Some(key) = item.get("key").and_then(parse_hex_bytes) else {
-            continue;
-        };
-        let Some(block_vec) = item.get("block").and_then(parse_hex_bytes) else {
-            continue;
-        };
-        let expected_key_len = if key_len == 128 { 16 } else { 32 };
-        if key.len() != expected_key_len || block_vec.len() != 16 {
-            continue;
-        }
-        let mut block = [0u8; 16];
-        block.copy_from_slice(&block_vec);
-        cases.push(AesCase {
-            key_len,
-            encdec,
-            key,
-            block,
-        });
-    }
-    cases
-}
-
-fn explicit_sha_cases(directive: &Value) -> Vec<Sha256Case> {
-    let items = directive
-        .get("cases")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_else(|| std::slice::from_ref(directive));
-    let mut cases = Vec::new();
-    for item in items {
-        let Some(mode) = item.get("mode").and_then(parse_sha_mode) else {
-            continue;
-        };
-        let Some(message) = item.get("message").and_then(parse_hex_bytes) else {
-            continue;
-        };
-        cases.push(Sha256Case { mode, message });
-    }
-    cases
-}
-
-fn resolve_key_lens(directive: &Value) -> Vec<u16> {
-    let raw = directive
-        .get("key_lens")
-        .or_else(|| directive.get("key_len"))
-        .unwrap_or(&Value::Null);
-    let mut values = parse_array_or_one(raw)
-        .into_iter()
-        .filter_map(parse_key_len)
-        .collect::<Vec<_>>();
-    if values.is_empty() {
-        values.extend([128, 256]);
-    }
-    values.sort_unstable();
-    values.dedup();
-    values
-}
-
-fn resolve_aes_directions(directive: &Value) -> Vec<AesDirection> {
-    let raw = directive
-        .get("encdecs")
-        .or_else(|| directive.get("encdec"))
-        .unwrap_or(&Value::Null);
-    let mut values = parse_array_or_one(raw)
-        .into_iter()
-        .filter_map(parse_aes_direction)
-        .collect::<Vec<_>>();
-    if values.is_empty() {
-        values.extend([AesDirection::Encipher, AesDirection::Decipher]);
-    }
-    values.sort_unstable();
-    values.dedup();
-    values
-}
-
-fn resolve_sha_modes(directive: &Value) -> Vec<ShaMode> {
-    let raw = directive
-        .get("modes")
-        .or_else(|| directive.get("mode"))
-        .unwrap_or(&Value::Null);
-    let mut values = parse_array_or_one(raw)
-        .into_iter()
-        .filter_map(parse_sha_mode)
-        .collect::<Vec<_>>();
-    if values.is_empty() {
-        values.extend([ShaMode::Sha256, ShaMode::Sha224]);
-    }
-    values.sort_unstable();
-    values.dedup();
-    values
-}
-
-fn resolve_lengths(directive: &Value, defaults: &[usize]) -> Vec<usize> {
-    let raw = directive
-        .get("message_lengths")
-        .or_else(|| directive.get("lengths"))
-        .or_else(|| directive.get("message_len"))
-        .unwrap_or(&Value::Null);
-    let mut values = parse_array_or_one(raw)
-        .into_iter()
-        .filter_map(parse_usize_value)
-        .map(|len| len.min(127))
-        .collect::<Vec<_>>();
-    if values.is_empty() {
-        values.extend(defaults);
-    }
-    values.sort_unstable();
-    values.dedup();
-    values
-}
-
-fn resolve_patterns(directive: &Value, key: &str, defaults: &[&str]) -> Vec<String> {
-    let mut values = parse_array_or_one(directive.get(key).unwrap_or(&Value::Null))
-        .into_iter()
-        .filter_map(Value::as_str)
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>();
-    if values.is_empty() {
-        values.extend(defaults.iter().map(|item| (*item).to_string()));
-    }
-    values.sort();
-    values.dedup();
-    values
-}
-
 fn parse_array_or_one(value: &Value) -> Vec<&Value> {
     match value {
         Value::Array(items) => items.iter().collect(),
@@ -1040,64 +906,34 @@ fn parse_array_or_one(value: &Value) -> Vec<&Value> {
     }
 }
 
-fn parse_key_len(value: &Value) -> Option<u16> {
+fn scalar_to_string(value: &Value) -> Option<String> {
     match value {
-        Value::Number(number) => number.as_u64().and_then(|raw| match raw {
-            128 => Some(128),
-            256 => Some(256),
-            _ => None,
-        }),
-        Value::String(text) => match text.trim() {
-            "128" | "AES_128" | "aes128" | "aes-128" => Some(128),
-            "256" | "AES_256" | "aes256" | "aes-256" => Some(256),
-            _ => None,
-        },
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
         _ => None,
     }
 }
 
-fn parse_aes_direction(value: &Value) -> Option<AesDirection> {
-    match value {
-        Value::Number(number) => match number.as_u64()? {
-            0 => Some(AesDirection::Decipher),
-            1 => Some(AesDirection::Encipher),
-            _ => None,
-        },
-        Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
-            "encipher" | "encrypt" | "enc" | "1" => Some(AesDirection::Encipher),
-            "decipher" | "decrypt" | "dec" | "0" => Some(AesDirection::Decipher),
-            _ => None,
-        },
-        _ => None,
+fn toml_scalar_to_string(value: &toml::Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| value.as_integer().map(|item| item.to_string()))
+        .or_else(|| value.as_bool().map(|item| item.to_string()))
+}
+
+fn parse_i64_text(text: &str) -> Option<i64> {
+    let text = text.trim();
+    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        i64::from_str_radix(hex, 16).ok()
+    } else {
+        text.parse().ok()
     }
 }
 
-fn parse_sha_mode(value: &Value) -> Option<ShaMode> {
-    match value {
-        Value::Number(number) => match number.as_u64()? {
-            0 => Some(ShaMode::Sha224),
-            1 => Some(ShaMode::Sha256),
-            _ => None,
-        },
-        Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
-            "sha224" | "sha-224" | "224" => Some(ShaMode::Sha224),
-            "sha256" | "sha-256" | "256" => Some(ShaMode::Sha256),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn parse_usize_value(value: &Value) -> Option<usize> {
-    match value {
-        Value::Number(number) => number.as_u64().and_then(|raw| usize::try_from(raw).ok()),
-        Value::String(text) => text.trim().parse().ok(),
-        _ => None,
-    }
-}
-
-fn parse_hex_bytes(value: &Value) -> Option<Vec<u8>> {
-    let text = value.as_str()?.trim();
+fn parse_hex_bytes(text: &str) -> Option<Vec<u8>> {
+    let text = text.trim();
     let text = text.strip_prefix("0x").unwrap_or(text);
     if text.len() % 2 != 0 {
         return None;
@@ -1109,7 +945,7 @@ fn parse_hex_bytes(value: &Value) -> Option<Vec<u8>> {
 }
 
 fn pattern_bytes(pattern: &str, len: usize) -> Vec<u8> {
-    match pattern {
+    match pattern.trim().to_ascii_lowercase().as_str() {
         "zero" | "zeros" => vec![0x00; len],
         "ff" | "ones" | "max" => vec![0xff; len],
         "alternating" | "aa55" => (0..len)
@@ -1125,67 +961,11 @@ fn pattern_bytes(pattern: &str, len: usize) -> Vec<u8> {
     }
 }
 
-fn resolve_ops(directive: &Value) -> Vec<u8> {
-    let raw_ops = directive
-        .get("ops")
-        .or_else(|| directive.get("op_bias"))
-        .or_else(|| directive.get("op"));
-    let Some(raw_ops) = raw_ops else {
-        return TINYALU_OPS.to_vec();
-    };
-
-    let mut resolved = Vec::new();
-    match raw_ops {
-        Value::Array(items) => {
-            for item in items {
-                if let Some(op) = parse_op_value(item) {
-                    resolved.push(op);
-                }
-            }
-        }
-        item => {
-            if let Some(op) = parse_op_value(item) {
-                resolved.push(op);
-            }
-        }
-    }
-    if resolved.is_empty() {
-        TINYALU_OPS.to_vec()
-    } else {
-        resolved.sort_unstable();
-        resolved.dedup();
-        resolved
-    }
-}
-
-fn parse_op_value(value: &Value) -> Option<u8> {
-    match value {
-        Value::String(text) => match text.to_ascii_uppercase().as_str() {
-            "ADD" => Some(1),
-            "AND" => Some(2),
-            "XOR" => Some(3),
-            "MUL" => Some(4),
-            _ => parse_u8_text(text).filter(|op| TINYALU_OPS.contains(op)),
-        },
-        _ => parse_u8_value(value).filter(|op| TINYALU_OPS.contains(op)),
-    }
-}
-
-fn parse_u8_value(value: &Value) -> Option<u8> {
-    match value {
-        Value::Number(number) => number.as_u64().and_then(|raw| u8::try_from(raw).ok()),
-        Value::String(text) => parse_u8_text(text),
-        _ => None,
-    }
-}
-
-fn parse_u8_text(text: &str) -> Option<u8> {
-    let text = text.trim();
-    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        u8::from_str_radix(hex, 16).ok()
-    } else {
-        text.parse().ok()
-    }
+fn stable_slot(name: &str, value: &CaseValue) -> usize {
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
+    value.hash(&mut hasher);
+    hasher.finish() as usize
 }
 
 fn signals_clear() {
@@ -1233,20 +1013,6 @@ fn biased_byte(rng: &mut Lcg, idx: usize) -> u8 {
     }
 }
 
-fn hex_bytes(text: &str) -> Vec<u8> {
-    (0..text.len())
-        .step_by(2)
-        .map(|idx| u8::from_str_radix(&text[idx..idx + 2], 16).expect("valid hex fixture"))
-        .collect()
-}
-
-fn hex_block(text: &str) -> [u8; 16] {
-    let bytes = hex_bytes(text);
-    let mut block = [0u8; 16];
-    block.copy_from_slice(&bytes);
-    block
-}
-
 fn bytes_to_hex<T: AsRef<[u8]>>(bytes: T) -> String {
     bytes
         .as_ref()
@@ -1255,19 +1021,24 @@ fn bytes_to_hex<T: AsRef<[u8]>>(bytes: T) -> String {
         .collect()
 }
 
+fn default_field_kind() -> String {
+    "any".to_string()
+}
+
 fn print_help() {
     println!(
         "\
 LibAFL + BFM corpus generator
 
 Options:
-  --target NAME       Target: tinyalu, aes, sha256 [default: tinyalu]
-  --corpus-out PATH   JSONL corpus to write [default: coverage/<target>_corpus.jsonl]
-  --crashes-dir PATH  LibAFL objective corpus directory [default: crashes]
-  --directives PATH   TinyALU coverage_feedback.py mutation directives JSON
-  --iters N           LibAFL fuzz iterations [default: LIBAFL_ITERS or 256]
-  --max-seeds N       deterministic random seed cases [default: LIBAFL_MAX_SEEDS or 32]
-  --seed N            deterministic seed [default: LIBAFL_SEED or 1]
+  --target NAME          Target name used to resolve targets/<name>.toml [default: FUZZ_TARGET or dut]
+  --target-config PATH   Target manifest with generic [[field]] schema
+  --corpus-out PATH      JSONL corpus to write [default: coverage/<manifest-name>_corpus.jsonl]
+  --crashes-dir PATH     LibAFL objective corpus directory [default: crashes]
+  --directives PATH      Generic mutation directives JSON
+  --iters N              LibAFL fuzz iterations [default: LIBAFL_ITERS or 256]
+  --max-seeds N          deterministic random seed cases [default: LIBAFL_MAX_SEEDS or 32]
+  --seed N               deterministic seed [default: LIBAFL_SEED or 1]
 "
     );
 }
@@ -1307,42 +1078,87 @@ fn parse_u64(text: &str) -> Result<u64, Box<dyn Error>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn target_decode_keeps_tinyalu_legal() {
-        let Some(FuzzCase::TinyAlu(case)) = Target::TinyAlu.decode_case(&[1, 2, 99]) else {
-            panic!("decode failed");
-        };
-        assert_eq!(case.a, 1);
-        assert_eq!(case.b, 2);
-        assert!(TINYALU_OPS.contains(&case.op));
+    fn schema_fixture() -> TargetSchema {
+        TargetSchema::from_toml(
+            "demo",
+            r#"
+name = "demo"
+
+[[field]]
+name = "mode"
+kind = "enum"
+choices = ["read", "write"]
+
+[[field]]
+name = "size"
+kind = "int"
+min = 1
+max = 4
+choices = [1, 2, 4]
+
+[[field]]
+name = "payload"
+kind = "hex"
+hex_len_by = { size = { "1" = 1, "2" = 2, "4" = 4 } }
+"#,
+        )
+        .expect("schema")
     }
 
     #[test]
-    fn aes_decode_selects_key_size() {
-        let mut input = vec![1, 0];
-        input.extend(0u8..32);
-        input.extend(32u8..48);
-        let Some(FuzzCase::Aes(case)) = Target::Aes.decode_case(&input) else {
-            panic!("decode failed");
+    fn generic_decode_respects_schema_choices_and_hex_lengths() {
+        let schema = schema_fixture();
+        let case = schema.decode_case(&[0, 0, 0, 0, 0, 0, 0, 0, 2, 0xaa, 0xbb, 0xcc]);
+
+        assert_eq!(
+            case.values.get("mode"),
+            Some(&CaseValue::Text("read".to_string()))
+        );
+        assert!(matches!(
+            case.values.get("size"),
+            Some(CaseValue::Int(1 | 2 | 4))
+        ));
+        let Some(CaseValue::Hex(payload)) = case.values.get("payload") else {
+            panic!("missing payload");
         };
-        assert_eq!(case.key_len, 256);
-        assert_eq!(case.key.len(), 32);
-        assert_eq!(case.block[0], 32);
+        let size: usize = case
+            .values
+            .get("size")
+            .unwrap()
+            .selector_key()
+            .parse()
+            .unwrap();
+        assert_eq!(payload.len(), size);
     }
 
     #[test]
-    fn sha_decode_bounds_message_length() {
-        let Some(FuzzCase::Sha256(case)) = Target::Sha256.decode_case(&[0, 200, b'a', b'b']) else {
-            panic!("decode failed");
-        };
-        assert_eq!(case.mode, ShaMode::Sha256);
-        assert_eq!(case.message, b"ab");
+    fn mandatory_cases_are_schema_driven() {
+        let schema = schema_fixture();
+        let cases = schema.mandatory_cases();
+
+        assert!(cases.iter().any(|case| {
+            case.case.values.get("mode") == Some(&CaseValue::Text("write".to_string()))
+        }));
+        assert!(cases.iter().any(|case| {
+            matches!(case.case.values.get("payload"), Some(CaseValue::Hex(bytes)) if bytes.iter().all(|byte| *byte == 0xff))
+        }));
     }
 
     #[test]
-    fn mandatory_cases_cover_all_targets() {
-        assert!(!Target::TinyAlu.mandatory_cases().is_empty());
-        assert!(!Target::Aes.mandatory_cases().is_empty());
-        assert!(!Target::Sha256.mandatory_cases().is_empty());
+    fn directives_accept_explicit_generic_fields() {
+        let schema = schema_fixture();
+        let directives = serde_json::json!({
+            "directives": [{
+                "name": "directed",
+                "cases": [{"mode": "write", "size": 4, "payload": "deadbeef"}]
+            }]
+        });
+        let cases = schema.directive_cases_from_value(&directives);
+
+        assert_eq!(cases.len(), 1);
+        assert_eq!(
+            cases[0].case.values.get("payload"),
+            Some(&CaseValue::Hex(vec![0xde, 0xad, 0xbe, 0xef]))
+        );
     }
 }

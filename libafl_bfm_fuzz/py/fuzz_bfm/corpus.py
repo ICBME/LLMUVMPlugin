@@ -8,9 +8,6 @@ from typing import Any
 from .target_config import FieldSpec, TargetConfig, load_target_config
 
 
-SUPPORTED_TARGETS = {"tinyalu", "aes", "sha256"}
-
-
 @dataclass(frozen=True)
 class FuzzCase:
     target: str
@@ -20,8 +17,8 @@ class FuzzCase:
 
 def load_cases(path: Path, target: str, config: TargetConfig | None = None) -> list[FuzzCase]:
     config = config or _try_load_config(target)
-    if config is None and target not in SUPPORTED_TARGETS:
-        raise ValueError(f"unsupported target {target!r}; provide a target config or use one of {sorted(SUPPORTED_TARGETS)}")
+    if config is None:
+        raise ValueError(f"target config is required to validate {target!r} corpus cases")
     if not path.exists():
         raise FileNotFoundError(f"LibAFL corpus {path} does not exist. Run generate-corpus first.")
 
@@ -30,7 +27,7 @@ def load_cases(path: Path, target: str, config: TargetConfig | None = None) -> l
         if not line.strip():
             continue
         data = json.loads(line)
-        case_target = str(data.get("target", "tinyalu"))
+        case_target = str(data.get("target", target))
         if case_target != target:
             raise ValueError(f"{path}:{line_no}: expected target {target!r}, got {case_target!r}")
         validate_case(path, line_no, case_target, data, config=config)
@@ -48,26 +45,10 @@ def validate_case(
     data: dict[str, Any],
     config: TargetConfig | None = None,
 ) -> None:
-    if config is not None and config.fields:
+    if config is None:
+        raise ValueError(f"{path}:{line_no}: target config is required for {target!r}")
+    if config.fields:
         _validate_config_fields(path, line_no, data, config.fields)
-    elif target == "tinyalu":
-        _validate_int(path, line_no, data, "a", 0, 0xFF)
-        _validate_int(path, line_no, data, "b", 0, 0xFF)
-        _validate_int(path, line_no, data, "op", 1, 4)
-    elif target == "aes":
-        key_len = _validate_int(path, line_no, data, "key_len", 128, 256)
-        if key_len not in {128, 256}:
-            raise ValueError(f"{path}:{line_no}: key_len must be 128 or 256")
-        if data.get("encdec") not in {"encipher", "decipher"}:
-            raise ValueError(f"{path}:{line_no}: encdec must be encipher or decipher")
-        _validate_hex(path, line_no, data, "key", 16 if key_len == 128 else 32)
-        _validate_hex(path, line_no, data, "block", 16)
-    elif target == "sha256":
-        if data.get("mode") not in {"sha224", "sha256"}:
-            raise ValueError(f"{path}:{line_no}: mode must be sha224 or sha256")
-        _validate_hex(path, line_no, data, "message", None)
-    else:
-        raise ValueError(f"{path}:{line_no}: unsupported target {target!r}")
 
 
 def hex_to_bytes(text: str) -> bytes:
@@ -140,7 +121,18 @@ def _validate_config_fields(
             expected_len = field.hex_len
             if field.hex_len_by:
                 selector_name, selector_map = next(iter(field.hex_len_by.items()))
-                expected_len = int(selector_map[str(data[selector_name])])
+                selector_value = data.get(selector_name)
+                if selector_value is None:
+                    raise ValueError(
+                        f"{path}:{line_no}: {field.name} length selector {selector_name} is missing"
+                    )
+                selector_key = str(selector_value)
+                if selector_key not in selector_map:
+                    raise ValueError(
+                        f"{path}:{line_no}: {field.name} length selector "
+                        f"{selector_name}={selector_key!r} is not one of {sorted(selector_map)}"
+                    )
+                expected_len = int(selector_map[selector_key])
             _validate_hex(path, line_no, data, field.name, expected_len)
         else:
             if field.name not in data:
