@@ -5,6 +5,7 @@ import hashlib
 from .bfm_base import ReplayResult
 from .corpus import FuzzCase, bytes_to_words, hex_to_bytes, words_to_bytes
 from .mem_bus_bfm import MemoryMappedBfm
+from .target_config import TargetConfig
 
 
 ADDR_CTRL = 0x08
@@ -18,8 +19,8 @@ CTRL_MODE = 0x04
 
 
 class Sha256Driver:
-    def __init__(self):
-        self.bfm = MemoryMappedBfm(poll_limit=1024)
+    def __init__(self, config: TargetConfig | None = None):
+        self.bfm = MemoryMappedBfm(poll_limit=1024, signals=config.signals if config else None)
 
     async def reset(self) -> None:
         await self.bfm.reset()
@@ -65,4 +66,3 @@ def sha2_padded_blocks(message: bytes) -> list[bytes]:
         padded.append(0)
     padded.extend(bit_len.to_bytes(8, "big"))
     return [bytes(padded[idx : idx + 64]) for idx in range(0, len(padded), 64)]
-

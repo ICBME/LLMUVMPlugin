@@ -1,7 +1,21 @@
 name = "tinyalu"
 toplevel = "tinyalu"
+clock = "clk"
+clock_period_ns = 1.0
+reset = "reset_n"
 driver = "fuzz_bfm.tinyalu_driver:TinyAluDriver"
+coverage_model = "fuzz_uvm.functional_coverage:TinyAluCoverageModel"
 schema = "semantic JSONL: target,a,b,op,origin"
+
+[signals]
+clk = "clk"
+reset_n = "reset_n"
+valid = "valid"
+read = "read"
+addr = "addr"
+wdata = "wdata"
+wmask = "wmask"
+rdata = "rdata"
 
 [[field]]
 name = "a"

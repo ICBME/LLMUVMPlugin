@@ -8,7 +8,7 @@ from pyuvm import ConfigDB, uvm_analysis_port, uvm_driver, uvm_subscriber
 
 from fuzz_bfm.plugin_loader import build_driver
 from fuzz_bfm.target_config import TargetConfig
-from fuzz_uvm.functional_coverage import FunctionalCoverageModel
+from fuzz_uvm.functional_coverage import build_coverage_model
 from fuzz_uvm.transactions import FuzzSeqItem, ReplayRecord
 
 
@@ -71,9 +71,9 @@ class ReplayScoreboard(uvm_subscriber):
 
 class FunctionalCoverageSubscriber(uvm_subscriber):
     def build_phase(self) -> None:
-        target: str = ConfigDB().get(self, "", "FUZZ_TARGET")
-        self.model = FunctionalCoverageModel(target)
-        default_path = Path("coverage") / f"{target}_uvm_functional_coverage.json"
+        config: TargetConfig = ConfigDB().get(self, "", "FUZZ_TARGET_CONFIG")
+        self.model = build_coverage_model(config.name, config=config)
+        default_path = Path("coverage") / f"{config.name}_uvm_functional_coverage.json"
         self.output_path = Path(os.getenv("UVM_FUNCTIONAL_COVERAGE_OUT", str(default_path)))
 
     def write(self, record: ReplayRecord) -> None:

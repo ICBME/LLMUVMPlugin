@@ -31,6 +31,10 @@ class TargetConfig:
     driver: str
     path: Path
     toplevel: str | None = None
+    clock: str = "clk"
+    clock_period_ns: float = 1.0
+    reset: str | None = "reset_n"
+    signals: dict[str, str] = field(default_factory=dict)
     bfm_ir: Path | None = None
     coverage_hints: str | None = None
     oracle: str | None = None
@@ -52,11 +56,16 @@ def load_target_config(target: str, targets_dir: Path | None = None) -> TargetCo
     if not isinstance(driver, str) or not driver:
         raise ValueError(f"{path}: target config must define driver = 'module:Class'")
     bfm_ir = data.get("bfm_ir")
+    signals = _signals_from_dict(path, data.get("signals", {}))
     return TargetConfig(
         name=name,
         driver=driver,
         path=path,
         toplevel=str(data["toplevel"]) if "toplevel" in data else None,
+        clock=str(data.get("clock", "clk")),
+        clock_period_ns=float(data.get("clock_period_ns", 1.0)),
+        reset=str(data["reset"]) if "reset" in data else "reset_n",
+        signals=signals,
         bfm_ir=(path.parent / str(bfm_ir)).resolve() if bfm_ir else None,
         coverage_hints=str(data["coverage_hints"]) if "coverage_hints" in data else None,
         oracle=str(data["oracle"]) if "oracle" in data else None,
@@ -109,6 +118,14 @@ def _field_from_dict(data: dict[str, Any]) -> FieldSpec:
             for selector, choices in hex_len_by.items()
         },
     )
+
+
+def _signals_from_dict(path: Path, raw_signals: Any) -> dict[str, str]:
+    if raw_signals is None:
+        return {}
+    if not isinstance(raw_signals, dict):
+        raise ValueError(f"{path}: signals must be a TOML table")
+    return {str(key): str(value) for key, value in raw_signals.items()}
 
 
 def _optional_int(value: Any) -> int | None:

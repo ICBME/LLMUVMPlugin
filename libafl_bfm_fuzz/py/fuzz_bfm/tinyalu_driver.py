@@ -5,6 +5,7 @@ import sys
 
 from .bfm_base import ReplayResult
 from .corpus import FuzzCase
+from .target_config import TargetConfig
 
 
 THIS_DIR = Path(__file__).resolve()
@@ -24,9 +25,10 @@ ALU_REG_CMD_DONE_SHIFT = 6
 
 
 class TinyAluDriver:
-    def __init__(self, poll_limit: int = 32):
+    def __init__(self, poll_limit: int = 32, config: TargetConfig | None = None):
         self.bfm = TinyAluBfm()
         self.poll_limit = poll_limit
+        self.config = config
 
     async def reset(self) -> None:
         await self.bfm.reset()
@@ -57,4 +59,3 @@ class TinyAluDriver:
                 )
 
         raise TimeoutError(f"TinyALU operation did not finish: A=0x{a:02x} B=0x{b:02x} op={op.name}")
-

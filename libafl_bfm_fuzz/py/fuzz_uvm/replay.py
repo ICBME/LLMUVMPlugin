@@ -27,13 +27,15 @@ class LibAflUvmReplayTest(uvm_test):
 
         self.raise_objection()
         try:
-            clock = Clock(cocotb.top.clk, 1, "ns")
+            clock_signal = getattr(cocotb.top, self.context.config.clock)
+            clock = Clock(clock_signal, self.context.config.clock_period_ns, "ns")
             cocotb.start_soon(clock.start())
 
             self.logger.info(
-                "LibAFL UVM replay: target=%s driver=%s corpus=%s total_cases=%d",
+                "LibAFL UVM replay: target=%s driver=%s clock=%s corpus=%s total_cases=%d",
                 self.context.target,
                 self.context.config.driver,
+                self.context.config.clock,
                 self.context.corpus,
                 len(self.context.cases),
             )

@@ -16,6 +16,8 @@ FUZZ_DIRECTIVES ?=
 LIBAFL_ITERS ?= 256
 LIBAFL_MAX_SEEDS ?= 32
 LIBAFL_SEED ?= 1
+UVM_SMOKE_ITERS ?= 8
+UVM_SMOKE_MAX_SEEDS ?= 8
 LLM_FEEDBACK ?= 0
 LLM_MODEL ?=
 CARGO ?= cargo
@@ -74,8 +76,8 @@ COMPILE_ARGS += --coverage
 SIM_ARGS += +verilator+coverage+file+$(COVERAGE_DAT)
 endif
 
-MODULE := fuzz_bfm.replay_testbench
-COCOTB_TEST_MODULES := fuzz_bfm.replay_testbench
+MODULE := fuzz_uvm.testbench
+COCOTB_TEST_MODULES := fuzz_uvm.testbench
 GHDL_ARGS := --ieee=synopsys
 COCOTB_HDL_TIMEUNIT = 1ns
 COCOTB_HDL_TIMEPRECISION = 1ps
@@ -92,7 +94,7 @@ clean::
 	@true
 endif
 
-.PHONY: generate-corpus check check-corpus check-all coverage-run coverage-report coverage-feedback llm-coverage-feedback feedback-fuzz llm-feedback-fuzz
+.PHONY: generate-corpus check check-corpus check-uvm check-all coverage-run coverage-report coverage-feedback llm-coverage-feedback feedback-fuzz llm-feedback-fuzz
 
 generate-corpus:
 	mkdir -p $(dir $(FUZZ_CORPUS))
@@ -114,6 +116,11 @@ check-corpus:
 	$(MAKE) TARGET=tinyalu LIBAFL_ITERS=8 LIBAFL_MAX_SEEDS=8 generate-corpus
 	$(MAKE) TARGET=aes LIBAFL_ITERS=8 LIBAFL_MAX_SEEDS=8 generate-corpus
 	$(MAKE) TARGET=sha256 LIBAFL_ITERS=8 LIBAFL_MAX_SEEDS=8 generate-corpus
+
+check-uvm:
+	$(MAKE) TARGET=tinyalu SIM_BUILD=sim_build/tinyalu LIBAFL_ITERS=$(UVM_SMOKE_ITERS) LIBAFL_MAX_SEEDS=$(UVM_SMOKE_MAX_SEEDS) sim
+	$(MAKE) TARGET=aes SIM_BUILD=sim_build/aes LIBAFL_ITERS=$(UVM_SMOKE_ITERS) LIBAFL_MAX_SEEDS=$(UVM_SMOKE_MAX_SEEDS) sim
+	$(MAKE) TARGET=sha256 SIM_BUILD=sim_build/sha256 LIBAFL_ITERS=$(UVM_SMOKE_ITERS) LIBAFL_MAX_SEEDS=$(UVM_SMOKE_MAX_SEEDS) sim
 
 check-all:
 	$(CARGO) test --manifest-path $(LIBAFL_MANIFEST)

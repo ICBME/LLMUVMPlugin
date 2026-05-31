@@ -8,6 +8,7 @@ import sys
 from .bfm_base import ReplayResult
 from .corpus import FuzzCase, bytes_to_words, hex_to_bytes, words_to_bytes
 from .mem_bus_bfm import MemoryMappedBfm
+from .target_config import TargetConfig
 
 
 THIS_DIR = Path(__file__).resolve()
@@ -35,8 +36,8 @@ AES_256_BIT_KEY = 1
 
 
 class AesDriver:
-    def __init__(self):
-        self.bfm = MemoryMappedBfm(poll_limit=512)
+    def __init__(self, config: TargetConfig | None = None):
+        self.bfm = MemoryMappedBfm(poll_limit=512, signals=config.signals if config else None)
         self.model = AES()
         self.model.VERBOSE = False
         self.model.DUMP_VARS = False
@@ -96,4 +97,3 @@ class AesDriver:
             else:
                 result = self.model.aes_decipher_block(key_words, block_words)
         return words_to_bytes(list(result))
-

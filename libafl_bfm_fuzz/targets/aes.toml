@@ -1,8 +1,21 @@
 name = "aes"
 toplevel = "aes"
+clock = "clk"
+clock_period_ns = 1.0
+reset = "reset_n"
 driver = "fuzz_bfm.aes_driver:AesDriver"
+coverage_model = "fuzz_uvm.functional_coverage:AesCoverageModel"
 bus = "secworks memory-mapped cs/we/address/write_data/read_data"
 schema = "semantic JSONL: target,key_len,encdec,key,block,origin"
+
+[signals]
+clk = "clk"
+reset_n = "reset_n"
+cs = "cs"
+we = "we"
+address = "address"
+write_data = "write_data"
+read_data = "read_data"
 
 [[field]]
 name = "key_len"
