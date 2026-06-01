@@ -13,7 +13,8 @@
 6. [插件契约](reference/plugin_contracts.md)
 7. [Corpus 与 Mutation Directives](reference/corpus_directives.md)
 8. [接入新 DUT 指南](guides/add_new_dut.md)
-9. [设计约束](guides/design_constraints.md)
+9. [Secworks 示例闭环](guides/secworks_examples.md)
+10. [设计约束](guides/design_constraints.md)
 
 ## 文档层次
 

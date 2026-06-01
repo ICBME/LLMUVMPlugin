@@ -1,0 +1,47 @@
+name = "secworks_aes"
+toplevel = "aes"
+clock = "clk"
+clock_period_ns = 2.0
+reset = "reset_n"
+driver = "fuzz_examples.secworks_aes:AesMmioDriver"
+ref_model = "fuzz_examples.secworks_aes:AesRefModel"
+scoreboard = "fuzz_uvm.scoreboards:ResultScoreboard"
+coverage_model = "fuzz_examples.secworks_aes:AesCoverageModel"
+
+[signals]
+clk = "clk"
+reset_n = "reset_n"
+cs = "cs"
+we = "we"
+address = "address"
+write_data = "write_data"
+read_data = "read_data"
+
+[[field]]
+name = "op"
+kind = "enum"
+choices = ["encrypt", "decrypt"]
+
+[[field]]
+name = "key_len"
+kind = "int"
+choices = [128, 256]
+
+[[field]]
+name = "key"
+kind = "hex"
+hex_len_by = { key_len = { "128" = 16, "256" = 32 } }
+
+[[field]]
+name = "block"
+kind = "hex"
+hex_len = 16
+
+[[coverpoint]]
+name = "block_pattern"
+field = "block"
+patterns = ["zero", "ff", "increment", "mixed"]
+
+[[cross]]
+name = "op_x_key_len"
+coverpoints = ["op", "key_len"]

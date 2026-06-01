@@ -98,7 +98,7 @@ generate-corpus: require-target-config
 
 check:
 	$(CARGO) test --manifest-path $(LIBAFL_MANIFEST)
-	$(PYTHON) -m py_compile coverage_feedback.py validate_corpus.py py/fuzz_bfm/*.py py/fuzz_feedback/*.py py/fuzz_uvm/*.py
+	$(PYTHON) -m py_compile coverage_feedback.py validate_corpus.py py/fuzz_bfm/*.py py/fuzz_feedback/*.py py/fuzz_uvm/*.py py/fuzz_examples/*.py
 
 check-corpus: generate-corpus
 

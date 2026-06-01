@@ -1,0 +1,33 @@
+name = "secworks_sha256"
+toplevel = "sha256"
+clock = "clk"
+clock_period_ns = 4.0
+reset = "reset_n"
+driver = "fuzz_examples.secworks_sha256:Sha256MmioDriver"
+ref_model = "fuzz_examples.secworks_sha256:Sha256RefModel"
+scoreboard = "fuzz_uvm.scoreboards:ResultScoreboard"
+coverage_model = "fuzz_examples.secworks_sha256:Sha256CoverageModel"
+
+[signals]
+clk = "clk"
+reset_n = "reset_n"
+cs = "cs"
+we = "we"
+address = "address"
+write_data = "write_data"
+read_data = "read_data"
+error = "error"
+
+[[field]]
+name = "mode"
+kind = "enum"
+choices = ["sha224", "sha256"]
+
+[[field]]
+name = "message"
+kind = "hex"
+
+[[coverpoint]]
+name = "message_pattern"
+field = "message"
+patterns = ["empty", "zero", "ff", "increment", "mixed"]
