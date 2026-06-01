@@ -21,10 +21,40 @@ baseline 只包含 schema mandatory/edge cases；feedback 使用 baseline 生成
 mutation directives 重新生成 corpus 并重新采集 RTL coverage。AES 运行时使用
 `EXTRA_ARGS="-Wno-UNOPTFLAT"`。
 
+可用一键脚本复现实验并生成 JSON/Markdown 对比结果：
+
+```sh
+uv run python3 libafl_bfm_fuzz/scripts/coverage_feedback_compare.py --quiet
+```
+
+默认运行 `secworks_aes` 和 `secworks_sha256` 的三组结果：
+
+- `baseline`：不应用 feedback directives。
+- `heuristic`：使用 baseline 生成的 generic heuristic directives。
+- `llm`：基于 baseline coverage summary 调用 `coverage_feedback.py --llm` 生成
+  directives，再用该 directives 重放并采集 coverage。
+
+默认 artifacts 写入
+`libafl_bfm_fuzz/coverage/feedback_compare/`：
+
+- `coverage_feedback_comparison.json`
+- `coverage_feedback_comparison.md`
+- 每个 target/mode 的 corpus、coverage summary、functional coverage、directives
+  和命令日志。
+
 当前环境未设置 `OPENAI_API_KEY`。因此 `--llm` 路径不会真实调用模型，实际输出为：
 
 ```text
 source=heuristic; OPENAI_API_KEY not set
+```
+
+如果需要确保第三组一定是真实 LLM 结果，可设置 `OPENAI_API_KEY` 后加
+`--require-real-llm`：
+
+```sh
+uv run python3 libafl_bfm_fuzz/scripts/coverage_feedback_compare.py \
+  --require-real-llm \
+  --llm-model gpt-4.1-mini
 ```
 
 ## 结果

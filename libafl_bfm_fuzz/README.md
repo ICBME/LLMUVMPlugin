@@ -128,6 +128,13 @@ coverage defaults to `coverage/<target>_uvm_functional_coverage.json`; override
 prefers that replay-exported JSON and falls back to corpus-derived schema
 coverage when it is missing.
 
+To compare baseline, heuristic feedback, and LLM feedback across the local
+Secworks examples:
+
+```sh
+uv run python3 libafl_bfm_fuzz/scripts/coverage_feedback_compare.py --quiet
+```
+
 The repository includes smoke targets for local Secworks RTL examples:
 `secworks_aes` and `secworks_sha256`. See
 `docs/guides/secworks_examples.md` for the exact replay and feedback commands.
