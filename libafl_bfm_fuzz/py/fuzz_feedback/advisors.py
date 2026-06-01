@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import json
 import os
 from pathlib import Path
 import re
 from typing import Any
-from urllib import request
 
 from fuzz_bfm.target_config import CoverpointSpec, FieldSpec, load_target_config
 
@@ -179,19 +179,36 @@ def interesting_field_values(field: FieldSpec) -> list[Any]:
     return sorted(set(values))
 
 
-def write_llm_prompt(path: Path, summary: dict[str, Any], heuristic: dict[str, Any]) -> None:
-    prompt = {
-        "task": "Analyze Verilator RTL coverage gaps and return JSON mutation directives for the LibAFL corpus generator. Return JSON only; do not emit prose.",
+def build_llm_prompt(summary: dict[str, Any], heuristic: dict[str, Any]) -> dict[str, Any]:
+    target = summary["target"]
+    return {
+        "task": (
+            "Analyze Verilator RTL coverage gaps and UVM functional coverage gaps, then "
+            "return mutation directives for the LibAFL corpus generator."
+        ),
+        "response_contract": [
+            "Return one JSON object only.",
+            "The top-level object MUST contain a non-empty 'directives' array.",
+            "Each directive MUST target the requested target name.",
+            "If the heuristic baseline is already the best option, copy it into 'directives' instead of returning an empty list.",
+            "Prefer explicit 'cases' when a coverage gap requires semantic values not expressible by generic field patterns.",
+        ],
         "target": summary["target"],
         "allowed_schema": allowed_schema(),
+        "target_schema": target_schema(target),
         "coverage_summary": summary,
         "heuristic_baseline": heuristic,
     }
+
+
+def write_llm_prompt(path: Path, summary: dict[str, Any], heuristic: dict[str, Any]) -> None:
+    prompt = build_llm_prompt(summary, heuristic)
     path.write_text(json.dumps(prompt, indent=2, sort_keys=True) + "\n")
 
 
 def allowed_schema() -> dict[str, Any]:
     return {
+        "source": "llm",
         "directives": [
             {
                 "target": "target_name",
@@ -211,33 +228,128 @@ def allowed_schema() -> dict[str, Any]:
     }
 
 
+def target_schema(target: str) -> dict[str, Any]:
+    try:
+        config = load_target_config(target)
+    except (FileNotFoundError, RuntimeError, ValueError):
+        return {}
+    return {
+        "fields": [asdict(field) for field in config.fields],
+        "coverpoints": [asdict(coverpoint) for coverpoint in config.coverpoints],
+        "crosses": [asdict(cross) for cross in config.crosses],
+    }
+
+
 def maybe_call_llm(prompt: dict[str, Any], model: str | None) -> dict[str, Any] | None:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return None
     model = model or os.getenv("OPENAI_MODEL") or "gpt-4.1-mini"
     base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a hardware verification fuzzing assistant. Return strict JSON only.",
-            },
-            {"role": "user", "content": json.dumps(prompt, sort_keys=True)},
-        ],
-        "temperature": 0.2,
-        "response_format": {"type": "json_object"},
-    }
-    req = request.Request(
-        f"{base_url}/chat/completions",
-        data=json.dumps(payload).encode(),
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        method="POST",
+    return call_langchain_llm(prompt, model=model, api_key=api_key, base_url=base_url)
+
+
+def call_langchain_llm(
+    prompt: dict[str, Any],
+    *,
+    model: str,
+    api_key: str,
+    base_url: str,
+) -> dict[str, Any]:
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from langchain_openai import ChatOpenAI
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "LangChain LLM feedback requires langchain-openai and langchain-core. "
+            "Install project dependencies with `uv sync` or `uv pip install -e .`."
+        ) from exc
+
+    llm = ChatOpenAI(
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=0.1,
+        timeout=60,
+        max_retries=2,
+        model_kwargs={"response_format": {"type": "json_object"}},
     )
-    with request.urlopen(req, timeout=60) as resp:
-        raw = json.loads(resp.read().decode())
-    return json.loads(extract_json(raw["choices"][0]["message"]["content"]))
+    response = llm.invoke(
+        [
+            SystemMessage(
+                content=(
+                    "You are a hardware verification fuzzing assistant. "
+                    "Return strict JSON that satisfies the user's response_contract."
+                )
+            ),
+            HumanMessage(content=json.dumps(prompt, sort_keys=True)),
+        ],
+        config={
+            "run_name": "coverage_feedback_directives",
+            "tags": ["coverage-feedback", str(prompt.get("target", "unknown"))],
+            "metadata": {
+                "target": prompt.get("target"),
+                "model": model,
+                "provider": "langchain-openai",
+            },
+        },
+    )
+    raw_text = message_content_to_text(response.content)
+    raw_value = json.loads(extract_json(raw_text))
+    return normalize_llm_response(raw_value, target=str(prompt["target"]), model=model)
+
+
+def message_content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        chunks = []
+        for item in content:
+            if isinstance(item, str):
+                chunks.append(item)
+            elif isinstance(item, dict):
+                chunks.append(str(item.get("text") or item.get("content") or item))
+            else:
+                chunks.append(str(item))
+        return "\n".join(chunks)
+    return str(content)
+
+
+def normalize_llm_response(value: dict[str, Any], *, target: str, model: str | None = None) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"LLM response JSON must be an object, got {type(value).__name__}")
+
+    directive_value = find_directives(value)
+    if directive_value is None and looks_like_directive(value):
+        directive_value = [value]
+    if isinstance(directive_value, dict):
+        directive_value = [directive_value]
+
+    normalized = {
+        "source": f"llm:langchain:{model or 'unknown'}",
+        "provider": "langchain-openai",
+        "model": model,
+        "raw_response": value,
+        "directives": directive_value if directive_value is not None else [],
+    }
+    return normalized
+
+
+def find_directives(value: dict[str, Any]) -> Any:
+    for key in ("directives", "mutation_directives", "directive"):
+        if key in value:
+            return value[key]
+    for key in ("result", "output", "response"):
+        nested = value.get(key)
+        if isinstance(nested, dict):
+            found = find_directives(nested)
+            if found is not None:
+                return found
+    return None
+
+
+def looks_like_directive(value: dict[str, Any]) -> bool:
+    return any(key in value for key in ("target", "name", "reason", "cases", "weight"))
 
 
 def extract_json(text: str) -> str:
@@ -253,7 +365,11 @@ def extract_json(text: str) -> str:
 def validate_directives(target: str, value: dict[str, Any]) -> dict[str, Any]:
     directives = value.get("directives")
     if not isinstance(directives, list) or not directives:
-        raise ValueError("directive JSON must contain a non-empty directives list")
+        keys = ", ".join(sorted(str(key) for key in value.keys()))
+        raise ValueError(
+            "directive JSON must contain a non-empty directives list "
+            f"(top-level keys: {keys or '<none>'})"
+        )
     filtered = []
     for idx, directive in enumerate(directives):
         if not isinstance(directive, dict):
@@ -266,5 +382,5 @@ def validate_directives(target: str, value: dict[str, Any]) -> dict[str, Any]:
             continue
         filtered.append(directive)
     if not filtered:
-        raise ValueError("no usable directives for target")
+        raise ValueError(f"no usable directives for target {target!r}")
     return {"source": value.get("source", "llm"), "directives": filtered}

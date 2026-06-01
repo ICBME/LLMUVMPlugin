@@ -12,7 +12,12 @@ sys.path.insert(0, str(ROOT / "libafl_bfm_fuzz" / "py"))
 
 from fuzz_bfm.corpus import load_cases  # noqa: E402
 from fuzz_bfm.target_config import load_target_config  # noqa: E402
-from fuzz_feedback.advisors import propose_directives  # noqa: E402
+from fuzz_feedback.advisors import (  # noqa: E402
+    build_llm_prompt,
+    normalize_llm_response,
+    propose_directives,
+    validate_directives,
+)
 from fuzz_feedback.coverage import build_summary  # noqa: E402
 from fuzz_uvm.functional_coverage import build_functional_coverage  # noqa: E402
 from fuzz_uvm.functional_coverage import GenericCoverageModel  # noqa: E402
@@ -177,6 +182,45 @@ class TestLibAflBfmGeneric(unittest.TestCase):
             self.assertEqual(directive["name"], "functional_schema_refresh")
             self.assertEqual(directive["mode_values"], ["write"])
             self.assertEqual(directive["payload_patterns"], ["ff"])
+
+    def test_llm_prompt_includes_response_contract_and_allowed_schema(self):
+        prompt = build_llm_prompt(
+            {
+                "target": "demo",
+                "uncovered_line_count": 1,
+                "uvm_functional_coverage": {},
+                "stimulus_summary": {},
+            },
+            {"source": "generic heuristic", "directives": [{"target": "demo"}]},
+        )
+
+        self.assertIn("response_contract", prompt)
+        self.assertIn("allowed_schema", prompt)
+        self.assertIn("directives", prompt["allowed_schema"])
+        self.assertIn("coverage_summary", prompt)
+
+    def test_llm_response_normalizer_accepts_common_directive_aliases(self):
+        value = normalize_llm_response(
+            {
+                "source": "llm",
+                "mutation_directives": {
+                    "target": "demo",
+                    "name": "probe",
+                    "cases": [{"mode": "write"}],
+                },
+            },
+            target="demo",
+            model="test-model",
+        )
+
+        directives = validate_directives("demo", value)
+
+        self.assertEqual(directives["source"], "llm:langchain:test-model")
+        self.assertEqual(directives["directives"][0]["name"], "probe")
+
+    def test_validate_directives_reports_top_level_keys_for_empty_response(self):
+        with self.assertRaisesRegex(ValueError, "top-level keys: analysis"):
+            validate_directives("demo", {"analysis": "no directive"})
 
 
 if __name__ == "__main__":

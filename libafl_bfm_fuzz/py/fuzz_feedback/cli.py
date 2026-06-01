@@ -5,7 +5,13 @@ import json
 from pathlib import Path
 import sys
 
-from .advisors import maybe_call_llm, propose_directives, validate_directives, write_llm_prompt
+from .advisors import (
+    build_llm_prompt,
+    maybe_call_llm,
+    propose_directives,
+    validate_directives,
+    write_llm_prompt,
+)
 from .coverage import build_summary
 
 
@@ -32,11 +38,7 @@ def main() -> int:
         functional_coverage=args.functional_coverage,
     )
     heuristic = propose_directives(summary)
-    prompt = {
-        "target": args.target,
-        "coverage_summary": summary,
-        "heuristic_baseline": heuristic,
-    }
+    prompt = build_llm_prompt(summary, heuristic)
 
     final_directives = heuristic
     if args.llm:

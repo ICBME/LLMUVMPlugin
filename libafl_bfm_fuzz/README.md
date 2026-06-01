@@ -135,6 +135,9 @@ Secworks examples:
 uv run python3 libafl_bfm_fuzz/scripts/coverage_feedback_compare.py --quiet
 ```
 
+LLM feedback uses LangChain's OpenAI chat integration, so LangSmith tracing can
+be enabled with `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY`.
+
 The repository includes smoke targets for local Secworks RTL examples:
 `secworks_aes` and `secworks_sha256`. See
 `docs/guides/secworks_examples.md` for the exact replay and feedback commands.

@@ -52,10 +52,18 @@ source=heuristic; OPENAI_API_KEY not set
 `--require-real-llm`：
 
 ```sh
+export OPENAI_API_KEY=...
+export LANGSMITH_TRACING=true
+export LANGSMITH_API_KEY=...
 uv run python3 libafl_bfm_fuzz/scripts/coverage_feedback_compare.py \
   --require-real-llm \
   --llm-model gpt-4.1-mini
 ```
+
+LLM feedback 通过 LangChain `ChatOpenAI` 调用模型；如果设置了 LangSmith 环境变量，
+调用会以 `coverage_feedback_directives` run name 记录，并带有
+`coverage-feedback` 和 target name tags。`OPENAI_BASE_URL` 与 `OPENAI_MODEL`
+仍可用于切换兼容 OpenAI API 的服务和默认模型。
 
 ## 结果
 
