@@ -78,7 +78,9 @@ class FunctionalCoverageSubscriber(uvm_subscriber):
         self.output_path = Path(os.getenv("UVM_FUNCTIONAL_COVERAGE_OUT", str(default_path)))
 
     def write(self, record: ReplayRecord) -> None:
-        if record.error is None:
+        if callable(getattr(self.model, "sample_record", None)):
+            self.model.sample_record(record)
+        elif record.error is None:
             self.model.sample(record.case)
 
     def report_phase(self) -> None:

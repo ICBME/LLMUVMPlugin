@@ -122,4 +122,8 @@ UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz \
 ```
 
 Artifacts are written under `coverage/`, including structural RTL coverage,
-schema-driven UVM functional coverage, prompt payloads, and mutation directives.
+UVM functional coverage, prompt payloads, and mutation directives. Functional
+coverage defaults to `coverage/<target>_uvm_functional_coverage.json`; override
+`UVM_FUNCTIONAL_COVERAGE_OUT` to write it elsewhere. The feedback summary
+prefers that replay-exported JSON and falls back to corpus-derived schema
+coverage when it is missing.

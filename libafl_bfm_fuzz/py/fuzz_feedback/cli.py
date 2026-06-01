@@ -14,6 +14,7 @@ def main() -> int:
     parser.add_argument("--target", required=True)
     parser.add_argument("--coverage-info", type=Path, required=True)
     parser.add_argument("--coverage-dat", type=Path)
+    parser.add_argument("--functional-coverage", type=Path)
     parser.add_argument("--corpus", type=Path, required=True)
     parser.add_argument("--summary-out", type=Path, required=True)
     parser.add_argument("--directives-out", type=Path, required=True)
@@ -28,6 +29,7 @@ def main() -> int:
         args.coverage_info,
         args.corpus,
         coverage_dat=args.coverage_dat,
+        functional_coverage=args.functional_coverage,
     )
     heuristic = propose_directives(summary)
     prompt = {

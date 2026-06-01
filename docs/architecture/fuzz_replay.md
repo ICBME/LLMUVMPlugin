@@ -59,13 +59,19 @@
 5. `ReplayDriver` 调用目标 driver plugin。
 6. 可选 ref model 填充 expected。
 7. Scoreboard 检查 result。
-8. Functional coverage subscriber 输出 JSON summary。
+8. Functional coverage subscriber 输出 JSON summary。默认路径为
+   `coverage/<target>_uvm_functional_coverage.json`，可由
+   `UVM_FUNCTIONAL_COVERAGE_OUT` 覆盖。
 
 ## Coverage Feedback Flow
 
 1. Verilator coverage 输出 `.dat` / `.info`。
 2. `coverage.py` 汇总 uncovered line、structural coverage、functional coverage 和 stimulus summary。
-3. `advisors.py` 生成 generic directives，或调用 LLM 生成 directives。
+   它优先读取 UVM replay 导出的 functional coverage JSON；如果文件不存在，则回退到
+   从 JSONL corpus 重新计算 schema-level functional coverage。
+3. `advisors.py` 生成 generic directives，优先使用 functional coverage 中的 uncovered
+   field/coverpoint，再回退到 sparse stimulus field heuristic；也可调用 LLM 生成
+   directives。
 4. 下一轮 `generate-corpus` 通过 `--directives` 读取 directives。
 
 ## 当前 replay 粒度

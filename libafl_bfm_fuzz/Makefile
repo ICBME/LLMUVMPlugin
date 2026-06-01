@@ -9,6 +9,7 @@ COVERAGE_DAT ?= $(COVERAGE_DIR)/$(TARGET)_coverage.dat
 COVERAGE_INFO ?= $(COVERAGE_DIR)/$(TARGET)_coverage.info
 COVERAGE_ANNOTATED ?= $(COVERAGE_DIR)/$(TARGET)_annotated
 COVERAGE_SUMMARY ?= $(COVERAGE_DIR)/$(TARGET)_coverage_summary.json
+UVM_FUNCTIONAL_COVERAGE_OUT ?= $(COVERAGE_DIR)/$(TARGET)_uvm_functional_coverage.json
 LLM_PROMPT ?= $(COVERAGE_DIR)/$(TARGET)_llm_prompt.json
 LLM_RESPONSE ?= $(COVERAGE_DIR)/$(TARGET)_llm_response.json
 MUTATION_DIRECTIVES ?= $(COVERAGE_DIR)/$(TARGET)_mutation_directives.json
@@ -27,6 +28,7 @@ export COCOTB_REDUCED_LOG_FMT = 1
 export PYTHONPATH := $(CWD)/py:$(EXTRA_PYTHONPATH):$(PYTHONPATH)
 export LIBAFL_CORPUS := $(FUZZ_CORPUS)
 export FUZZ_TARGET := $(TARGET)
+export UVM_FUNCTIONAL_COVERAGE_OUT
 ifneq ($(strip $(TARGET_CONFIG)),)
 export FUZZ_TARGET_CONFIG := $(TARGET_CONFIG)
 endif
@@ -120,6 +122,7 @@ coverage-feedback: coverage-report
 		--target $(TARGET) \
 		--coverage-info $(COVERAGE_INFO) \
 		--coverage-dat $(COVERAGE_DAT) \
+		--functional-coverage $(UVM_FUNCTIONAL_COVERAGE_OUT) \
 		--corpus $(FUZZ_CORPUS) \
 		--summary-out $(COVERAGE_SUMMARY) \
 		--directives-out $(MUTATION_DIRECTIVES) \

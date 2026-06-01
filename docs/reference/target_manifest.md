@@ -55,6 +55,8 @@ hex_len = 16
 - `coverage_model`：functional coverage plugin。
 - `bfm_ir`：指向 `rtlagent_bfm` IR 文件。
 - `sequence_schema`：保留给 sequence plugin/schema 扩展。
+- `[[coverpoint]]`：可选功能覆盖点声明，供默认 coverage model 和 feedback advisor 使用。
+- `[[cross]]`：可选功能覆盖交叉声明。
 
 ## LLM 生成产物接入
 
@@ -127,6 +129,41 @@ hex_len_by = { size = { "1" = 1, "2" = 2, "4" = 4 } }
 
 - 只做存在性约束。
 - 生成器按通用文本处理。
+
+## Functional Coverage Schema
+
+默认 coverage model 会自动统计 manifest `[[field]]` 的字段值、相邻字段 cross，以及
+可选的 `[[coverpoint]]` / `[[cross]]`。
+
+`[[coverpoint]]` 基本格式：
+
+```toml
+[[coverpoint]]
+name = "op_kind"
+field = "op"
+bins = ["read", "write"]
+```
+
+对 `hex` 字段可以声明 pattern bins：
+
+```toml
+[[coverpoint]]
+name = "payload_pattern"
+field = "payload"
+patterns = ["zero", "ff", "increment", "alternating", "walking_one"]
+```
+
+`[[cross]]` 引用字段名或 coverpoint 名：
+
+```toml
+[[cross]]
+name = "op_x_payload_pattern"
+coverpoints = ["op", "payload_pattern"]
+```
+
+这些声明只影响 Python functional coverage 和 feedback directive 生成，不改变 Rust
+corpus generator 的 schema decode 规则。为了避免过大的 summary，默认 coverage model
+只会为不超过 1024 个期望组合的 cross 计算 uncovered bins。
 
 ## 路径解析
 

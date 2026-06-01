@@ -114,6 +114,16 @@ UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz \
 - `<target>_uvm_functional_coverage.json`
 - `<target>_mutation_directives.json`
 
+如果需要自定义功能覆盖率输出路径，可设置：
+
+```sh
+UVM_FUNCTIONAL_COVERAGE_OUT=/path/to/my_dut_functional.json
+```
+
+默认 coverage model 会统计 manifest 字段、可选 `[[coverpoint]]` 和 `[[cross]]`。
+如果覆盖点需要 DUT response、错误类型或协议状态机上下文，应提供目标专用
+`coverage_model` plugin，并可实现 `sample_record(record)`。
+
 ## 9. 保持目标代码外置
 
 目标专用文件应保存在目标工程或插件目录中，不放进框架核心：

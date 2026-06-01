@@ -111,12 +111,21 @@ def build_summary(
     coverage_info: Path,
     corpus: Path,
     coverage_dat: Path | None = None,
+    functional_coverage: Path | None = None,
 ) -> dict[str, Any]:
     uncovered, file_counts = parse_lcov_info(coverage_info)
+    uvm_functional_coverage, functional_coverage_source = load_functional_coverage(
+        target,
+        corpus,
+        functional_coverage,
+    )
     return {
         "target": target,
         "coverage_info": str(coverage_info),
         "coverage_dat": str(coverage_dat) if coverage_dat is not None else None,
+        "functional_coverage": (
+            str(functional_coverage) if functional_coverage is not None else None
+        ),
         "corpus": str(corpus),
         "uncovered_line_count": len(uncovered),
         "uncovered_by_file": file_counts,
@@ -125,9 +134,20 @@ def build_summary(
             coverage_info=coverage_info,
             coverage_dat=coverage_dat,
         ),
-        "uvm_functional_coverage": build_functional_coverage_from_jsonl(corpus, target),
+        "uvm_functional_coverage": uvm_functional_coverage,
+        "uvm_functional_coverage_source": functional_coverage_source,
         "stimulus_summary": parse_corpus(corpus, target),
     }
+
+
+def load_functional_coverage(
+    target: str,
+    corpus: Path,
+    functional_coverage: Path | None,
+) -> tuple[dict[str, Any], str]:
+    if functional_coverage is not None and functional_coverage.exists():
+        return json.loads(functional_coverage.read_text()), str(functional_coverage)
+    return build_functional_coverage_from_jsonl(corpus, target), "corpus_fallback"
 
 
 def _try_load_target_config(target: str):

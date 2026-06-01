@@ -88,12 +88,22 @@ class MyCoverageModel:
     def sample(self, case) -> None:
         ...
 
+    def sample_record(self, record) -> None:
+        ...
+
     def to_json(self) -> dict:
         ...
 ```
 
-默认 coverage model 只统计 schema 字段和相邻字段 cross。目标语义覆盖点应放在
-插件中。
+要求：
+
+- `sample(case)` 是兼容入口，只依赖 stimulus `FuzzCase`。
+- `sample_record(record)` 是可选增强入口；如果存在，UVM subscriber 会优先调用它，
+  使 coverage model 能看到 `record.result`、`record.error` 和 scoreboard 相关上下文。
+- `to_json()` 返回可序列化 summary。
+
+默认 coverage model 统计 schema 字段、可选 manifest coverpoint/cross 和相邻字段
+cross。DUT response、协议状态机、错误类型等目标语义覆盖点应放在插件中。
 
 ## Constructor 注入
 

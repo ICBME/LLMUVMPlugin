@@ -21,7 +21,8 @@
 
 - 默认 replay 粒度是一个 JSONL case 对应一次 `execute(case)`。
 - 默认 scoreboard 要求 expected。
-- 默认 coverage 只表达 schema 层覆盖。
+- 默认 coverage 只表达 schema、manifest coverpoint/cross 和 replay record 层可见覆盖；
+  目标协议语义仍应放在 coverage plugin。
 - `Makefile` 不拥有 DUT RTL 路径；调用方必须传入 `VERILOG_SOURCES` 和 `TOPLEVEL`。
 - 所有生成文件、coverage、sim build、crash corpus 都应留在忽略目录中。
 
@@ -42,7 +43,7 @@
 - Driver plugin 是协议行为边界。
 - Ref model 不驱动 DUT。
 - Scoreboard 负责目标 pass/fail 策略。
-- Coverage model 负责目标语义覆盖。
+- Coverage model 负责目标语义覆盖；需要 result/error 上下文时实现 `sample_record(record)`。
 - Plugin constructor 应显式声明需要的参数，减少静默忽略错误。
 
 ## 推荐扩展顺序

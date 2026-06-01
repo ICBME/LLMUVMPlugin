@@ -26,6 +26,20 @@ class FieldSpec:
 
 
 @dataclass(frozen=True)
+class CoverpointSpec:
+    name: str
+    field: str
+    bins: tuple[Any, ...] = ()
+    patterns: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CrossSpec:
+    name: str
+    coverpoints: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class TargetConfig:
     name: str
     driver: str
@@ -43,6 +57,8 @@ class TargetConfig:
     scoreboard: str | None = None
     coverage_model: str | None = None
     sequence_schema: str | None = None
+    coverpoints: tuple[CoverpointSpec, ...] = ()
+    crosses: tuple[CrossSpec, ...] = ()
     fields: tuple[FieldSpec, ...] = ()
 
 
@@ -76,6 +92,8 @@ def load_target_config(target: str, targets_dir: Path | None = None) -> TargetCo
         scoreboard=str(data["scoreboard"]) if "scoreboard" in data else None,
         coverage_model=str(data["coverage_model"]) if "coverage_model" in data else None,
         sequence_schema=str(data["sequence_schema"]) if "sequence_schema" in data else None,
+        coverpoints=tuple(_coverpoint_from_dict(item) for item in data.get("coverpoint", ())),
+        crosses=tuple(_cross_from_dict(item) for item in data.get("cross", ())),
         fields=tuple(_field_from_dict(item) for item in data.get("field", ())),
     )
 
@@ -122,6 +140,33 @@ def _field_from_dict(data: dict[str, Any]) -> FieldSpec:
             for selector, choices in hex_len_by.items()
         },
     )
+
+
+def _coverpoint_from_dict(data: dict[str, Any]) -> CoverpointSpec:
+    return CoverpointSpec(
+        name=str(data["name"]),
+        field=str(data["field"]),
+        bins=_choices_from_value(data.get("bins")),
+        patterns=tuple(str(pattern) for pattern in data.get("patterns", ())),
+    )
+
+
+def _cross_from_dict(data: dict[str, Any]) -> CrossSpec:
+    coverpoints = data.get("coverpoints", ())
+    if not isinstance(coverpoints, list | tuple) or not coverpoints:
+        raise ValueError("cross must define a non-empty coverpoints list")
+    return CrossSpec(
+        name=str(data["name"]),
+        coverpoints=tuple(str(coverpoint) for coverpoint in coverpoints),
+    )
+
+
+def _choices_from_value(value: Any) -> tuple[Any, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, list):
+        return tuple(value)
+    return (value,)
 
 
 def _signals_from_dict(path: Path, raw_signals: Any) -> dict[str, str]:
