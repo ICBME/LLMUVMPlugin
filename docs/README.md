@@ -9,12 +9,13 @@
 2. [IR 与运行时架构](architecture/ir_runtime.md)
 3. [LLM Plugin Codegen 架构](architecture/llm_plugin_codegen.md)
 4. [Fuzz/Replay 架构](architecture/fuzz_replay.md)
-5. [Target Manifest 参考](reference/target_manifest.md)
-6. [插件契约](reference/plugin_contracts.md)
-7. [Corpus 与 Mutation Directives](reference/corpus_directives.md)
-8. [接入新 DUT 指南](guides/add_new_dut.md)
-9. [Secworks 示例闭环](guides/secworks_examples.md)
-10. [设计约束](guides/design_constraints.md)
+5. [Coverage Feedback 评估](architecture/coverage_feedback_eval.md)
+6. [Target Manifest 参考](reference/target_manifest.md)
+7. [插件契约](reference/plugin_contracts.md)
+8. [Corpus 与 Mutation Directives](reference/corpus_directives.md)
+9. [接入新 DUT 指南](guides/add_new_dut.md)
+10. [Secworks 示例闭环](guides/secworks_examples.md)
+11. [设计约束](guides/design_constraints.md)
 
 ## 文档层次
 
