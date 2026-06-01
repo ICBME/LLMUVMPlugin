@@ -15,3 +15,4 @@ example
 hermes-agent/
 plugin_interface/
 LibAFL
+.env

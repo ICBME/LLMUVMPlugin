@@ -1,9 +1,16 @@
 from __future__ import annotations
 
-from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+from .coverage_export import CoverageExport, CoveragePoint, sorted_uncovered_points
+from .rtl_gap import (
+    RTL_GAP_DOMAIN,
+    RTL_GAP_KIND_PRIORITY,
+    RTL_GAP_PRIORITY_ORDER,
+    build_rtl_gap_export,
+    build_rtl_gap_summary,
+)
 
 
 RTL_STRUCTURAL_COVERAGE_DOMAIN = "rtl_structure"
@@ -18,38 +25,46 @@ VERILATOR_KIND_ALIASES = {
 }
 
 
-@dataclass(frozen=True)
-class RtlStructuralCoveragePoint:
-    """One RTL structural coverage point.
-
-    This model is intentionally separate from future UVM functional coverage.
-    It describes tool-instrumented RTL structure such as lines, branches,
-    expressions, signal toggles, FSM arcs, and user cover points.
-    """
-
-    kind: str
-    file: str
-    line: int | None
-    count: int
-    module: str | None = None
-    object: str | None = None
-    source: str = "verilator"
-
-    @property
-    def hit(self) -> bool:
-        return self.count > 0
-
-    def to_json(self) -> dict[str, Any]:
-        data = asdict(self)
-        data["hit"] = self.hit
-        return data
+RtlStructuralCoveragePoint = CoveragePoint
 
 
 def build_rtl_structure_coverage(
     coverage_info: Path | None = None,
     coverage_dat: Path | None = None,
     max_uncovered_points: int = 160,
+    max_rtl_gaps: int = 48,
+    source_context_radius: int = 2,
+    max_export_points: int | None = 0,
+    target: str | None = None,
 ) -> dict[str, Any]:
+    export = build_rtl_structure_coverage_export(
+        coverage_info=coverage_info,
+        coverage_dat=coverage_dat,
+        target=target,
+    )
+    summary = export.to_json(
+        max_points=max_export_points,
+        max_uncovered_points=max_uncovered_points,
+    )
+    summary["available_kinds"] = sorted(summary["by_kind"].keys())
+    summary["supported_kinds"] = list(RTL_STRUCTURAL_COVERAGE_KINDS)
+    summary["coverage_export"] = export.to_json(
+        max_points=max_export_points,
+        max_uncovered_points=max_uncovered_points,
+    )
+    summary["rtl_gap_summary"] = build_rtl_gap_export(
+        export,
+        max_gaps=max_rtl_gaps,
+        source_context_radius=source_context_radius,
+    )
+    return summary
+
+
+def build_rtl_structure_coverage_export(
+    coverage_info: Path | None = None,
+    coverage_dat: Path | None = None,
+    target: str | None = None,
+) -> CoverageExport:
     points: list[RtlStructuralCoveragePoint] = []
     sources: dict[str, str] = {}
 
@@ -63,20 +78,12 @@ def build_rtl_structure_coverage(
             dat_points = [point for point in dat_points if point.kind != "line"]
         points.extend(dat_points)
 
-    totals = summarize_points(points)
-    return {
-        "domain": RTL_STRUCTURAL_COVERAGE_DOMAIN,
-        "available_kinds": sorted(totals["by_kind"].keys()),
-        "supported_kinds": list(RTL_STRUCTURAL_COVERAGE_KINDS),
-        "sources": sources,
-        "totals": totals["overall"],
-        "by_kind": totals["by_kind"],
-        "by_file": totals["by_file"],
-        "by_module": totals["by_module"],
-        "uncovered_points": [
-            point.to_json() for point in sorted_uncovered(points)[:max_uncovered_points]
-        ],
-    }
+    return CoverageExport(
+        domain=RTL_STRUCTURAL_COVERAGE_DOMAIN,
+        target=target,
+        points=tuple(points),
+        sources=sources,
+    )
 
 
 def parse_lcov_lines(path: Path) -> list[RtlStructuralCoveragePoint]:
@@ -150,56 +157,8 @@ def parse_verilator_metadata(text: str) -> dict[str, str]:
     return metadata
 
 
-def summarize_points(points: list[RtlStructuralCoveragePoint]) -> dict[str, Any]:
-    by_kind: dict[str, Counter[str]] = defaultdict(Counter)
-    by_file: dict[str, Counter[str]] = defaultdict(Counter)
-    by_module: dict[str, Counter[str]] = defaultdict(Counter)
-    overall: Counter[str] = Counter()
-
-    for point in points:
-        add_point(overall, point)
-        add_point(by_kind[point.kind], point)
-        add_point(by_file[point.file or "<unknown>"], point)
-        if point.module is not None:
-            add_point(by_module[point.module], point)
-
-    return {
-        "overall": ratio_dict(overall),
-        "by_kind": {key: ratio_dict(value) for key, value in sorted(by_kind.items())},
-        "by_file": {key: ratio_dict(value) for key, value in sorted(by_file.items())},
-        "by_module": {key: ratio_dict(value) for key, value in sorted(by_module.items())},
-    }
-
-
-def add_point(counter: Counter[str], point: RtlStructuralCoveragePoint) -> None:
-    counter["total"] += 1
-    if point.hit:
-        counter["hit"] += 1
-    else:
-        counter["uncovered"] += 1
-
-
-def ratio_dict(counter: Counter[str]) -> dict[str, Any]:
-    total = counter["total"]
-    hit = counter["hit"]
-    return {
-        "total": total,
-        "hit": hit,
-        "uncovered": counter["uncovered"],
-        "coverage": round(hit / total, 6) if total else None,
-    }
-
-
 def sorted_uncovered(points: list[RtlStructuralCoveragePoint]) -> list[RtlStructuralCoveragePoint]:
-    return sorted(
-        (point for point in points if not point.hit),
-        key=lambda point: (
-            point.kind,
-            point.file,
-            point.line if point.line is not None else -1,
-            point.object or "",
-        ),
-    )
+    return sorted_uncovered_points(points)
 
 
 def module_from_page(page: str) -> str | None:

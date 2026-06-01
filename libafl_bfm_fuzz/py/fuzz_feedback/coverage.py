@@ -114,6 +114,11 @@ def build_summary(
     functional_coverage: Path | None = None,
 ) -> dict[str, Any]:
     uncovered, file_counts = parse_lcov_info(coverage_info)
+    rtl_structure_coverage = build_rtl_structure_coverage(
+        target=target,
+        coverage_info=coverage_info,
+        coverage_dat=coverage_dat,
+    )
     uvm_functional_coverage, functional_coverage_source = load_functional_coverage(
         target,
         corpus,
@@ -130,10 +135,8 @@ def build_summary(
         "uncovered_line_count": len(uncovered),
         "uncovered_by_file": file_counts,
         "uncovered_lines": [asdict(line) for line in uncovered[:120]],
-        "rtl_structure_coverage": build_rtl_structure_coverage(
-            coverage_info=coverage_info,
-            coverage_dat=coverage_dat,
-        ),
+        "rtl_structure_coverage": rtl_structure_coverage,
+        "rtl_gap_summary": rtl_structure_coverage["rtl_gap_summary"],
         "uvm_functional_coverage": uvm_functional_coverage,
         "uvm_functional_coverage_source": functional_coverage_source,
         "stimulus_summary": parse_corpus(corpus, target),

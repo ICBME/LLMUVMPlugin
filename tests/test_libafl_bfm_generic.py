@@ -19,6 +19,10 @@ from fuzz_feedback.advisors import (  # noqa: E402
     validate_directives,
 )
 from fuzz_feedback.coverage import build_summary  # noqa: E402
+from fuzz_feedback.rtl_structure_coverage import (  # noqa: E402
+    build_rtl_structure_coverage,
+    build_rtl_structure_coverage_export,
+)
 from fuzz_uvm.functional_coverage import build_functional_coverage  # noqa: E402
 from fuzz_uvm.functional_coverage import GenericCoverageModel  # noqa: E402
 
@@ -150,6 +154,77 @@ class TestLibAflBfmGeneric(unittest.TestCase):
 
             self.assertEqual(summary["uvm_functional_coverage"]["marker"], "replay")
             self.assertEqual(summary["uvm_functional_coverage_source"], str(functional))
+            self.assertEqual(summary["rtl_gap_summary"]["domain"], "rtl_gap")
+            self.assertEqual(summary["rtl_gap_summary"]["target"], "demo")
+
+    def test_rtl_structure_coverage_builds_gap_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            rtl = tmp_path / "demo.v"
+            rtl.write_text(
+                "\n".join(
+                    [
+                        "module demo;",
+                        "  always_comb begin",
+                        "    if (mode) y = a;",
+                        "    assign z = bus[0];",
+                        "  end",
+                        "endmodule",
+                    ]
+                )
+                + "\n"
+            )
+            info = tmp_path / "coverage.info"
+            info.write_text(f"TN:\nSF:{rtl}\nDA:2,1\nDA:3,0\nend_of_record\n")
+            dat = tmp_path / "coverage.dat"
+            branch_metadata = (
+                f"\x01f\x02{rtl}\x01l\x023\x01t\x02branch"
+                "\x01page\x02v_branch/demo\x01o\x02if mode"
+            )
+            toggle_metadata = (
+                f"\x01f\x02{rtl}\x01l\x024\x01t\x02toggle"
+                "\x01page\x02v_toggle/demo\x01o\x02bus[0]:0->1"
+            )
+            dat.write_text(f"C '{branch_metadata}' 0\nC '{toggle_metadata}' 0\n")
+
+            export = build_rtl_structure_coverage_export(
+                target="demo",
+                coverage_info=info,
+                coverage_dat=dat,
+            )
+            export_json = export.to_json(max_points=None)
+            self.assertEqual(export_json["schema_version"], 1)
+            self.assertEqual(export_json["domain"], "rtl_structure")
+            self.assertEqual(export_json["target"], "demo")
+            self.assertEqual(export_json["point_count"], 4)
+            self.assertIn("id", export_json["points"][0])
+
+            summary = build_rtl_structure_coverage(
+                target="demo",
+                coverage_info=info,
+                coverage_dat=dat,
+            )
+
+            self.assertEqual(summary["coverage_export"]["schema_version"], 1)
+            gaps = summary["rtl_gap_summary"]
+            self.assertEqual(gaps["schema_version"], 1)
+            self.assertEqual(gaps["domain"], "rtl_gap")
+            self.assertEqual(gaps["target"], "demo")
+            self.assertEqual(gaps["total"], 2)
+            self.assertEqual(gaps["total_points"], 3)
+            self.assertEqual(gaps["by_kind"], {"branch": 1, "line": 1, "toggle": 1})
+
+            top_gap = gaps["top_gaps"][0]
+            self.assertIn("id", top_gap)
+            self.assertEqual(top_gap["primary_kind"], "branch")
+            self.assertEqual(top_gap["module"], "demo")
+            self.assertEqual(top_gap["line"], 3)
+            self.assertEqual(top_gap["kinds"], {"branch": 1, "line": 1})
+            self.assertEqual(top_gap["evidence"]["kinds"], {"branch": 1, "line": 1})
+            self.assertEqual(len(top_gap["evidence"]["point_ids"]), 2)
+            self.assertIn({"type": "source_keyword", "value": "mode"}, top_gap["advisor_hints"])
+            self.assertEqual(top_gap["code"], "if (mode) y = a;")
+            self.assertEqual(top_gap["context"][2]["line"], 3)
 
     def test_advisor_uses_functional_uncovered_fields_and_patterns(self):
         with tempfile.TemporaryDirectory() as tmp:
