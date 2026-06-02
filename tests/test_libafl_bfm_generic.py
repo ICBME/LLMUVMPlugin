@@ -19,6 +19,10 @@ from fuzz_feedback.advisors import (  # noqa: E402
     validate_directives,
 )
 from fuzz_feedback.coverage import build_summary  # noqa: E402
+from fuzz_feedback.feedback_loop import (  # noqa: E402
+    build_mutation_feedback,
+    update_mutation_directions,
+)
 from fuzz_feedback.rtl_structure_coverage import (  # noqa: E402
     build_rtl_structure_coverage,
     build_rtl_structure_coverage_export,
@@ -445,6 +449,121 @@ class TestLibAflBfmGeneric(unittest.TestCase):
     def test_validate_directives_reports_top_level_keys_for_empty_response(self):
         with self.assertRaisesRegex(ValueError, "top-level keys: analysis"):
             validate_directives("demo", {"analysis": "no directive"})
+
+    def test_mutation_feedback_increases_effective_direction_weight(self):
+        previous = {
+            "target": "demo",
+            "uncovered_line_count": 2,
+            "stimulus_summary": {"origin_counts": {}},
+            "rtl_structure_coverage": {
+                "totals": {"coverage": 0.5},
+                "coverage_export": {
+                    "uncovered_points": [{"id": "p1"}, {"id": "p2"}],
+                },
+            },
+            "rtl_gap_summary": {
+                "top_gaps": [
+                    {"id": "gap-1", "evidence": {"point_ids": ["p1"]}},
+                    {"id": "gap-2", "evidence": {"point_ids": ["p2"]}},
+                ]
+            },
+            "uvm_functional_coverage": {
+                "origin_counts": {},
+                "bins": {"mode": {"read": 1}},
+                "crosses": {},
+            },
+        }
+        current = {
+            "target": "demo",
+            "uncovered_line_count": 1,
+            "stimulus_summary": {"origin_counts": {"directed": 4}},
+            "rtl_structure_coverage": {
+                "totals": {"coverage": 0.75},
+                "coverage_export": {
+                    "uncovered_points": [{"id": "p2"}],
+                },
+            },
+            "rtl_gap_summary": {
+                "top_gaps": [
+                    {"id": "gap-2", "evidence": {"point_ids": ["p2"]}},
+                ]
+            },
+            "uvm_functional_coverage": {
+                "origin_counts": {"directed": 4},
+                "bins": {"mode": {"read": 1, "write": 1}},
+                "crosses": {},
+            },
+        }
+        directives = {
+            "source": "heuristic",
+            "directives": [
+                {"target": "demo", "name": "directed", "weight": 1, "gap_ids": ["gap-1"]}
+            ],
+        }
+
+        feedback = build_mutation_feedback(previous, current, directives)
+        direction = feedback["directions"]["directed"]
+
+        self.assertEqual(direction["decision"], "increase_weight")
+        self.assertEqual(direction["structural_resolved_points"], 1)
+        self.assertEqual(direction["resolved_gap_count"], 1)
+        self.assertEqual(direction["functional_new_bins"], 1)
+        self.assertGreater(direction["updated_weight"], 1)
+
+        updated = update_mutation_directions(directives, feedback)
+        self.assertEqual(updated["directives"][0]["feedback_decision"], "increase_weight")
+        self.assertGreater(updated["directives"][0]["weight"], 1)
+
+    def test_mutation_feedback_suppresses_stale_direction(self):
+        previous = {
+            "target": "demo",
+            "stimulus_summary": {"origin_counts": {}},
+            "rtl_structure_coverage": {
+                "totals": {"coverage": 0.5},
+                "coverage_export": {"uncovered_points": [{"id": "p1"}]},
+            },
+            "rtl_gap_summary": {
+                "top_gaps": [{"id": "gap-1", "evidence": {"point_ids": ["p1"]}}]
+            },
+            "uvm_functional_coverage": {"origin_counts": {}, "bins": {}, "crosses": {}},
+        }
+        current = {
+            "target": "demo",
+            "stimulus_summary": {"origin_counts": {"stale": 4}},
+            "rtl_structure_coverage": {
+                "totals": {"coverage": 0.5},
+                "coverage_export": {"uncovered_points": [{"id": "p1"}]},
+            },
+            "rtl_gap_summary": {
+                "top_gaps": [{"id": "gap-1", "evidence": {"point_ids": ["p1"]}}]
+            },
+            "uvm_functional_coverage": {
+                "origin_counts": {"stale": 4},
+                "bins": {},
+                "crosses": {},
+            },
+        }
+        directives = {
+            "directives": [{"target": "demo", "name": "stale", "weight": 0.5}]
+        }
+        previous_feedback = {
+            "directions": {
+                "stale": {"stale_count": 2, "updated_weight": 0.5, "success_count": 0}
+            }
+        }
+
+        feedback = build_mutation_feedback(
+            previous,
+            current,
+            directives,
+            previous_feedback=previous_feedback,
+        )
+        updated = update_mutation_directions(directives, feedback)
+
+        self.assertEqual(feedback["directions"]["stale"]["stale_count"], 3)
+        self.assertEqual(feedback["directions"]["stale"]["decision"], "suppress_temporarily")
+        self.assertFalse(updated["directives"][0]["enabled"])
+        self.assertEqual(updated["directives"][0]["weight"], 0.1)
 
 
 if __name__ == "__main__":

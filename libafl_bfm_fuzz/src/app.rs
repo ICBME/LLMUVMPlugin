@@ -397,6 +397,9 @@ impl TargetSchema {
     fn directive_cases_from_value(&self, value: &Value) -> Vec<ExportCase> {
         let mut cases = Vec::new();
         for (idx, directive) in directive_items(value).iter().enumerate() {
+            if directive.get("enabled").and_then(Value::as_bool) == Some(false) {
+                continue;
+            }
             let origin = directive_origin(directive, idx);
             for case in self.explicit_cases(directive) {
                 cases.push(export_case(case, &origin));
@@ -1159,6 +1162,32 @@ hex_len_by = { size = { "1" = 1, "2" = 2, "4" = 4 } }
         assert_eq!(
             cases[0].case.values.get("payload"),
             Some(&CaseValue::Hex(vec![0xde, 0xad, 0xbe, 0xef]))
+        );
+    }
+
+    #[test]
+    fn directives_skip_disabled_items() {
+        let schema = schema_fixture();
+        let directives = serde_json::json!({
+            "directives": [
+                {
+                    "name": "disabled",
+                    "enabled": false,
+                    "cases": [{"mode": "write", "size": 4, "payload": "deadbeef"}]
+                },
+                {
+                    "name": "enabled",
+                    "cases": [{"mode": "read", "size": 1, "payload": "00"}]
+                }
+            ]
+        });
+        let cases = schema.directive_cases_from_value(&directives);
+
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0].origin, "enabled");
+        assert_eq!(
+            cases[0].case.values.get("payload"),
+            Some(&CaseValue::Hex(vec![0x00]))
         );
     }
 }
