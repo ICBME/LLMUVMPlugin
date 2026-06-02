@@ -39,6 +39,23 @@ mutation directives
 next corpus generation
 ```
 
+实际 fuzz 闭环按执行频率拆成三层反馈：
+
+```text
+Layer 1: coverage -> rtl_gap -> mutation plan
+  低频，重分析，可使用 LLM 处理复杂 gap
+
+Layer 2: mutation rounds -> per-gap feedback
+  中频，比较多轮 gap 状态，判断 gap resolved/improved/stale
+
+Layer 3: mutation direction feedback
+  高频，纯规则统计，不使用 LLM，快速调整 mutation direction 权重
+```
+
+Layer 1 负责理解当前覆盖率缺口，Layer 2 负责判断 gap 是否被解决，Layer 3
+负责判断当前 mutation 方向是否值得继续。三层共享 summary/directives/gap id，但
+不在高频路径上重复做源码分析或 LLM 推理。
+
 ## 模块职责
 
 `py/fuzz_feedback/coverage_export.py`
@@ -78,6 +95,20 @@ next corpus generation
 - 将清晰 `rtl_gap` 转换为无 LLM mutation directives。
 - 将无法确定字段映射的复杂 `rtl_gap` 压缩为 LLM prompt 输入。
 - 当前只实现保守规则，不做复杂 RTL 静态分析。
+
+`py/fuzz_feedback/feedback_loop.py`
+
+- 实现高频 Layer 3 mutation direction feedback。
+- 消费上一轮 summary、当前 summary、当前 directives 和可选上一轮 feedback。
+- 根据新增 case、replay 成功情况、结构覆盖 delta、functional bin delta 等低成本信号评分。
+- 输出每个 direction 的 `score`、`decision`、`updated_weight` 和 `stale_count`。
+- 不调用 LLM，不解析原始 `.info` / `.dat`，不做 RTL 源码语义分析。
+
+`scripts/layer3_mutation_feedback_eval.py`
+
+- 离线评估 Layer 3 反馈效果。
+- 输入两份 coverage summary 和本轮使用的 directives。
+- 输出 mutation feedback JSON、更新后的 directives JSON 和 Markdown 报告。
 
 ## Coverage Export Schema
 
@@ -261,6 +292,207 @@ functional gap directives
 如果存在 `complex_gaps`，`build_llm_prompt()` 会额外加入
 `rtl_gap_mutation_prompt`，供 LLM 生成补充 directives。
 
+## Layer 3 Mutation Feedback
+
+Layer 3 是最高频反馈层，目标是用便宜的统计信号快速判断 mutation direction
+是否有效，并更新下一轮 directives。它不解决“为什么这个 RTL gap 没覆盖”的语义问题；
+这个问题留给 Layer 1/Layer 2。Layer 3 只回答：
+
+```text
+这个 mutation direction 最近是否带来了覆盖收益？
+是否应该增加权重、降低权重，还是临时抑制？
+```
+
+### 输入
+
+`build_mutation_feedback(previous_summary, current_summary, directives, previous_feedback=None)`
+接收：
+
+- `previous_summary`：上一轮 coverage feedback summary。
+- `current_summary`：当前轮 coverage feedback summary。
+- `directives`：上一轮用于生成 corpus 的 mutation directives。
+- `previous_feedback`：可选，上一轮 Layer 3 feedback，用于累计 `stale_count`。
+
+它依赖的 summary 字段都是已有轻量统计：
+
+- `stimulus_summary.origin_counts`：每个 directive origin 生成了多少 corpus case。
+- `uvm_functional_coverage.origin_counts`：每个 directive origin replay 成功了多少 case。
+- `uvm_functional_coverage.bins/crosses`：新增 functional bins。
+- `rtl_structure_coverage.totals.coverage`：整体结构覆盖率变化。
+- `rtl_structure_coverage.coverage_export.uncovered_points`：可选，用于 point 级 resolved 统计。
+- `rtl_gap_summary.top_gaps`：可选，用于 gap 级 resolved 统计。
+
+如果 summary 是旧格式，缺少 `coverage_export.uncovered_points` 或 `rtl_gap_summary.top_gaps`，
+Layer 3 仍可基于整体 coverage delta、functional bins 和 origin counts 工作，只是
+`resolved_point_count` / `resolved_gap_count` 会退化为 0。
+
+### Attribution
+
+当前 corpus/replay summary 是按整体 corpus 聚合的，不是按每个 directive 单独覆盖统计。
+因此 Layer 3 采用保守归因：
+
+- `direct`：只有一个 direction 在本轮产生新增 case，收益直接归给它。
+- `mixed_proportional`：多个 direction 同时产生新增 case，按新增 case 数比例分配收益。
+
+`mixed_proportional` 不用于精确解释单个 case 的贡献，只用于高频权重调整。精确 gap 级归因
+后续由 Layer 2 引入 per-gap 状态和更细的 replay/corpus 记录。
+
+### Scoring
+
+单个 direction 的得分由低成本收益和失败信号组成：
+
+```text
+gain =
+  structural_resolved_points * 2
++ resolved_gap_count * 3
++ functional_new_bins
++ max(0, structural_coverage_delta) * 10
+
+score = gain / sqrt(max(1, new_generated_cases)) - replay_drop * 0.25
+```
+
+其中：
+
+- `new_generated_cases` 来自 `stimulus_summary.origin_counts` 的差值。
+- `replay_drop = new_generated_cases - new_replayed_cases`，用于惩罚生成后 replay 失败或未被采样的 case。
+- `functional_new_bins` 来自 `bins/crosses` 的新增 hit。
+- `structural_resolved_points` 和 `resolved_gap_count` 需要新格式 summary。
+
+### Decision
+
+Layer 3 输出以下 decision：
+
+```text
+inactive              本轮没有新增 case，不调整
+increase_weight       有正收益，提高权重
+decrease_weight       有尝试但没有收益，降低权重
+suppress_temporarily  连续 stale 达到阈值，临时禁用该 direction
+```
+
+权重更新规则：
+
+```text
+increase_weight       min(4.0, max(weight + 0.25, weight * 1.5))
+decrease_weight       max(0.1, weight * 0.7)
+suppress_temporarily  weight = 0.1, enabled = false
+inactive              保持原权重
+```
+
+Rust corpus generator 已支持跳过 `enabled=false` 的 directive，因此 Layer 3 的抑制结果
+会真实影响下一轮 corpus generation。
+
+### Output Schema
+
+`build_mutation_feedback()` 输出：
+
+```json
+{
+  "schema_version": 1,
+  "layer": "mutation_feedback",
+  "target": "secworks_sha256",
+  "attribution": "direct",
+  "aggregate_delta": {
+    "structural_resolved_point_count": 0,
+    "resolved_gap_count": 0,
+    "functional_new_bin_count": 2,
+    "structural_coverage_delta": 0.000482,
+    "uncovered_line_delta": 0,
+    "total_new_generated_cases": 6,
+    "resolved_point_ids": [],
+    "resolved_gap_ids": [],
+    "new_functional_bins": ["bins:message_length:32..55"]
+  },
+  "directions": {
+    "schema_refresh": {
+      "name": "schema_refresh",
+      "gap_ids": [],
+      "new_generated_cases": 6,
+      "new_replayed_cases": 6,
+      "replay_drop": 0,
+      "attribution": "direct",
+      "attribution_share": 1.0,
+      "structural_resolved_points": 0,
+      "resolved_gap_count": 0,
+      "functional_new_bins": 2,
+      "score": 0.818464,
+      "decision": "increase_weight",
+      "previous_weight": 1.0,
+      "updated_weight": 1.5,
+      "stale_count": 0,
+      "success_count": 1
+    }
+  }
+}
+```
+
+`update_mutation_directions()` 会把 feedback 写回 directives：
+
+```json
+{
+  "directives": [
+    {
+      "name": "schema_refresh",
+      "weight": 1.5,
+      "feedback_decision": "increase_weight",
+      "feedback_score": 0.818464
+    }
+  ],
+  "mutation_feedback": {
+    "schema_version": 1,
+    "layer": "mutation_feedback",
+    "aggregate_delta": {}
+  }
+}
+```
+
+若 decision 为 `suppress_temporarily`，directive 会被标记：
+
+```json
+{
+  "name": "stale_direction",
+  "weight": 0.1,
+  "enabled": false,
+  "feedback_decision": "suppress_temporarily"
+}
+```
+
+### Evaluation Script
+
+Layer 3 可用现有 coverage artifacts 离线验证：
+
+```bash
+uv run python libafl_bfm_fuzz/scripts/layer3_mutation_feedback_eval.py \
+  --target secworks_sha256 \
+  --previous-run-dir libafl_bfm_fuzz/coverage/feedback_compare/secworks_sha256/baseline \
+  --current-run-dir libafl_bfm_fuzz/coverage/feedback_compare/secworks_sha256/heuristic \
+  --directives libafl_bfm_fuzz/coverage/feedback_compare/secworks_sha256/baseline/secworks_sha256_mutation_directives.json \
+  --out-dir libafl_bfm_fuzz/coverage/feedback_compare/secworks_sha256/layer3_heuristic
+```
+
+也可以直接传 summary 路径：
+
+```bash
+uv run python libafl_bfm_fuzz/scripts/layer3_mutation_feedback_eval.py \
+  --previous-summary previous_coverage_summary.json \
+  --current-summary current_coverage_summary.json \
+  --directives applied_mutation_directives.json \
+  --feedback-out layer3_mutation_feedback.json \
+  --updated-directives-out layer3_updated_directives.json \
+  --markdown-out layer3_mutation_feedback.md
+```
+
+脚本输出：
+
+- `*_layer3_mutation_feedback.json`：Layer 3 评分结果。
+- `*_layer3_updated_directives.json`：可直接用于下一轮 corpus generation 的 directives。
+- `*_layer3_mutation_feedback.md`：人读评估报告。
+
+当前在已有 `feedback_compare` artifacts 上的观察：
+
+- `secworks_sha256` heuristic direction `schema_refresh`：functional new bins 增加，decision 为 `increase_weight`。
+- `secworks_aes` heuristic direction `schema_refresh`：结构覆盖率明显提升，decision 为 `increase_weight`。
+- LLM 多 direction 场景采用 `mixed_proportional` 归因，所有带来收益的 direction 都会增权。
+
 ## Backward Compatibility
 
 `build_rtl_structure_coverage()` 继续输出旧字段：
@@ -322,12 +554,17 @@ functional_gap: message_length 56+ uncovered
 - 当前 `actionability` 默认为 `unknown`，还没有 waiver/unreachable 机制。
 - `advisor_hints` 是轻量关键词抽取，不替代目标专用 coverage advisor plugin。
 - `CoverageExport` 默认不导出全量 `points`，避免 summary 过大；调试时可显式请求。
+- Layer 3 使用 aggregate summary 做 direction 归因，多个 direction 混跑时只能按 case 数比例分配收益。
+- 如果 summary 缺少 `rtl_gap_summary.top_gaps` 或 `coverage_export.uncovered_points`，
+  Layer 3 无法计算 point/gap 级 resolved，只能使用整体 coverage delta 和 functional bins。
 - 结构覆盖仍缺少 per-case attribution，无法判断某个 corpus case 是否贡献了某个新 gap。
 
 ## Next Steps
 
-1. 扩展 Rust generator 支持 variable-length hex directives，例如 `message_lengths`。
-2. 为 LLM 输出增加更严格的 directive/case validation。
-3. 增加 waiver/unreachable 标注，避免 defensive/default branch 反复污染反馈。
-4. 比较 heuristic structural directives 和 LLM structural directives 的覆盖率收益。
-5. 按同一 `CoverageExport` 模型接入 functional coverage export。
+1. 将 Layer 3 feedback state 接入 `coverage_feedback.py` CLI，自动读取上一轮 summary/feedback 并写出 updated directives。
+2. 实现 Layer 2 per-gap feedback，跟踪 gap resolved/improved/stale 和 attempted directives。
+3. 扩展 Rust generator 支持 variable-length hex directives，例如 `message_lengths`。
+4. 为 LLM 输出增加更严格的 directive/case validation。
+5. 增加 waiver/unreachable 标注，避免 defensive/default branch 反复污染反馈。
+6. 比较 heuristic structural directives 和 LLM structural directives 的覆盖率收益。
+7. 按同一 `CoverageExport` 模型接入 functional coverage export。
