@@ -35,8 +35,10 @@
 
 `py/fuzz_feedback/`
 
-- `coverage.py`：汇总 LCOV、structural coverage、functional coverage 和 stimulus。
-- `rtl_structure_coverage.py`：结构覆盖统计。
+- `coverage.py`：汇总 structured coverage export、RTL gap、functional coverage 和 stimulus。
+- `coverage_export.py`：定义可版本化的 normalized coverage point/export。
+- `rtl_structure_coverage.py`：解析 LCOV 和 Verilator `.dat`，导出 RTL structural coverage。
+- `rtl_gap.py`：从 uncovered structural coverage point 聚合结构化 `rtl_gap`。
 - `advisors.py`：生成 generic directives 或调用 LLM。
 - `cli.py`：命令行入口。
 
@@ -66,13 +68,21 @@
 ## Coverage Feedback Flow
 
 1. Verilator coverage 输出 `.dat` / `.info`。
-2. `coverage.py` 汇总 uncovered line、structural coverage、functional coverage 和 stimulus summary。
+2. `rtl_structure_coverage.py` 将 `.dat` / `.info` 归一化为 structured
+   `CoverageExport(domain="rtl_structure")`。
+3. `rtl_gap.py` 从 uncovered structural coverage points 聚合 `rtl_gap_summary`，
+   包含 gap id、源码上下文、evidence 和 advisor hints。
+4. `coverage.py` 汇总 uncovered line、structured coverage export、`rtl_gap_summary`、
+   functional coverage 和 stimulus summary。
    它优先读取 UVM replay 导出的 functional coverage JSON；如果文件不存在，则回退到
    从 JSONL corpus 重新计算 schema-level functional coverage。
-3. `advisors.py` 生成 generic directives，优先使用 functional coverage 中的 uncovered
-   field/coverpoint，再回退到 sparse stimulus field heuristic；也可调用 LLM 生成
-   directives。
-4. 下一轮 `generate-corpus` 通过 `--directives` 读取 directives。
+5. `advisors.py` 生成 generic directives。当前优先使用 functional coverage 中的
+   uncovered field/coverpoint，再回退到 sparse stimulus field heuristic；后续 structural
+   advisor 应消费 `rtl_gap_summary.top_gaps`。也可调用 LLM 生成 directives。
+6. 下一轮 `generate-corpus` 通过 `--directives` 读取 directives。
+
+结构化 coverage export 和 `rtl_gap` 的 schema 见
+[Coverage Feedback 设计](coverage_feedback_design.md)。
 
 ## 当前 replay 粒度
 

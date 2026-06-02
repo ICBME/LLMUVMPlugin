@@ -77,6 +77,7 @@ JSONL corpus ----------------------> pyUVM sequence
 - 加载插件。
 - 调度 pyUVM replay。
 - 收集结构覆盖和 schema 层 functional coverage。
+- 将结构覆盖导出为 structured coverage export，并聚合为 `rtl_gap`。
 - 生成 generic mutation directives。
 
 目标插件负责：
@@ -96,6 +97,8 @@ JSONL corpus ----------------------> pyUVM sequence
 - Rust generator 只理解 manifest field schema，不理解 DUT 语义。
 - pyUVM replay 只理解 `reset()` / `execute(case)` driver 协议。
 - coverage feedback 只能产生符合 schema 的 directives。
+- advisor 只消费 coverage summary、`rtl_gap` 和 functional gap，不直接解析工具原始
+  coverage artifact。
 
 ## 非目标
 
