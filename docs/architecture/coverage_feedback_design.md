@@ -94,6 +94,8 @@ Layer 1 负责理解当前覆盖率缺口，Layer 2 负责判断 gap 是否被�
 
 - 将清晰 `rtl_gap` 转换为无 LLM mutation directives。
 - 将无法确定字段映射的复杂 `rtl_gap` 压缩为 LLM prompt 输入。
+- 作为 Layer 1 planner 消费可选 Layer 2/3 feedback state：
+  resolved/done gap 会被跳过，stale complex gap 会进入 LLM 候选，deprioritized gap 会降权/阻塞。
 - 当前只实现保守规则，不做复杂 RTL 静态分析。
 
 `py/fuzz_feedback/feedback_loop.py`
@@ -112,6 +114,12 @@ Layer 1 负责理解当前覆盖率缺口，Layer 2 负责判断 gap 是否被�
 - 输入两份 coverage summary、本轮使用的 directives，以及可选上一轮 gap feedback /
   Layer 3 mutation feedback。
 - 输出 gap feedback JSON 和 Markdown 报告。
+
+`scripts/layer1_coverage_feedback_eval.py`
+
+- 离线评估 Layer 1 coverage-to-mutation planning。
+- 输入当前 coverage summary，以及可选 Layer 2 gap feedback 和 Layer 3 mutation feedback。
+- 输出下一轮 directives、structural plan、LLM prompt 和 Markdown 报告。
 
 `scripts/layer3_mutation_feedback_eval.py`
 
@@ -300,6 +308,208 @@ functional gap directives
 
 如果存在 `complex_gaps`，`build_llm_prompt()` 会额外加入
 `rtl_gap_mutation_prompt`，供 LLM 生成补充 directives。
+
+## Layer 1 Coverage Feedback Planning
+
+Layer 1 是最低频、最重分析层。它负责把当前 coverage summary 转换为下一轮
+mutation plan，并把 Layer 2/3 的状态纳入全局决策：
+
+```text
+coverage summary
+  + optional Layer 2 gap feedback
+  + optional Layer 3 mutation feedback
+        |
+        v
+Layer 1 structural plan
+        |
+        +--> heuristic directives
+        +--> complex gaps for LLM
+        +--> skipped/resolved/deprioritized/blocked bookkeeping
+```
+
+Layer 1 当前由 `plan_mutations_from_rtl_gaps()`、`propose_directives()` 和
+`build_llm_prompt()` 共同完成。它不是高频评估层，不做 per-case attribution；
+它只在一轮 coverage artifacts 生成后，决定下一轮整体 mutation 方向。
+
+### Inputs
+
+Layer 1 的核心入口：
+
+```python
+plan_mutations_from_rtl_gaps(
+    summary,
+    gap_feedback=None,
+    mutation_feedback=None,
+)
+```
+
+其中：
+
+- `summary`：当前 coverage feedback summary，包含 `rtl_gap_summary`。
+- `gap_feedback`：可选 Layer 2 输出，包含每个 gap 的 `status` 和 `next_action`。
+- `mutation_feedback`：可选 Layer 3 输出，包含 direction 的 `decision` 和 `updated_weight`。
+
+`propose_directives(summary, gap_feedback=None, mutation_feedback=None)` 会将这些状态传给
+planner，并把结果与 functional coverage directives、schema fallback 合并。
+
+### Gap Selection
+
+Layer 1 使用 Layer 2 的状态对 gap 做低频选择：
+
+```text
+status == resolved 或 next_action == done
+  -> skipped
+
+next_action == deprioritize
+  -> deprioritized / blocked
+
+next_action == escalate_to_llm
+  -> complex_for_llm
+
+next_action == try_alternative 且 gap 本身复杂
+  -> complex_for_llm
+
+status == stale 且 stale_count >= 2 且 gap 本身复杂
+  -> complex_for_llm
+
+其他 clear gap
+  -> 尝试 heuristic_directive_for_gap()
+
+无法映射 manifest field 的 gap
+  -> blocked 或 complex_for_llm
+```
+
+gap 处理顺序按 Layer 2 action 优先级排序：
+
+```text
+escalate_to_llm > try_alternative > retry > plan > continue > deprioritize > done
+```
+
+这样低频 Layer 1 会优先处理多轮 stale 或需要换策略的 gap，而不是反复生成
+已经无效的通用 refresh。
+
+### Mutation Feedback Integration
+
+Layer 3 若将某个 direction 标记为 `suppress_temporarily`，Layer 1 会避免继续强化该方向。
+如果新生成 directive 与被抑制 direction 同名，会标记：
+
+```json
+{
+  "enabled": false,
+  "feedback_decision": "suppress_temporarily"
+}
+```
+
+Rust corpus generator 已支持跳过 `enabled=false`，所以 Layer 1 的禁用结果能直接影响
+下一轮 corpus generation。
+
+### Output Schema
+
+Layer 1 structural plan 示例：
+
+```json
+{
+  "source": "rtl_gap_planner",
+  "target": "secworks_sha256",
+  "heuristic_directives": [],
+  "complex_gaps": [
+    {
+      "id": "gap-stale",
+      "primary_kind": "branch",
+      "code": "if (round_state == DONE) begin",
+      "gap_feedback": {
+        "status": "stale",
+        "next_action": "escalate_to_llm",
+        "stale_count": 2,
+        "attempt_count": 2
+      }
+    }
+  ],
+  "directives": [],
+  "gap_selection": {
+    "heuristic": ["gap-mode"],
+    "complex_for_llm": ["gap-stale"],
+    "skipped": ["gap-resolved"],
+    "deprioritized": [],
+    "blocked": []
+  },
+  "feedback_inputs": {
+    "gap_feedback": true,
+    "mutation_feedback": true
+  },
+  "blocked": []
+}
+```
+
+`propose_directives()` 输出仍保持原有 directives 结构，同时增加：
+
+```json
+{
+  "rtl_gap_mutation_plan": {},
+  "layer_feedback": {
+    "gap_feedback": {},
+    "mutation_feedback": {}
+  }
+}
+```
+
+LLM prompt 中也会包含 `gap_feedback`、`mutation_feedback` 和
+`rtl_gap_mutation_prompt.complex_rtl_gaps`，让 LLM 只处理被 Layer 1 选出的复杂 gap。
+
+### CLI Integration
+
+`coverage_feedback.py` 现在支持 Layer 1 状态输入/输出：
+
+```bash
+python libafl_bfm_fuzz/coverage_feedback.py \
+  --target secworks_sha256 \
+  --coverage-info current.info \
+  --coverage-dat current.dat \
+  --corpus current_corpus.jsonl \
+  --summary-out current_summary.json \
+  --directives-out next_directives.json \
+  --prompt-out next_llm_prompt.json \
+  --previous-summary previous_summary.json \
+  --previous-directives applied_directives.json \
+  --previous-gap-feedback previous_layer2_gap_feedback.json \
+  --previous-mutation-feedback previous_layer3_mutation_feedback.json \
+  --gap-feedback-out current_layer2_gap_feedback.json \
+  --mutation-feedback-out current_layer3_mutation_feedback.json
+```
+
+当提供 `--previous-summary` 时，CLI 会在同一次运行中：
+
+```text
+1. build_summary(current artifacts)
+2. build_mutation_feedback(previous_summary, current_summary, previous_directives)
+3. build_gap_feedback(previous_summary, current_summary, previous_directives, mutation_feedback)
+4. propose_directives(current_summary, gap_feedback, mutation_feedback)
+5. write current summary, Layer 2 state, Layer 3 state, next directives, LLM prompt
+```
+
+没有上一轮 state 时，CLI 保持旧行为：只基于当前 summary 生成 heuristic/LLM prompt。
+
+### Evaluation Script
+
+Layer 1 可离线评估，不需要重新跑仿真：
+
+```bash
+uv run python libafl_bfm_fuzz/scripts/layer1_coverage_feedback_eval.py \
+  --summary current_coverage_summary.json \
+  --gap-feedback current_layer2_gap_feedback.json \
+  --mutation-feedback current_layer3_mutation_feedback.json \
+  --directives-out next_directives.json \
+  --prompt-out next_llm_prompt.json \
+  --plan-out layer1_plan.json \
+  --markdown-out layer1_plan.md
+```
+
+脚本输出：
+
+- `*_layer1_directives.json`：下一轮 corpus generation 可用 directives。
+- `*_layer1_llm_prompt.json`：LLM prompt。
+- `*_layer1_plan.json`：结构化 Layer 1 plan。
+- `*_layer1_plan.md`：人读计划摘要。
 
 ## Layer 2 Per-Gap Feedback
 
@@ -744,10 +954,10 @@ functional_gap: message_length 56+ uncovered
 
 ## Next Steps
 
-1. 将 Layer 2/Layer 3 feedback state 接入 `coverage_feedback.py` CLI，自动读取上一轮 summary/feedback 并写出状态。
-2. 让 `mutation_planner.py` 消费 Layer 2 next action：跳过 resolved、升级 stale complex gap、降低低价值 gap。
+1. 将 Makefile/feedback-fuzz 接入 Layer 1/2/3 state 文件，自动串起多轮闭环。
+2. 导出 full gap catalog 或 all gap ids，避免 Layer 2 受 `top_gaps` 截断影响。
 3. 扩展 Rust generator 支持 variable-length hex directives，例如 `message_lengths`。
 4. 为 LLM 输出增加更严格的 directive/case validation。
 5. 增加 waiver/unreachable 标注，避免 defensive/default branch 反复污染反馈。
-6. 比较 heuristic structural directives 和 LLM structural directives 的覆盖率收益。
+6. 比较 heuristic structural directives、Layer 1 stateful directives 和 LLM structural directives 的覆盖率收益。
 7. 按同一 `CoverageExport` 模型接入 functional coverage export。

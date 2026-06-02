@@ -19,8 +19,14 @@ MAX_EXPLICIT_CASES_PER_FIELD = 8
 MAX_COMPLEX_GAPS = 8
 
 
-def plan_mutations_from_rtl_gaps(summary: dict[str, Any]) -> dict[str, Any]:
+def plan_mutations_from_rtl_gaps(
+    summary: dict[str, Any],
+    gap_feedback: dict[str, Any] | None = None,
+    mutation_feedback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     target = str(summary["target"])
+    gap_states = feedback_gap_states(gap_feedback)
+    suppressed = suppressed_direction_names(mutation_feedback)
     try:
         config = load_target_config(target)
     except (FileNotFoundError, RuntimeError, ValueError):
@@ -28,37 +34,80 @@ def plan_mutations_from_rtl_gaps(summary: dict[str, Any]) -> dict[str, Any]:
             "source": RTL_GAP_PLANNER_SOURCE,
             "target": target,
             "heuristic_directives": [],
-            "complex_gaps": compact_complex_gaps(rtl_gaps(summary)),
+            "complex_gaps": compact_complex_gaps(select_candidate_gaps(summary, gap_states)),
             "directives": [],
+            "gap_selection": empty_gap_selection(),
+            "feedback_inputs": feedback_inputs(gap_feedback, mutation_feedback),
             "blocked": [{"reason": "target config unavailable"}],
         }
 
     directives: list[dict[str, Any]] = []
     complex_gaps: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []
+    selection = empty_gap_selection()
 
-    for gap in rtl_gaps(summary)[:MAX_HEURISTIC_GAPS]:
+    for gap in select_candidate_gaps(summary, gap_states)[:MAX_HEURISTIC_GAPS]:
+        gap_id = str(gap.get("id", ""))
+        state = gap_states.get(gap_id, {})
+        action = str(state.get("next_action", "plan"))
+        status = str(state.get("status", "open"))
+
+        if should_skip_gap(action, status):
+            selection["skipped"].append(gap_id)
+            continue
+        if action == "deprioritize":
+            selection["deprioritized"].append(gap_id)
+            blocked.append({"gap_ids": [gap_id], "reason": "Layer 2 deprioritized this gap"})
+            continue
+        if should_escalate_gap(gap, action, state):
+            selection["complex_for_llm"].append(gap_id)
+            complex_gaps.append(compact_gap_with_feedback(gap, state))
+            continue
+
         directive = heuristic_directive_for_gap(target, config, gap)
         if directive is not None:
+            if directive.get("name") in suppressed:
+                directive["enabled"] = False
+                directive["reason"] = (
+                    str(directive.get("reason", ""))
+                    + "; Layer 3 suppressed this mutation direction"
+                ).strip("; ")
+            directive["layer1_action"] = action
+            if state:
+                directive["gap_feedback_status"] = status
+                directive["gap_feedback_next_action"] = action
             directives.append(directive)
+            selection["heuristic"].append(gap_id)
             continue
         if is_complex_gap(gap):
-            complex_gaps.append(compact_gap(gap))
+            complex_gaps.append(compact_gap_with_feedback(gap, state))
+            selection["complex_for_llm"].append(gap_id)
         else:
             blocked.append(
                 {
-                    "gap_ids": [str(gap.get("id", ""))],
+                    "gap_ids": [gap_id],
                     "reason": "no clear manifest field mapping",
                 }
             )
+            selection["blocked"].append(gap_id)
 
     directives = merge_structural_directives(target, directives)
+    if "rtl_gap_structural_mutation" in suppressed:
+        for directive in directives:
+            if directive.get("name") == "rtl_gap_structural_mutation":
+                directive["enabled"] = False
+                directive["reason"] = (
+                    str(directive.get("reason", ""))
+                    + " Layer 3 suppressed this mutation direction."
+                ).strip()
     return {
         "source": RTL_GAP_PLANNER_SOURCE,
         "target": target,
         "heuristic_directives": directives,
         "complex_gaps": complex_gaps[:MAX_COMPLEX_GAPS],
         "directives": directives,
+        "gap_selection": selection,
+        "feedback_inputs": feedback_inputs(gap_feedback, mutation_feedback),
         "blocked": blocked,
     }
 
@@ -130,6 +179,104 @@ def rtl_gaps(summary: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(gaps, list):
         return [gap for gap in gaps if isinstance(gap, dict)]
     return []
+
+
+def select_candidate_gaps(
+    summary: dict[str, Any],
+    gap_states: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    gaps = rtl_gaps(summary)
+    if not gap_states:
+        return gaps
+
+    def key(gap: dict[str, Any]) -> tuple[int, int, str]:
+        gap_id = str(gap.get("id", ""))
+        state = gap_states.get(gap_id, {})
+        action = str(state.get("next_action", "plan"))
+        return (
+            layer1_action_rank(action),
+            -int(gap.get("priority") or 0),
+            gap_id,
+        )
+
+    return sorted(gaps, key=key)
+
+
+def feedback_gap_states(gap_feedback: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(gap_feedback, dict):
+        return {}
+    gaps = gap_feedback.get("gaps", {})
+    if not isinstance(gaps, dict):
+        return {}
+    return {str(gap_id): state for gap_id, state in gaps.items() if isinstance(state, dict)}
+
+
+def suppressed_direction_names(mutation_feedback: dict[str, Any] | None) -> set[str]:
+    if not isinstance(mutation_feedback, dict):
+        return set()
+    directions = mutation_feedback.get("directions", {})
+    if not isinstance(directions, dict):
+        return set()
+    return {
+        str(name)
+        for name, direction in directions.items()
+        if isinstance(direction, dict)
+        and direction.get("decision") == "suppress_temporarily"
+    }
+
+
+def empty_gap_selection() -> dict[str, list[str]]:
+    return {
+        "heuristic": [],
+        "complex_for_llm": [],
+        "skipped": [],
+        "deprioritized": [],
+        "blocked": [],
+    }
+
+
+def feedback_inputs(
+    gap_feedback: dict[str, Any] | None,
+    mutation_feedback: dict[str, Any] | None,
+) -> dict[str, bool]:
+    return {
+        "gap_feedback": isinstance(gap_feedback, dict),
+        "mutation_feedback": isinstance(mutation_feedback, dict),
+    }
+
+
+def should_skip_gap(action: str, status: str) -> bool:
+    return action == "done" or status == "resolved"
+
+
+def should_escalate_gap(
+    gap: dict[str, Any],
+    action: str,
+    state: dict[str, Any],
+) -> bool:
+    if action == "escalate_to_llm":
+        return True
+    if action == "try_alternative" and is_complex_gap(gap):
+        return True
+    if str(state.get("status", "")) == "stale" and is_complex_gap(gap):
+        try:
+            return int(state.get("stale_count", 0)) >= 2
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
+def layer1_action_rank(action: str) -> int:
+    order = {
+        "escalate_to_llm": 0,
+        "try_alternative": 1,
+        "retry": 2,
+        "plan": 3,
+        "continue": 4,
+        "deprioritize": 5,
+        "done": 6,
+    }
+    return order.get(action, 4)
 
 
 def field_matches_gap(field: FieldSpec, text: str) -> bool:
@@ -300,6 +447,20 @@ def merge_structural_directives(target: str, directives: list[dict[str, Any]]) -
 
 def compact_complex_gaps(gaps: list[dict[str, Any]], *, limit: int = MAX_COMPLEX_GAPS) -> list[dict[str, Any]]:
     return [compact_gap(gap) for gap in gaps[:limit]]
+
+
+def compact_gap_with_feedback(gap: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    data = compact_gap(gap)
+    if state:
+        data["gap_feedback"] = {
+            "status": state.get("status"),
+            "next_action": state.get("next_action"),
+            "stale_count": state.get("stale_count"),
+            "attempt_count": state.get("attempt_count"),
+            "attempted_directives": state.get("attempted_directives", []),
+            "direction_decisions": state.get("direction_decisions", {}),
+        }
+    return data
 
 
 def compact_gap(gap: dict[str, Any]) -> dict[str, Any]:

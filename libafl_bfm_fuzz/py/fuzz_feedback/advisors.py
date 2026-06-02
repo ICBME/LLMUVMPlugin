@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+from .feedback_loop import update_mutation_directions
 from .mutation_planner import (
     build_rtl_gap_llm_prompt,
     plan_mutations_from_rtl_gaps,
@@ -14,12 +15,20 @@ from .mutation_planner import (
 from fuzz_bfm.target_config import CoverpointSpec, FieldSpec, load_target_config
 
 
-def propose_directives(summary: dict[str, Any]) -> dict[str, Any]:
+def propose_directives(
+    summary: dict[str, Any],
+    gap_feedback: dict[str, Any] | None = None,
+    mutation_feedback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     target = summary["target"]
     uncovered_count = int(summary.get("uncovered_line_count", 0))
     sparse_fields = sparse_field_names(summary)
     functional_updates = functional_uncovered_values(summary)
-    structural_plan = plan_mutations_from_rtl_gaps(summary)
+    structural_plan = plan_mutations_from_rtl_gaps(
+        summary,
+        gap_feedback=gap_feedback,
+        mutation_feedback=mutation_feedback,
+    )
     structural_directives = structural_plan.get("directives", [])
     directives: list[dict[str, Any]] = []
 
@@ -62,6 +71,11 @@ def propose_directives(summary: dict[str, Any]) -> dict[str, Any]:
         directive.update(schema_refresh_values(target, sparse_fields))
         directives.append(directive)
 
+    if isinstance(mutation_feedback, dict):
+        directives = update_mutation_directions({"directives": directives}, mutation_feedback)[
+            "directives"
+        ]
+
     source = "generic heuristic"
     if structural_plan.get("complex_gaps"):
         source = "generic heuristic; rtl_gap complex gaps available for LLM"
@@ -71,6 +85,10 @@ def propose_directives(summary: dict[str, Any]) -> dict[str, Any]:
         "source": source,
         "directives": directives,
         "rtl_gap_mutation_plan": structural_plan,
+        "layer_feedback": {
+            "gap_feedback": gap_feedback if isinstance(gap_feedback, dict) else None,
+            "mutation_feedback": mutation_feedback if isinstance(mutation_feedback, dict) else None,
+        },
     }
 
 
@@ -216,11 +234,20 @@ def interesting_field_values(field: FieldSpec) -> list[Any]:
     return sorted(set(values))
 
 
-def build_llm_prompt(summary: dict[str, Any], heuristic: dict[str, Any]) -> dict[str, Any]:
+def build_llm_prompt(
+    summary: dict[str, Any],
+    heuristic: dict[str, Any],
+    gap_feedback: dict[str, Any] | None = None,
+    mutation_feedback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     target = summary["target"]
     structural_plan = heuristic.get("rtl_gap_mutation_plan")
     if not isinstance(structural_plan, dict):
-        structural_plan = plan_mutations_from_rtl_gaps(summary)
+        structural_plan = plan_mutations_from_rtl_gaps(
+            summary,
+            gap_feedback=gap_feedback,
+            mutation_feedback=mutation_feedback,
+        )
     return {
         "task": (
             "Analyze Verilator RTL coverage gaps and UVM functional coverage gaps, then "
@@ -238,6 +265,10 @@ def build_llm_prompt(summary: dict[str, Any], heuristic: dict[str, Any]) -> dict
         "target_schema": target_schema(target),
         "coverage_summary": summary,
         "heuristic_baseline": heuristic,
+        "gap_feedback": gap_feedback or heuristic.get("layer_feedback", {}).get("gap_feedback"),
+        "mutation_feedback": (
+            mutation_feedback or heuristic.get("layer_feedback", {}).get("mutation_feedback")
+        ),
         "rtl_gap_mutation_prompt": build_rtl_gap_llm_prompt(summary, structural_plan),
     }
 

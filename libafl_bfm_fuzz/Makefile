@@ -13,6 +13,12 @@ UVM_FUNCTIONAL_COVERAGE_OUT ?= $(COVERAGE_DIR)/$(TARGET)_uvm_functional_coverage
 LLM_PROMPT ?= $(COVERAGE_DIR)/$(TARGET)_llm_prompt.json
 LLM_RESPONSE ?= $(COVERAGE_DIR)/$(TARGET)_llm_response.json
 MUTATION_DIRECTIVES ?= $(COVERAGE_DIR)/$(TARGET)_mutation_directives.json
+GAP_FEEDBACK ?= $(COVERAGE_DIR)/$(TARGET)_gap_feedback.json
+MUTATION_FEEDBACK ?= $(COVERAGE_DIR)/$(TARGET)_mutation_feedback.json
+PREVIOUS_COVERAGE_SUMMARY ?=
+PREVIOUS_MUTATION_DIRECTIVES ?=
+PREVIOUS_GAP_FEEDBACK ?=
+PREVIOUS_MUTATION_FEEDBACK ?=
 FUZZ_CORPUS ?= $(COVERAGE_DIR)/$(TARGET)_corpus.jsonl
 FUZZ_DIRECTIVES ?=
 LIBAFL_ITERS ?= 256
@@ -127,6 +133,12 @@ coverage-feedback: coverage-report
 		--summary-out $(COVERAGE_SUMMARY) \
 		--directives-out $(MUTATION_DIRECTIVES) \
 		--prompt-out $(LLM_PROMPT) \
+		--gap-feedback-out $(GAP_FEEDBACK) \
+		--mutation-feedback-out $(MUTATION_FEEDBACK) \
+		$(if $(PREVIOUS_COVERAGE_SUMMARY),--previous-summary $(PREVIOUS_COVERAGE_SUMMARY),) \
+		$(if $(PREVIOUS_MUTATION_DIRECTIVES),--previous-directives $(PREVIOUS_MUTATION_DIRECTIVES),) \
+		$(if $(PREVIOUS_GAP_FEEDBACK),--previous-gap-feedback $(PREVIOUS_GAP_FEEDBACK),) \
+		$(if $(PREVIOUS_MUTATION_FEEDBACK),--previous-mutation-feedback $(PREVIOUS_MUTATION_FEEDBACK),) \
 		--llm-response-out $(LLM_RESPONSE) \
 		$(if $(filter 1,$(LLM_FEEDBACK)),--llm,) \
 		$(if $(LLM_MODEL),--model $(LLM_MODEL),)

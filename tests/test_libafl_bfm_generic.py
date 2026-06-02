@@ -23,6 +23,7 @@ from fuzz_feedback.feedback_loop import (  # noqa: E402
     build_mutation_feedback,
     update_mutation_directions,
 )
+from fuzz_feedback.mutation_planner import plan_mutations_from_rtl_gaps  # noqa: E402
 from fuzz_feedback.rtl_structure_coverage import (  # noqa: E402
     build_rtl_structure_coverage,
     build_rtl_structure_coverage_export,
@@ -564,6 +565,82 @@ class TestLibAflBfmGeneric(unittest.TestCase):
         self.assertEqual(feedback["directions"]["stale"]["decision"], "suppress_temporarily")
         self.assertFalse(updated["directives"][0]["enabled"])
         self.assertEqual(updated["directives"][0]["weight"], 0.1)
+
+    def test_layer1_plan_uses_gap_feedback_to_select_next_actions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config_path = tmp_path / "demo.toml"
+            config_path.write_text(CONFIG_TEXT)
+            old_config = os.environ.get("FUZZ_TARGET_CONFIG")
+            os.environ["FUZZ_TARGET_CONFIG"] = str(config_path)
+            summary = {
+                "target": "demo",
+                "rtl_gap_summary": {
+                    "top_gaps": [
+                        {
+                            "id": "gap-stale",
+                            "primary_kind": "branch",
+                            "module": "demo",
+                            "code": "if (round_state == DONE) begin",
+                            "context": [],
+                            "objects": ["round_state"],
+                            "advisor_hints": [
+                                {"type": "source_keyword", "value": "state"},
+                                {"type": "source_keyword", "value": "round"},
+                            ],
+                            "evidence": {"point_ids": ["p-stale"]},
+                        },
+                        {
+                            "id": "gap-resolved",
+                            "primary_kind": "branch",
+                            "module": "demo",
+                            "code": "if (mode == read) begin",
+                            "context": [],
+                            "objects": ["mode"],
+                            "advisor_hints": [{"type": "source_keyword", "value": "mode"}],
+                            "evidence": {"point_ids": ["p-resolved"]},
+                        },
+                        {
+                            "id": "gap-mode",
+                            "primary_kind": "branch",
+                            "module": "demo",
+                            "code": "if (mode == write) begin",
+                            "context": [],
+                            "objects": ["mode"],
+                            "advisor_hints": [{"type": "source_keyword", "value": "mode"}],
+                            "evidence": {"point_ids": ["p-mode"]},
+                        },
+                    ]
+                },
+            }
+            gap_feedback = {
+                "gaps": {
+                    "gap-stale": {
+                        "status": "stale",
+                        "next_action": "escalate_to_llm",
+                        "stale_count": 2,
+                        "attempt_count": 2,
+                    },
+                    "gap-resolved": {
+                        "status": "resolved",
+                        "next_action": "done",
+                    },
+                }
+            }
+            try:
+                plan = plan_mutations_from_rtl_gaps(summary, gap_feedback=gap_feedback)
+            finally:
+                if old_config is None:
+                    os.environ.pop("FUZZ_TARGET_CONFIG", None)
+                else:
+                    os.environ["FUZZ_TARGET_CONFIG"] = old_config
+
+        self.assertIn("gap-stale", plan["gap_selection"]["complex_for_llm"])
+        self.assertIn("gap-resolved", plan["gap_selection"]["skipped"])
+        self.assertEqual(plan["complex_gaps"][0]["id"], "gap-stale")
+        self.assertEqual(plan["complex_gaps"][0]["gap_feedback"]["next_action"], "escalate_to_llm")
+        self.assertEqual(plan["directives"][0]["gap_ids"], ["gap-mode"])
+        self.assertEqual(plan["directives"][0]["mode_values"], ["read", "write"])
 
 
 if __name__ == "__main__":
