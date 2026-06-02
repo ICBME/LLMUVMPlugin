@@ -22,6 +22,14 @@ def main() -> int:
     parser.add_argument("--coverage-info", type=Path, required=True)
     parser.add_argument("--coverage-dat", type=Path)
     parser.add_argument("--functional-coverage", type=Path)
+    parser.add_argument(
+        "--ignore-functional-coverage",
+        action="store_true",
+        help=(
+            "Build feedback from RTL code coverage only. Functional coverage files "
+            "and corpus fallback functional coverage are ignored."
+        ),
+    )
     parser.add_argument("--corpus", type=Path, required=True)
     parser.add_argument("--summary-out", type=Path, required=True)
     parser.add_argument("--directives-out", type=Path, required=True)
@@ -43,6 +51,7 @@ def main() -> int:
         args.corpus,
         coverage_dat=args.coverage_dat,
         functional_coverage=args.functional_coverage,
+        ignore_functional_coverage=args.ignore_functional_coverage,
     )
 
     previous_summary = read_optional_json(args.previous_summary)

@@ -40,6 +40,26 @@ class RoundPaths:
         return self.run_dir / f"{self.target}_uvm_functional_coverage.json"
 
     @property
+    def ignored_functional(self) -> Path:
+        return self.run_dir / f"{self.target}_ignored_uvm_functional_coverage.json"
+
+    @property
+    def coverage_info(self) -> Path:
+        return self.run_dir / f"{self.target}_coverage.info"
+
+    @property
+    def coverage_dat(self) -> Path:
+        return self.run_dir / f"{self.target}_coverage.dat"
+
+    @property
+    def prompt(self) -> Path:
+        return self.run_dir / f"{self.target}_llm_prompt.json"
+
+    @property
+    def llm_response(self) -> Path:
+        return self.run_dir / f"{self.target}_llm_response.json"
+
+    @property
     def directives(self) -> Path:
         return self.run_dir / f"{self.target}_mutation_directives.json"
 
@@ -324,6 +344,8 @@ def build_target_comparison(
     modes: tuple[str, ...],
     rounds: int,
     target_root: Path,
+    *,
+    ignore_functional: bool = False,
 ) -> dict[str, Any]:
     mode_rows = []
     for mode in modes:
@@ -332,7 +354,7 @@ def build_target_comparison(
             paths = round_paths(target, mode, index, target_root)
             if not paths.summary.exists():
                 raise SystemExit(f"missing round summary: {paths.summary}")
-            round_rows.append(summarize_round(paths))
+            round_rows.append(summarize_round(paths, ignore_functional=ignore_functional))
         mode_rows.append(summarize_mode(mode, round_rows))
     return {
         "target": target,
@@ -341,9 +363,13 @@ def build_target_comparison(
     }
 
 
-def summarize_round(paths: RoundPaths) -> dict[str, Any]:
+def summarize_round(paths: RoundPaths, *, ignore_functional: bool = False) -> dict[str, Any]:
     summary = load_json(paths.summary)
-    functional = load_json(paths.functional) if paths.functional.exists() else {}
+    functional = (
+        {}
+        if ignore_functional
+        else load_json(paths.functional) if paths.functional.exists() else {}
+    )
     gap_feedback = load_json(paths.gap_feedback) if paths.gap_feedback.exists() else {}
     mutation_feedback = (
         load_json(paths.mutation_feedback) if paths.mutation_feedback.exists() else {}
@@ -920,7 +946,7 @@ def render_code_coverage_markdown(report: dict[str, Any]) -> str:
     lines = [
         "# Feedback Chain Code Coverage",
         "",
-        "- Scope: `rtl_code_coverage_only`",
+        f"- Scope: `{report.get('scope', 'rtl_code_coverage_only')}`",
         "- Functional coverage and functional gaps are intentionally omitted from this report.",
         f"- Rounds: `{report.get('rounds', 0)}`",
         f"- Modes: `{', '.join(report.get('modes', []))}`",

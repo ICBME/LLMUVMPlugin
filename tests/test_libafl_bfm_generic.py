@@ -178,6 +178,43 @@ class TestLibAflBfmGeneric(unittest.TestCase):
             self.assertEqual(summary["rtl_gap_summary"]["domain"], "rtl_gap")
             self.assertEqual(summary["rtl_gap_summary"]["target"], "demo")
 
+    def test_feedback_summary_can_ignore_functional_coverage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            functional = tmp_path / "uvm_functional.json"
+            functional.write_text(
+                json.dumps(
+                    {
+                        "domain": "uvm_functional",
+                        "target": "demo",
+                        "marker": "replay",
+                        "uncovered": {"fields": {"mode": ["write"]}},
+                    }
+                )
+            )
+
+            summary = build_summary(
+                "demo",
+                tmp_path / "missing.info",
+                tmp_path / "missing.jsonl",
+                functional_coverage=functional,
+                ignore_functional_coverage=True,
+            )
+            prompt = build_llm_prompt(
+                summary,
+                {
+                    "source": "generic heuristic",
+                    "directives": [{"target": "demo", "name": "schema_refresh"}],
+                },
+            )
+
+            self.assertEqual(summary["uvm_functional_coverage_source"], "ignored_by_request")
+            self.assertTrue(summary["uvm_functional_coverage"]["ignored"])
+            self.assertNotIn("marker", summary["uvm_functional_coverage"])
+            self.assertEqual(summary["uvm_functional_coverage"]["uncovered"], {})
+            self.assertTrue(prompt["functional_coverage_ignored"])
+            self.assertIn("RTL code coverage gaps only", prompt["task"])
+
     def test_rtl_structure_coverage_builds_gap_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

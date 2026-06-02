@@ -241,6 +241,7 @@ def build_llm_prompt(
     mutation_feedback: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     target = summary["target"]
+    ignore_functional = functional_coverage_ignored(summary)
     structural_plan = heuristic.get("rtl_gap_mutation_plan")
     if not isinstance(structural_plan, dict):
         structural_plan = plan_mutations_from_rtl_gaps(
@@ -249,10 +250,8 @@ def build_llm_prompt(
             mutation_feedback=mutation_feedback,
         )
     return {
-        "task": (
-            "Analyze Verilator RTL coverage gaps and UVM functional coverage gaps, then "
-            "return mutation directives for the LibAFL corpus generator."
-        ),
+        "task": llm_task_text(ignore_functional),
+        "functional_coverage_ignored": ignore_functional,
         "response_contract": [
             "Return one JSON object only.",
             "The top-level object MUST contain a non-empty 'directives' array.",
@@ -271,6 +270,27 @@ def build_llm_prompt(
         ),
         "rtl_gap_mutation_prompt": build_rtl_gap_llm_prompt(summary, structural_plan),
     }
+
+
+def functional_coverage_ignored(summary: dict[str, Any]) -> bool:
+    coverage = summary.get("uvm_functional_coverage", {})
+    return (
+        summary.get("uvm_functional_coverage_source") == "ignored_by_request"
+        or (isinstance(coverage, dict) and bool(coverage.get("ignored")))
+    )
+
+
+def llm_task_text(ignore_functional: bool) -> str:
+    if ignore_functional:
+        return (
+            "Analyze Verilator RTL code coverage gaps only. UVM functional coverage "
+            "is intentionally ignored for this evaluation, then return mutation "
+            "directives for the LibAFL corpus generator."
+        )
+    return (
+        "Analyze Verilator RTL coverage gaps and UVM functional coverage gaps, then "
+        "return mutation directives for the LibAFL corpus generator."
+    )
 
 
 def write_llm_prompt(path: Path, summary: dict[str, Any], heuristic: dict[str, Any]) -> None:

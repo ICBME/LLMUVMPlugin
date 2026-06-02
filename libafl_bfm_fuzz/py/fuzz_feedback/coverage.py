@@ -112,6 +112,7 @@ def build_summary(
     corpus: Path,
     coverage_dat: Path | None = None,
     functional_coverage: Path | None = None,
+    ignore_functional_coverage: bool = False,
 ) -> dict[str, Any]:
     uncovered, file_counts = parse_lcov_info(coverage_info)
     rtl_structure_coverage = build_rtl_structure_coverage(
@@ -123,6 +124,7 @@ def build_summary(
         target,
         corpus,
         functional_coverage,
+        ignore_functional_coverage=ignore_functional_coverage,
     )
     return {
         "target": target,
@@ -147,10 +149,26 @@ def load_functional_coverage(
     target: str,
     corpus: Path,
     functional_coverage: Path | None,
+    *,
+    ignore_functional_coverage: bool = False,
 ) -> tuple[dict[str, Any], str]:
+    if ignore_functional_coverage:
+        return empty_functional_coverage(target), "ignored_by_request"
     if functional_coverage is not None and functional_coverage.exists():
         return json.loads(functional_coverage.read_text()), str(functional_coverage)
     return build_functional_coverage_from_jsonl(corpus, target), "corpus_fallback"
+
+
+def empty_functional_coverage(target: str) -> dict[str, Any]:
+    return {
+        "domain": "uvm_functional",
+        "target": target,
+        "ignored": True,
+        "origin_counts": {},
+        "bins": {},
+        "crosses": {},
+        "uncovered": {},
+    }
 
 
 def _try_load_target_config(target: str):
