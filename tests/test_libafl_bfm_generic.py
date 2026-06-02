@@ -60,6 +60,22 @@ coverpoints = ["mode", "payload_pattern"]
 """
 
 
+VARIABLE_HEX_CONFIG_TEXT = """
+name = "demo"
+toplevel = "demo_top"
+driver = "demo_driver:Driver"
+
+[[field]]
+name = "mode"
+kind = "enum"
+choices = ["sha224", "sha256"]
+
+[[field]]
+name = "message"
+kind = "hex"
+"""
+
+
 class TestLibAflBfmGeneric(unittest.TestCase):
     def test_corpus_validation_uses_manifest_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -257,6 +273,139 @@ class TestLibAflBfmGeneric(unittest.TestCase):
             self.assertEqual(directive["name"], "functional_schema_refresh")
             self.assertEqual(directive["mode_values"], ["write"])
             self.assertEqual(directive["payload_patterns"], ["ff"])
+
+    def test_advisor_converts_clear_rtl_gap_to_mutation_rule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config_path = tmp_path / "demo.toml"
+            config_path.write_text(CONFIG_TEXT)
+            old_config = os.environ.get("FUZZ_TARGET_CONFIG")
+            os.environ["FUZZ_TARGET_CONFIG"] = str(config_path)
+            try:
+                directives = propose_directives(
+                    {
+                        "target": "demo",
+                        "uncovered_line_count": 1,
+                        "uvm_functional_coverage": {},
+                        "stimulus_summary": {"field_counts": {}},
+                        "rtl_gap_summary": {
+                            "top_gaps": [
+                                {
+                                    "id": "gap-mode",
+                                    "primary_kind": "branch",
+                                    "module": "demo",
+                                    "code": "if (mode == write) begin",
+                                    "context": [],
+                                    "objects": ["mode"],
+                                    "advisor_hints": [
+                                        {"type": "source_keyword", "value": "mode"}
+                                    ],
+                                    "evidence": {},
+                                }
+                            ]
+                        },
+                    }
+                )
+            finally:
+                if old_config is None:
+                    os.environ.pop("FUZZ_TARGET_CONFIG", None)
+                else:
+                    os.environ["FUZZ_TARGET_CONFIG"] = old_config
+
+            self.assertIn("rtl_gap heuristic", directives["source"])
+            directive = directives["directives"][0]
+            self.assertEqual(directive["name"], "rtl_gap_structural_mutation")
+            self.assertEqual(directive["gap_ids"], ["gap-mode"])
+            self.assertEqual(directive["mode_values"], ["read", "write"])
+
+    def test_advisor_converts_length_gap_to_explicit_variable_hex_cases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config_path = tmp_path / "demo.toml"
+            config_path.write_text(VARIABLE_HEX_CONFIG_TEXT)
+            old_config = os.environ.get("FUZZ_TARGET_CONFIG")
+            os.environ["FUZZ_TARGET_CONFIG"] = str(config_path)
+            try:
+                directives = propose_directives(
+                    {
+                        "target": "demo",
+                        "uncovered_line_count": 1,
+                        "uvm_functional_coverage": {},
+                        "stimulus_summary": {"field_counts": {}},
+                        "rtl_gap_summary": {
+                            "top_gaps": [
+                                {
+                                    "id": "gap-next",
+                                    "primary_kind": "branch",
+                                    "module": "demo",
+                                    "code": "if (next_block && padding) begin",
+                                    "context": [],
+                                    "objects": ["next_block"],
+                                    "advisor_hints": [
+                                        {"type": "source_keyword", "value": "next"},
+                                        {"type": "source_keyword", "value": "padding"},
+                                        {"type": "source_keyword", "value": "block"},
+                                    ],
+                                    "evidence": {},
+                                }
+                            ]
+                        },
+                    }
+                )
+            finally:
+                if old_config is None:
+                    os.environ.pop("FUZZ_TARGET_CONFIG", None)
+                else:
+                    os.environ["FUZZ_TARGET_CONFIG"] = old_config
+
+            cases = directives["directives"][0]["cases"]
+            self.assertGreaterEqual(len(cases), 3)
+            self.assertEqual(cases[0]["mode"], "sha224")
+            self.assertEqual(cases[0]["message"], "")
+            self.assertEqual(len(bytes.fromhex(cases[-1]["message"])), 56)
+
+    def test_llm_prompt_includes_complex_rtl_gaps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config_path = tmp_path / "demo.toml"
+            config_path.write_text(CONFIG_TEXT)
+            old_config = os.environ.get("FUZZ_TARGET_CONFIG")
+            os.environ["FUZZ_TARGET_CONFIG"] = str(config_path)
+            summary = {
+                "target": "demo",
+                "uncovered_line_count": 1,
+                "uvm_functional_coverage": {},
+                "stimulus_summary": {"field_counts": {}},
+                "rtl_gap_summary": {
+                    "top_gaps": [
+                        {
+                            "id": "gap-state",
+                            "primary_kind": "branch",
+                            "module": "demo_core",
+                            "code": "if (round_state == DONE) begin",
+                            "context": [],
+                            "objects": ["round_state"],
+                            "advisor_hints": [
+                                {"type": "source_keyword", "value": "state"},
+                                {"type": "source_keyword", "value": "round"},
+                            ],
+                            "evidence": {"point_ids": ["p1"]},
+                        }
+                    ]
+                },
+            }
+            try:
+                heuristic = propose_directives(summary)
+                prompt = build_llm_prompt(summary, heuristic)
+            finally:
+                if old_config is None:
+                    os.environ.pop("FUZZ_TARGET_CONFIG", None)
+                else:
+                    os.environ["FUZZ_TARGET_CONFIG"] = old_config
+
+            complex_gaps = prompt["rtl_gap_mutation_prompt"]["complex_rtl_gaps"]
+            self.assertEqual(complex_gaps[0]["id"], "gap-state")
+            self.assertIn("directives", prompt["rtl_gap_mutation_prompt"]["allowed_directive_schema"])
 
     def test_llm_prompt_includes_response_contract_and_allowed_schema(self):
         prompt = build_llm_prompt(

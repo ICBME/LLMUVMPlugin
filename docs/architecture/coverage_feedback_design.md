@@ -70,8 +70,14 @@ next corpus generation
 
 `py/fuzz_feedback/advisors.py`
 
-- 后续只消费结构化 summary，尤其是 `rtl_gap_summary.top_gaps`。
+- 消费结构化 summary，尤其是 `rtl_gap_summary.top_gaps`。
 - 不应解析 `.info` / `.dat`，也不应依赖 Verilator metadata 的细节。
+
+`py/fuzz_feedback/mutation_planner.py`
+
+- 将清晰 `rtl_gap` 转换为无 LLM mutation directives。
+- 将无法确定字段映射的复杂 `rtl_gap` 压缩为 LLM prompt 输入。
+- 当前只实现保守规则，不做复杂 RTL 静态分析。
 
 ## Coverage Export Schema
 
@@ -234,12 +240,26 @@ summary["rtl_gap_summary"]["top_gaps"]
 - 使用 `primary_kind`、`advisor_hints`、`module`、`code` 和 manifest schema 做规则匹配。
 - 输出 schema-compatible mutation directives。
 - 不应读取原始 `.dat` 或 `.info`。
+- 当前实现只处理清晰 gap：字段名直接命中、长度/多块关键词命中单个 variable
+  hex 字段、以及地址/读写关键词命中 manifest 中已有字段。
+- 无法清晰映射的 gap 会进入 `complex_gaps`，不由 heuristic 猜测。
 
 LLM 链路：
 
-- Prompt 中传 top N gaps、manifest schema、stimulus summary 和 heuristic baseline。
+- Prompt 中传 `complex_gaps`、manifest schema、stimulus summary 和 heuristic baseline。
 - 每个 gap 应包含 `code/context/evidence/advisor_hints`，避免把大量原始 toggle point 塞入 prompt。
 - LLM 输出仍必须通过 directive validation 和 corpus validation。
+
+当前 `propose_directives(summary)` 的组合顺序为：
+
+```text
+functional gap directives
++ clear rtl_gap heuristic directives
++ sparse/schema refresh fallback
+```
+
+如果存在 `complex_gaps`，`build_llm_prompt()` 会额外加入
+`rtl_gap_mutation_prompt`，供 LLM 生成补充 directives。
 
 ## Backward Compatibility
 
@@ -306,8 +326,8 @@ functional_gap: message_length 56+ uncovered
 
 ## Next Steps
 
-1. 让 heuristic advisor 消费 `rtl_gap_summary.top_gaps`，生成第一版 structural directives。
-2. 扩展 Rust generator 支持 variable-length hex directives，例如 `message_lengths`。
+1. 扩展 Rust generator 支持 variable-length hex directives，例如 `message_lengths`。
+2. 为 LLM 输出增加更严格的 directive/case validation。
 3. 增加 waiver/unreachable 标注，避免 defensive/default branch 反复污染反馈。
-4. 在 LLM prompt 中加入 compact top gaps，而不是完整 uncovered point 列表。
+4. 比较 heuristic structural directives 和 LLM structural directives 的覆盖率收益。
 5. 按同一 `CoverageExport` 模型接入 functional coverage export。

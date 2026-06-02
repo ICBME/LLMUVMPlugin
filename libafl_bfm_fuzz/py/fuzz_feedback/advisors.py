@@ -7,6 +7,10 @@ from pathlib import Path
 import re
 from typing import Any
 
+from .mutation_planner import (
+    build_rtl_gap_llm_prompt,
+    plan_mutations_from_rtl_gaps,
+)
 from fuzz_bfm.target_config import CoverpointSpec, FieldSpec, load_target_config
 
 
@@ -15,26 +19,59 @@ def propose_directives(summary: dict[str, Any]) -> dict[str, Any]:
     uncovered_count = int(summary.get("uncovered_line_count", 0))
     sparse_fields = sparse_field_names(summary)
     functional_updates = functional_uncovered_values(summary)
+    structural_plan = plan_mutations_from_rtl_gaps(summary)
+    structural_directives = structural_plan.get("directives", [])
+    directives: list[dict[str, Any]] = []
+
     if functional_updates:
         reason = "Functional coverage bins remain uncovered; refresh targeted schema values."
-    elif sparse_fields:
-        reason = f"{uncovered_count} uncovered RTL lines remain; refresh sparse schema fields."
-    else:
-        reason = (
-            f"{uncovered_count} uncovered RTL lines remain; "
-            "refresh the schema-driven seed space."
-        )
-    directive: dict[str, Any] = {
-        "target": target,
-        "name": "functional_schema_refresh" if functional_updates else "schema_refresh",
-        "reason": reason,
-        "weight": 1,
+        directive: dict[str, Any] = {
+            "target": target,
+            "name": "functional_schema_refresh",
+            "reason": reason,
+            "weight": 1,
+        }
+        if sparse_fields:
+            directive["focus_fields"] = sparse_fields
+        directive.update(schema_refresh_values(target, sparse_fields))
+        directive.update(functional_updates)
+        directives.append(directive)
+
+    directives.extend(
+        dict(directive)
+        for directive in structural_directives
+        if isinstance(directive, dict)
+    )
+
+    if not directives:
+        if sparse_fields:
+            reason = f"{uncovered_count} uncovered RTL lines remain; refresh sparse schema fields."
+        else:
+            reason = (
+                f"{uncovered_count} uncovered RTL lines remain; "
+                "refresh the schema-driven seed space."
+            )
+        directive = {
+            "target": target,
+            "name": "schema_refresh",
+            "reason": reason,
+            "weight": 1,
+        }
+        if sparse_fields:
+            directive["focus_fields"] = sparse_fields
+        directive.update(schema_refresh_values(target, sparse_fields))
+        directives.append(directive)
+
+    source = "generic heuristic"
+    if structural_plan.get("complex_gaps"):
+        source = "generic heuristic; rtl_gap complex gaps available for LLM"
+    elif structural_directives:
+        source = "generic heuristic; rtl_gap heuristic"
+    return {
+        "source": source,
+        "directives": directives,
+        "rtl_gap_mutation_plan": structural_plan,
     }
-    if sparse_fields:
-        directive["focus_fields"] = sparse_fields
-    directive.update(schema_refresh_values(target, sparse_fields))
-    directive.update(functional_updates)
-    return {"source": "generic heuristic", "directives": [directive]}
 
 
 def sparse_field_names(summary: dict[str, Any]) -> list[str]:
@@ -181,6 +218,9 @@ def interesting_field_values(field: FieldSpec) -> list[Any]:
 
 def build_llm_prompt(summary: dict[str, Any], heuristic: dict[str, Any]) -> dict[str, Any]:
     target = summary["target"]
+    structural_plan = heuristic.get("rtl_gap_mutation_plan")
+    if not isinstance(structural_plan, dict):
+        structural_plan = plan_mutations_from_rtl_gaps(summary)
     return {
         "task": (
             "Analyze Verilator RTL coverage gaps and UVM functional coverage gaps, then "
@@ -198,6 +238,7 @@ def build_llm_prompt(summary: dict[str, Any], heuristic: dict[str, Any]) -> dict
         "target_schema": target_schema(target),
         "coverage_summary": summary,
         "heuristic_baseline": heuristic,
+        "rtl_gap_mutation_prompt": build_rtl_gap_llm_prompt(summary, structural_plan),
     }
 
 
@@ -214,6 +255,7 @@ def allowed_schema() -> dict[str, Any]:
                 "target": "target_name",
                 "name": "short_identifier",
                 "reason": "coverage gap being targeted",
+                "gap_ids": ["optional rtl_gap ids"],
                 "cases": [
                     {
                         "field_name": "explicit value matching the target manifest",

@@ -39,6 +39,8 @@
 - `coverage_export.py`：定义可版本化的 normalized coverage point/export。
 - `rtl_structure_coverage.py`：解析 LCOV 和 Verilator `.dat`，导出 RTL structural coverage。
 - `rtl_gap.py`：从 uncovered structural coverage point 聚合结构化 `rtl_gap`。
+- `mutation_planner.py`：将清晰 `rtl_gap` 转换为 mutation directives，将复杂 gap
+  压缩为 LLM 输入。
 - `advisors.py`：生成 generic directives 或调用 LLM。
 - `cli.py`：命令行入口。
 
@@ -77,8 +79,9 @@
    它优先读取 UVM replay 导出的 functional coverage JSON；如果文件不存在，则回退到
    从 JSONL corpus 重新计算 schema-level functional coverage。
 5. `advisors.py` 生成 generic directives。当前优先使用 functional coverage 中的
-   uncovered field/coverpoint，再回退到 sparse stimulus field heuristic；后续 structural
-   advisor 应消费 `rtl_gap_summary.top_gaps`。也可调用 LLM 生成 directives。
+   uncovered field/coverpoint；`mutation_planner.py` 会把清晰 `rtl_gap` 转换为
+   structural directives，并把复杂 gap 放入 LLM prompt；最后回退到 sparse stimulus
+   field heuristic。也可调用 LLM 生成 directives。
 6. 下一轮 `generate-corpus` 通过 `--directives` 读取 directives。
 
 结构化 coverage export 和 `rtl_gap` 的 schema 见
