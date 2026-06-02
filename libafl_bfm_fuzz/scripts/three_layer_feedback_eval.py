@@ -81,18 +81,28 @@ def resolve_round_paths(run_dir: Path, round_names: list[str]) -> list[Path]:
 def load_run(target: str, name: str, run_dir: Path) -> dict[str, Any]:
     summary_path = run_dir / f"{target}_coverage_summary.json"
     directives_path = run_dir / f"{target}_mutation_directives.json"
+    round_applied_directives_path = run_dir / f"{target}_{name}_directives.json"
     functional_path = run_dir / f"{target}_uvm_functional_coverage.json"
     summary = load_json(summary_path)
     directives = load_json(directives_path)
+    round_applied_directives = (
+        load_json(round_applied_directives_path)
+        if round_applied_directives_path.exists()
+        else None
+    )
     functional = load_json(functional_path) if functional_path.exists() else {}
     return {
         "name": name,
         "run_dir": str(run_dir),
         "summary_path": str(summary_path),
         "directives_path": str(directives_path),
+        "round_applied_directives_path": (
+            str(round_applied_directives_path) if round_applied_directives is not None else None
+        ),
         "functional_path": str(functional_path) if functional_path.exists() else None,
         "summary": summary,
         "directives": directives,
+        "round_applied_directives": round_applied_directives,
         "functional": functional,
     }
 
@@ -112,7 +122,7 @@ def build_evaluation(
         current_run = runs[index + 1]
         previous_summary = previous_run["summary"]
         current_summary = current_run["summary"]
-        applied_directives = previous_run["directives"]
+        applied_directives = transition_applied_directives(previous_run, current_run)
 
         mutation_feedback = build_mutation_feedback(
             previous_summary,
@@ -155,6 +165,7 @@ def build_evaluation(
                 mutation_feedback=mutation_feedback,
                 structural_plan=structural_plan,
                 next_directives=next_directives,
+                applied_directives=applied_directives,
                 artifact_paths={
                     "layer2_gap_feedback": str(layer2_out),
                     "layer3_mutation_feedback": str(layer3_out),
@@ -204,12 +215,12 @@ def summarize_transition(
     mutation_feedback: dict[str, Any],
     structural_plan: dict[str, Any],
     next_directives: dict[str, Any],
+    applied_directives: dict[str, Any],
     artifact_paths: dict[str, str],
 ) -> dict[str, Any]:
     previous_summary = previous_run["summary"]
     current_summary = current_run["summary"]
-    directives = previous_run["directives"]
-    targeted_gap_ids = directive_gap_ids(directives)
+    targeted_gap_ids = directive_gap_ids(applied_directives)
     targeted_records = [
         gap
         for gap_id, gap in gap_feedback.get("gaps", {}).items()
@@ -222,7 +233,7 @@ def summarize_transition(
         "index": index,
         "from": previous_run["name"],
         "to": current_run["name"],
-        "applied_directives": previous_run["directives_path"],
+        "applied_directives": applied_directives_path(previous_run, current_run),
         "coverage_delta": coverage_delta_summary(previous_summary, current_summary),
         "layer2": {
             "targeted_gap_count": len(targeted_gap_ids),
@@ -250,6 +261,23 @@ def summarize_transition(
         },
         "artifacts": artifact_paths,
     }
+
+
+def transition_applied_directives(
+    previous_run: dict[str, Any],
+    current_run: dict[str, Any],
+) -> dict[str, Any]:
+    round_applied = current_run.get("round_applied_directives")
+    if isinstance(round_applied, dict):
+        return round_applied
+    return previous_run["directives"]
+
+
+def applied_directives_path(previous_run: dict[str, Any], current_run: dict[str, Any]) -> str:
+    round_path = current_run.get("round_applied_directives_path")
+    if isinstance(round_path, str) and round_path:
+        return round_path
+    return str(previous_run["directives_path"])
 
 
 def summarize_overall(
