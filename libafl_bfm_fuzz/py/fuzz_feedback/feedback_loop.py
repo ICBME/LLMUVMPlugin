@@ -7,10 +7,133 @@ from typing import Any
 
 MUTATION_FEEDBACK_SCHEMA_VERSION = 1
 MUTATION_FEEDBACK_LAYER = "mutation_feedback"
+GAP_FEEDBACK_SCHEMA_VERSION = 1
+GAP_FEEDBACK_LAYER = "per_gap_feedback"
 
 MIN_DIRECTION_WEIGHT = 0.1
 MAX_DIRECTION_WEIGHT = 4.0
 STALE_SUPPRESS_THRESHOLD = 3
+GAP_STALE_ESCALATE_THRESHOLD = 2
+LOW_PRIORITY_GAP_KINDS = {"toggle", "user"}
+COMPLEX_GAP_KINDS = {"branch", "expression", "fsm"}
+
+
+def build_gap_feedback(
+    previous_summary: dict[str, Any] | None,
+    current_summary: dict[str, Any],
+    directives: dict[str, Any] | list[dict[str, Any]],
+    previous_gap_feedback: dict[str, Any] | None = None,
+    mutation_feedback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Evaluate medium-frequency per-gap progress across mutation rounds.
+
+    Layer 2 tracks whether each RTL gap is new, still open, improved, resolved,
+    stale, or regressed. It consumes structured gap ids and evidence point ids,
+    but deliberately avoids LLM calls and expensive RTL analysis.
+    """
+
+    has_previous_summary = bool(previous_summary)
+    previous_summary = previous_summary or {}
+    previous_gap_feedback = previous_gap_feedback or {}
+    mutation_feedback = mutation_feedback or {}
+    target = str(current_summary.get("target") or previous_summary.get("target") or "")
+
+    previous_gaps = gap_index(previous_summary)
+    current_gaps = gap_index(current_summary)
+    previous_states = previous_gap_states(previous_gap_feedback)
+    previous_uncovered = exported_uncovered_point_ids(previous_summary) or uncovered_point_ids(
+        previous_summary
+    )
+    current_uncovered = exported_uncovered_point_ids(current_summary) or uncovered_point_ids(
+        current_summary
+    )
+    attempts_by_gap = directive_gap_attempts(directives)
+    direction_feedback = mutation_direction_index(mutation_feedback)
+
+    gap_ids = sorted(set(previous_gaps) | set(current_gaps) | set(previous_states))
+    gaps: dict[str, Any] = {}
+    counters = {
+        "new": 0,
+        "open": 0,
+        "improved": 0,
+        "resolved": 0,
+        "stale": 0,
+        "regressed": 0,
+        "deprioritized": 0,
+    }
+    next_action_counts: dict[str, int] = {}
+
+    for gap_id in gap_ids:
+        previous_gap = previous_gaps.get(gap_id)
+        current_gap = current_gaps.get(gap_id)
+        previous_state = previous_states.get(gap_id, {})
+        attempted_directives = sorted(set(attempts_by_gap.get(gap_id, [])))
+        previous_attempted = list(previous_state.get("attempted_directives", []))
+        all_attempted = sorted(set(str(item) for item in previous_attempted + attempted_directives))
+
+        previous_count = gap_uncovered_point_count(previous_gap, previous_uncovered)
+        if previous_gap is None:
+            previous_count = optional_int(previous_state.get("current_point_count"))
+        current_count = gap_uncovered_point_count(current_gap, current_uncovered)
+
+        status = classify_gap_status(
+            has_previous_summary=has_previous_summary,
+            previous_gap=previous_gap,
+            current_gap=current_gap,
+            previous_state=previous_state,
+            previous_count=previous_count,
+            current_count=current_count,
+            attempted=bool(attempted_directives),
+        )
+        stale_count = next_gap_stale_count(
+            previous_state,
+            status=status,
+            attempted=bool(attempted_directives),
+        )
+        attempt_count = int(previous_state.get("attempt_count", 0)) + len(attempted_directives)
+        success_count = int(previous_state.get("success_count", 0))
+        if status in {"improved", "resolved"}:
+            success_count += 1
+
+        representative = current_gap or previous_gap or previous_state
+        primary_kind = str(representative.get("primary_kind", "unknown"))
+        next_action = select_gap_next_action(
+            status=status,
+            primary_kind=primary_kind,
+            stale_count=stale_count,
+            attempted_directives=attempted_directives,
+            direction_feedback=direction_feedback,
+        )
+        if next_action == "deprioritize":
+            counters["deprioritized"] += 1
+        counters[status] = counters.get(status, 0) + 1
+        next_action_counts[next_action] = next_action_counts.get(next_action, 0) + 1
+
+        gap_record = compact_gap_feedback_record(
+            gap_id=gap_id,
+            representative=representative,
+            status=status,
+            next_action=next_action,
+            previous_count=previous_count,
+            current_count=current_count,
+            attempt_count=attempt_count,
+            stale_count=stale_count,
+            success_count=success_count,
+            attempted_directives=all_attempted,
+            current_attempted_directives=attempted_directives,
+            direction_feedback=direction_feedback,
+        )
+        gaps[gap_id] = gap_record
+
+    return {
+        "schema_version": GAP_FEEDBACK_SCHEMA_VERSION,
+        "layer": GAP_FEEDBACK_LAYER,
+        "target": target,
+        "total_gaps": len(gaps),
+        "status_counts": {key: value for key, value in sorted(counters.items()) if value},
+        "next_action_counts": dict(sorted(next_action_counts.items())),
+        "gaps": gaps,
+    }
 
 
 def build_mutation_feedback(
@@ -218,6 +341,200 @@ def update_mutation_directions(
     return result
 
 
+def gap_index(summary: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(gap["id"]): gap
+        for gap in rtl_gaps(summary)
+        if isinstance(gap, dict) and gap.get("id") is not None
+    }
+
+
+def previous_gap_states(previous_gap_feedback: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    gaps = previous_gap_feedback.get("gaps", {})
+    if isinstance(gaps, dict):
+        return {str(gap_id): state for gap_id, state in gaps.items() if isinstance(state, dict)}
+    return {}
+
+
+def directive_gap_attempts(
+    directives: dict[str, Any] | list[dict[str, Any]],
+) -> dict[str, list[str]]:
+    attempts: dict[str, list[str]] = {}
+    for idx, directive in enumerate(mutation_directives(directives)):
+        name = direction_name(directive, idx)
+        raw_gap_ids = directive.get("gap_ids", [])
+        if not isinstance(raw_gap_ids, list):
+            continue
+        for gap_id in raw_gap_ids:
+            attempts.setdefault(str(gap_id), []).append(name)
+    return attempts
+
+
+def mutation_direction_index(mutation_feedback: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    directions = mutation_feedback.get("directions", {})
+    if isinstance(directions, dict):
+        return {
+            str(name): direction
+            for name, direction in directions.items()
+            if isinstance(direction, dict)
+        }
+    return {}
+
+
+def gap_uncovered_point_count(
+    gap: dict[str, Any] | None,
+    uncovered_ids: set[str],
+) -> int | None:
+    if gap is None:
+        return None
+    point_ids = gap_point_ids(gap)
+    if point_ids:
+        if uncovered_ids:
+            return sum(1 for point_id in point_ids if point_id in uncovered_ids)
+        return len(point_ids)
+    count = optional_int(gap.get("point_count"))
+    return count
+
+
+def gap_point_ids(gap: dict[str, Any]) -> list[str]:
+    evidence = gap.get("evidence", {})
+    if not isinstance(evidence, dict):
+        return []
+    point_ids = evidence.get("point_ids", [])
+    if not isinstance(point_ids, list):
+        return []
+    return [str(point_id) for point_id in point_ids]
+
+
+def optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def classify_gap_status(
+    *,
+    has_previous_summary: bool,
+    previous_gap: dict[str, Any] | None,
+    current_gap: dict[str, Any] | None,
+    previous_state: dict[str, Any],
+    previous_count: int | None,
+    current_count: int | None,
+    attempted: bool,
+) -> str:
+    previous_status = str(previous_state.get("status", ""))
+    if current_gap is None:
+        if previous_gap is not None or previous_state:
+            return "resolved"
+        return "open"
+    if previous_status == "resolved" and previous_gap is None and current_gap is not None:
+        return "regressed"
+    if not has_previous_summary and not previous_state:
+        return "new"
+    if previous_gap is None and not previous_state:
+        return "new"
+    if (
+        previous_count is not None
+        and current_count is not None
+        and current_count < previous_count
+    ):
+        return "improved"
+    if attempted:
+        return "stale"
+    return "open"
+
+
+def next_gap_stale_count(
+    previous_state: dict[str, Any],
+    *,
+    status: str,
+    attempted: bool,
+) -> int:
+    previous_stale = int(previous_state.get("stale_count", 0))
+    if status in {"improved", "resolved", "new", "regressed"}:
+        return 0
+    if status == "stale" and attempted:
+        return previous_stale + 1
+    return previous_stale
+
+
+def select_gap_next_action(
+    *,
+    status: str,
+    primary_kind: str,
+    stale_count: int,
+    attempted_directives: list[str],
+    direction_feedback: dict[str, dict[str, Any]],
+) -> str:
+    if status == "resolved":
+        return "done"
+    if status == "improved":
+        return "continue"
+    if status == "regressed":
+        return "retry"
+    if status == "new":
+        return "plan"
+
+    attempted_decisions = {
+        str(direction_feedback.get(name, {}).get("decision", ""))
+        for name in attempted_directives
+    }
+    if "suppress_temporarily" in attempted_decisions:
+        return "try_alternative"
+    if stale_count >= GAP_STALE_ESCALATE_THRESHOLD:
+        if primary_kind in COMPLEX_GAP_KINDS:
+            return "escalate_to_llm"
+        if primary_kind in LOW_PRIORITY_GAP_KINDS:
+            return "deprioritize"
+        return "try_alternative"
+    if attempted_directives:
+        return "continue"
+    return "plan"
+
+
+def compact_gap_feedback_record(
+    *,
+    gap_id: str,
+    representative: dict[str, Any],
+    status: str,
+    next_action: str,
+    previous_count: int | None,
+    current_count: int | None,
+    attempt_count: int,
+    stale_count: int,
+    success_count: int,
+    attempted_directives: list[str],
+    current_attempted_directives: list[str],
+    direction_feedback: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    direction_decisions = {
+        name: direction_feedback.get(name, {}).get("decision")
+        for name in current_attempted_directives
+        if name in direction_feedback
+    }
+    return {
+        "id": gap_id,
+        "status": status,
+        "next_action": next_action,
+        "primary_kind": representative.get("primary_kind"),
+        "priority": representative.get("priority"),
+        "file": representative.get("file"),
+        "line": representative.get("line"),
+        "module": representative.get("module"),
+        "code": representative.get("code", ""),
+        "previous_point_count": previous_count,
+        "current_point_count": current_count,
+        "attempt_count": attempt_count,
+        "stale_count": stale_count,
+        "success_count": success_count,
+        "attempted_directives": attempted_directives,
+        "current_attempted_directives": current_attempted_directives,
+        "direction_decisions": direction_decisions,
+        "evidence": representative.get("evidence", {}),
+    }
+
+
 def mutation_directives(value: dict[str, Any] | list[dict[str, Any]]) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
@@ -254,7 +571,7 @@ def int_counter(value: Any) -> dict[str, int]:
     return result
 
 
-def uncovered_point_ids(summary: dict[str, Any]) -> set[str]:
+def exported_uncovered_point_ids(summary: dict[str, Any]) -> set[str]:
     ids: set[str] = set()
     structure = summary.get("rtl_structure_coverage", {})
     exports = [
@@ -267,6 +584,11 @@ def uncovered_point_ids(summary: dict[str, Any]) -> set[str]:
         for point in export.get("uncovered_points", []):
             if isinstance(point, dict) and point.get("id") is not None:
                 ids.add(str(point["id"]))
+    return ids
+
+
+def uncovered_point_ids(summary: dict[str, Any]) -> set[str]:
+    ids = set(exported_uncovered_point_ids(summary))
 
     for gap in rtl_gaps(summary):
         evidence = gap.get("evidence", {})

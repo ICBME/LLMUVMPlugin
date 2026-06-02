@@ -98,11 +98,20 @@ Layer 1 负责理解当前覆盖率缺口，Layer 2 负责判断 gap 是否被�
 
 `py/fuzz_feedback/feedback_loop.py`
 
-- 实现高频 Layer 3 mutation direction feedback。
-- 消费上一轮 summary、当前 summary、当前 directives 和可选上一轮 feedback。
-- 根据新增 case、replay 成功情况、结构覆盖 delta、functional bin delta 等低成本信号评分。
+- 实现中频 Layer 2 per-gap feedback 和高频 Layer 3 mutation direction feedback。
+- Layer 2 消费上一轮 summary、当前 summary、当前 directives、可选上一轮 gap feedback
+  和可选 Layer 3 mutation feedback，输出 gap 状态和 next action。
+- Layer 3 消费上一轮 summary、当前 summary、当前 directives 和可选上一轮 feedback，
+  根据新增 case、replay 成功情况、结构覆盖 delta、functional bin delta 等低成本信号评分。
 - 输出每个 direction 的 `score`、`decision`、`updated_weight` 和 `stale_count`。
 - 不调用 LLM，不解析原始 `.info` / `.dat`，不做 RTL 源码语义分析。
+
+`scripts/layer2_gap_feedback_eval.py`
+
+- 离线评估 Layer 2 per-gap 反馈效果。
+- 输入两份 coverage summary、本轮使用的 directives，以及可选上一轮 gap feedback /
+  Layer 3 mutation feedback。
+- 输出 gap feedback JSON 和 Markdown 报告。
 
 `scripts/layer3_mutation_feedback_eval.py`
 
@@ -291,6 +300,178 @@ functional gap directives
 
 如果存在 `complex_gaps`，`build_llm_prompt()` 会额外加入
 `rtl_gap_mutation_prompt`，供 LLM 生成补充 directives。
+
+## Layer 2 Per-Gap Feedback
+
+Layer 2 是中频反馈层，目标是跨 mutation round 跟踪每个 `rtl_gap` 的解决进度。
+它不重新生成 coverage gap，也不直接调用 LLM；它只判断：
+
+```text
+这个 gap 是新出现、仍 open、已 improved、已 resolved，还是多轮 stale？
+下一步应该继续当前方向、换策略、升级给 LLM，还是降权？
+```
+
+### 输入
+
+`build_gap_feedback(previous_summary, current_summary, directives, previous_gap_feedback=None, mutation_feedback=None)`
+接收：
+
+- `previous_summary`：上一轮 coverage feedback summary。
+- `current_summary`：当前轮 coverage feedback summary。
+- `directives`：本轮用于生成 corpus 的 mutation directives。
+- `previous_gap_feedback`：可选，上一轮 Layer 2 状态，用于累计 attempts/stale。
+- `mutation_feedback`：可选，Layer 3 direction feedback，用于感知 direction 是否被抑制。
+
+Layer 2 使用的关键字段：
+
+- `rtl_gap_summary.top_gaps[*].id`
+- `rtl_gap_summary.top_gaps[*].primary_kind`
+- `rtl_gap_summary.top_gaps[*].evidence.point_ids`
+- `rtl_structure_coverage.coverage_export.uncovered_points[*].id`
+- `directives[*].gap_ids`
+- `mutation_feedback.directions[*].decision`
+
+point 级计数优先使用 `coverage_export.uncovered_points`。如果 summary 是旧格式，
+缺少 coverage export，Layer 2 会退回使用 gap evidence point ids，但此时只能判断
+gap 是否仍在 `top_gaps` 中，无法精确判断 point count 是否下降。
+
+### Status
+
+Layer 2 输出的 gap status：
+
+```text
+new          当前 summary 新出现的 gap
+open         gap 仍存在，本轮没有明确尝试
+improved     gap 仍存在，但 uncovered point count 降低
+resolved     gap 从当前 summary 消失
+stale        gap 被尝试后仍无改善
+regressed    之前 resolved 的 gap 重新出现
+```
+
+状态判定规则：
+
+```text
+previous gap 存在，current gap 不存在
+  -> resolved
+
+current gap 存在，previous gap 不存在
+  -> new
+
+current uncovered point count < previous uncovered point count
+  -> improved
+
+current gap 存在，且本轮 directive 通过 gap_ids 尝试过该 gap，但 point count 无下降
+  -> stale
+
+current gap 存在，但本轮没有 gap-specific directive 尝试
+  -> open
+
+previous status 为 resolved，current gap 又出现
+  -> regressed
+```
+
+### Next Action
+
+Layer 2 将 status 和 gap 类型转换成 next action：
+
+```text
+done              resolved gap，不再继续尝试
+continue          improved gap 或当前尝试仍可继续
+plan              new/open gap，需要 Layer 1 或 planner 生成策略
+retry             regressed gap，重新纳入计划
+try_alternative   关联 direction 被 Layer 3 抑制，或多轮 stale 后需要换策略
+escalate_to_llm   branch/expression/fsm 等复杂 gap 多轮 stale
+deprioritize      toggle/user 等低价值 gap 多轮 stale
+```
+
+当前阈值为：
+
+```text
+GAP_STALE_ESCALATE_THRESHOLD = 2
+```
+
+也就是说，复杂 gap 连续两轮 stale 后会进入 `escalate_to_llm`。这不会立刻调用
+LLM，而是为 Layer 1 下一次低频分析提供明确候选。
+
+### Output Schema
+
+`build_gap_feedback()` 输出：
+
+```json
+{
+  "schema_version": 1,
+  "layer": "per_gap_feedback",
+  "target": "secworks_sha256",
+  "total_gaps": 4,
+  "status_counts": {
+    "improved": 1,
+    "new": 1,
+    "resolved": 1,
+    "stale": 1
+  },
+  "next_action_counts": {
+    "continue": 1,
+    "done": 1,
+    "escalate_to_llm": 1,
+    "plan": 1
+  },
+  "gaps": {
+    "gap-id": {
+      "id": "gap-id",
+      "status": "stale",
+      "next_action": "escalate_to_llm",
+      "primary_kind": "branch",
+      "priority": 100,
+      "file": ".../sha256_core.v",
+      "line": 123,
+      "module": "sha256_core",
+      "previous_point_count": 1,
+      "current_point_count": 1,
+      "attempt_count": 2,
+      "stale_count": 2,
+      "success_count": 0,
+      "attempted_directives": ["try_old", "try_current"],
+      "current_attempted_directives": ["try_current"],
+      "direction_decisions": {
+        "try_current": "decrease_weight"
+      },
+      "evidence": {}
+    }
+  }
+}
+```
+
+### Evaluation Script
+
+Layer 2 可用两份 summary 离线评估：
+
+```bash
+uv run python libafl_bfm_fuzz/scripts/layer2_gap_feedback_eval.py \
+  --previous-summary previous_coverage_summary.json \
+  --current-summary current_coverage_summary.json \
+  --directives applied_mutation_directives.json \
+  --previous-gap-feedback previous_layer2_gap_feedback.json \
+  --mutation-feedback layer3_mutation_feedback.json \
+  --feedback-out layer2_gap_feedback.json \
+  --markdown-out layer2_gap_feedback.md
+```
+
+也支持 run-dir 形式：
+
+```bash
+uv run python libafl_bfm_fuzz/scripts/layer2_gap_feedback_eval.py \
+  --target secworks_sha256 \
+  --previous-run-dir libafl_bfm_fuzz/coverage/feedback_compare/secworks_sha256/baseline \
+  --current-run-dir libafl_bfm_fuzz/coverage/feedback_compare/secworks_sha256/heuristic \
+  --directives libafl_bfm_fuzz/coverage/feedback_compare/secworks_sha256/baseline/secworks_sha256_mutation_directives.json \
+  --out-dir libafl_bfm_fuzz/coverage/feedback_compare/secworks_sha256/layer2_heuristic
+```
+
+脚本输出：
+
+- `*_layer2_gap_feedback.json`：per-gap 状态和 next action。
+- `*_layer2_gap_feedback.md`：人读表格，按需优先展示 `escalate_to_llm`、
+  `try_alternative`、`retry` 等高价值 action。
 
 ## Layer 3 Mutation Feedback
 
@@ -554,15 +735,17 @@ functional_gap: message_length 56+ uncovered
 - 当前 `actionability` 默认为 `unknown`，还没有 waiver/unreachable 机制。
 - `advisor_hints` 是轻量关键词抽取，不替代目标专用 coverage advisor plugin。
 - `CoverageExport` 默认不导出全量 `points`，避免 summary 过大；调试时可显式请求。
+- Layer 2 依赖 `rtl_gap_summary.top_gaps`，如果 gap 被截断出 top list，可能无法稳定跟踪；
+  后续应导出 full gap catalog 或 all gap ids。
 - Layer 3 使用 aggregate summary 做 direction 归因，多个 direction 混跑时只能按 case 数比例分配收益。
 - 如果 summary 缺少 `rtl_gap_summary.top_gaps` 或 `coverage_export.uncovered_points`，
-  Layer 3 无法计算 point/gap 级 resolved，只能使用整体 coverage delta 和 functional bins。
+  Layer 2/Layer 3 无法计算 point/gap 级 resolved，只能使用整体 coverage delta 和 functional bins。
 - 结构覆盖仍缺少 per-case attribution，无法判断某个 corpus case 是否贡献了某个新 gap。
 
 ## Next Steps
 
-1. 将 Layer 3 feedback state 接入 `coverage_feedback.py` CLI，自动读取上一轮 summary/feedback 并写出 updated directives。
-2. 实现 Layer 2 per-gap feedback，跟踪 gap resolved/improved/stale 和 attempted directives。
+1. 将 Layer 2/Layer 3 feedback state 接入 `coverage_feedback.py` CLI，自动读取上一轮 summary/feedback 并写出状态。
+2. 让 `mutation_planner.py` 消费 Layer 2 next action：跳过 resolved、升级 stale complex gap、降低低价值 gap。
 3. 扩展 Rust generator 支持 variable-length hex directives，例如 `message_lengths`。
 4. 为 LLM 输出增加更严格的 directive/case validation。
 5. 增加 waiver/unreachable 标注，避免 defensive/default branch 反复污染反馈。
