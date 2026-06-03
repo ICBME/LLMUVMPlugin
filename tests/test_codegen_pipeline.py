@@ -5,6 +5,11 @@ import unittest
 
 from rtlagent_bfm.codegen.artifacts import ArtifactBundle, ArtifactBundleError
 from rtlagent_bfm.codegen.manifest import update_manifest_text
+from rtlagent_bfm.codegen.oracle_feedback import (
+    build_oracle_ir_repair_prompt,
+    normalize_oracle_ir_response,
+    repair_oracle_ir_with_feedback,
+)
 from rtlagent_bfm.codegen.oracle_ir import (
     OracleIRValidationError,
     collect_oracle_ir_issues,
@@ -249,6 +254,80 @@ class TestCodegenPipeline(unittest.TestCase):
 
         self.assertTrue(any("at least one prediction rule" in issue.message for issue in issues))
 
+    def test_oracle_ir_repair_prompt_includes_validation_feedback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "demo.toml"
+            manifest.write_text(_demo_payload_manifest())
+            invalid_ir = _invalid_payload_oracle_ir()
+
+            prompt = build_oracle_ir_repair_prompt(
+                invalid_ir,
+                manifest_path=manifest,
+                require_rules=True,
+            )
+
+            self.assertEqual(prompt["workflow"], "oracle_ir_validation_feedback_repair")
+            messages = [issue["message"] for issue in prompt["validation_issues"]]
+            self.assertTrue(any("os.system" in message for message in messages))
+            self.assertIn("oracle_ir", prompt["response_contract"])
+            self.assertIn("hashlib.sha256", prompt["oracle_ir_contract"]["allowed_calls"])
+
+    def test_oracle_ir_feedback_loop_accepts_repaired_llm_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "demo.toml"
+            manifest.write_text(_demo_payload_manifest())
+            repaired_ir = {
+                "schema_version": 1,
+                "target": "demo",
+                "inputs": [{"name": "payload", "type": "hex_bytes"}],
+                "rules": [
+                    {
+                        "name": "sha256_payload",
+                        "expected": {
+                            "call": "hashlib.sha256",
+                            "args": [{"bytes_from_hex": {"field": "payload"}}],
+                            "format": "hexdigest",
+                        },
+                    }
+                ],
+                "compare": {"kind": "exact", "normalize": ["lower_hex"]},
+            }
+
+            def fake_llm(prompt, model):
+                self.assertEqual(model, "test-model")
+                self.assertTrue(prompt["validation_issues"])
+                return {"oracle_ir": repaired_ir, "changes": ["use allowlisted hashlib call"]}
+
+            result = repair_oracle_ir_with_feedback(
+                _invalid_payload_oracle_ir(),
+                manifest_path=manifest,
+                require_rules=True,
+                llm_callable=fake_llm,
+                model="test-model",
+                max_attempts=1,
+            )
+
+            self.assertEqual(result["status"], "repaired")
+            self.assertEqual(result["attempt_count"], 1)
+            self.assertEqual(result["oracle_ir"]["rules"][0]["expected"]["call"], "hashlib.sha256")
+
+    def test_oracle_ir_response_normalizer_accepts_nested_result(self):
+        oracle_ir = {
+            "schema_version": 1,
+            "target": "demo",
+            "inputs": [{"name": "payload", "type": "hex_bytes"}],
+            "rules": [],
+            "compare": {"kind": "exact", "normalize": []},
+            "unsupported": [{"reason": "manual review"}],
+        }
+
+        self.assertEqual(
+            normalize_oracle_ir_response({"result": {"oracle_ir": oracle_ir}}),
+            oracle_ir,
+        )
+
 
 def _valid_bundle():
     return {
@@ -292,6 +371,40 @@ def _valid_bundle():
         ],
         "assumptions": ["demo reference behavior"],
         "required_tests": ["write golden case"],
+    }
+
+
+def _demo_payload_manifest():
+    return (
+        "\n".join(
+            [
+                'name = "demo"',
+                'driver = "demo_driver:Driver"',
+                "",
+                "[[field]]",
+                'name = "payload"',
+                'kind = "hex"',
+            ]
+        )
+        + "\n"
+    )
+
+
+def _invalid_payload_oracle_ir():
+    return {
+        "schema_version": 1,
+        "target": "demo",
+        "inputs": [{"name": "payload", "type": "hex_bytes"}],
+        "rules": [
+            {
+                "expected": {
+                    "call": "os.system",
+                    "args": [{"bytes_from_hex": {"field": "missing"}}],
+                    "format": "hexdigest",
+                }
+            }
+        ],
+        "compare": {"kind": "exact", "normalize": ["lower_hex"]},
     }
 
 

@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import sys
 
+from .oracle_feedback import (
+    build_oracle_ir_repair_prompt,
+    maybe_call_oracle_ir_llm,
+    repair_oracle_ir_with_feedback,
+)
 from .oracle_ir import (
     collect_oracle_ir_issues,
     generate_oracle_ir,
@@ -39,6 +45,19 @@ def main(argv: list[str] | None = None) -> int:
     validate_oracle_ir.add_argument("--manifest", type=Path)
     validate_oracle_ir.add_argument("--target")
     validate_oracle_ir.add_argument("--require-rules", action="store_true")
+
+    repair_oracle_ir = subparsers.add_parser("repair-oracle-ir")
+    repair_oracle_ir.add_argument("--oracle-ir", required=True, type=Path)
+    repair_oracle_ir.add_argument("--manifest", type=Path)
+    repair_oracle_ir.add_argument("--spec", action="append", default=[], type=Path)
+    repair_oracle_ir.add_argument("--target")
+    repair_oracle_ir.add_argument("--require-rules", action="store_true")
+    repair_oracle_ir.add_argument("--out", type=Path)
+    repair_oracle_ir.add_argument("--prompt-out", type=Path)
+    repair_oracle_ir.add_argument("--llm", action="store_true")
+    repair_oracle_ir.add_argument("--model")
+    repair_oracle_ir.add_argument("--llm-response-out", type=Path)
+    repair_oracle_ir.add_argument("--max-attempts", type=int, default=2)
 
     candidate = subparsers.add_parser("write-candidate")
     candidate.add_argument("--bundle", required=True, type=Path)
@@ -93,6 +112,49 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"validated OracleIR: {args.oracle_ir}")
         return 0
+    if args.command == "repair-oracle-ir":
+        oracle_ir_value = load_oracle_ir(args.oracle_ir)
+        prompt = build_oracle_ir_repair_prompt(
+            oracle_ir_value,
+            manifest_path=args.manifest,
+            spec_paths=tuple(args.spec),
+            target=args.target,
+            require_rules=args.require_rules,
+        )
+        if args.prompt_out:
+            write_json(args.prompt_out, prompt)
+        result = repair_oracle_ir_with_feedback(
+            oracle_ir_value,
+            manifest_path=args.manifest,
+            spec_paths=tuple(args.spec),
+            target=args.target,
+            require_rules=args.require_rules,
+            llm_callable=maybe_call_oracle_ir_llm if args.llm else None,
+            model=args.model,
+            max_attempts=args.max_attempts,
+        )
+        if args.llm_response_out:
+            write_json(
+                args.llm_response_out,
+                {
+                    "status": result["status"],
+                    "attempt_count": result["attempt_count"],
+                    "issues": result["issues"],
+                    "llm_responses": result["llm_responses"],
+                },
+            )
+        if result["status"] in {"valid", "repaired"}:
+            if args.out:
+                write_oracle_ir(args.out, result["oracle_ir"])
+            print(f"OracleIR {result['status']}: {args.oracle_ir}")
+            return 0
+        for issue in result["issues"]:
+            print(f"{issue['path']}: {issue['message']}", file=sys.stderr)
+        if result["status"] == "llm_unavailable":
+            print("OPENAI_API_KEY not set; wrote repair prompt only.", file=sys.stderr)
+            return 2
+        print(f"OracleIR repair status: {result['status']}", file=sys.stderr)
+        return 1
     if args.command == "write-candidate":
         written = write_candidate_bundle(args.bundle, args.candidate_dir)
         print(f"wrote {len(written)} candidate files to {args.candidate_dir}")
@@ -144,6 +206,11 @@ def _load_optional_golden(path: Path | None, target: str):
     if path is None:
         return ()
     return load_golden_cases(path, target)
+
+
+def write_json(path: Path, value) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
