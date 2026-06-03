@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import binascii
+from dataclasses import dataclass
 import hashlib
 from typing import Any
 import zlib
@@ -10,6 +11,24 @@ import zlib
 
 class OracleEvaluationError(ValueError):
     """Raised when an OracleIR cannot produce an expected value for a case."""
+
+
+@dataclass(frozen=True)
+class OracleGoldenIssue:
+    line_no: int
+    reason: str
+    actual: str | None = None
+    expected: str | None = None
+
+    @property
+    def path(self) -> str:
+        return f"golden_cases[line={self.line_no}]"
+
+    @property
+    def message(self) -> str:
+        if self.actual is None and self.expected is None:
+            return self.reason
+        return f"{self.reason}: actual={self.actual!r} expected={self.expected!r}"
 
 
 def evaluate_oracle_ir(oracle_ir: dict[str, Any], case_data: dict[str, Any]) -> str:
@@ -172,3 +191,100 @@ def format_expected(value: Any) -> str:
     if isinstance(value, str):
         return value
     return str(value)
+
+
+def validate_oracle_golden_cases(
+    oracle_ir: dict[str, Any],
+    golden_cases: Any,
+) -> None:
+    issues = collect_oracle_golden_issues(oracle_ir, golden_cases)
+    if issues:
+        formatted = "\n".join(f"{issue.path}: {issue.message}" for issue in issues)
+        raise OracleEvaluationError(f"OracleIR golden validation failed:\n{formatted}")
+
+
+def collect_oracle_golden_issues(
+    oracle_ir: dict[str, Any],
+    golden_cases: Any,
+) -> list[OracleGoldenIssue]:
+    issues: list[OracleGoldenIssue] = []
+    for index, golden_case in enumerate(golden_cases, start=1):
+        line_no = golden_line_no(golden_case, index)
+        try:
+            data = golden_data(golden_case)
+            expected = format_expected(golden_expected(golden_case))
+            actual = evaluate_oracle_ir(oracle_ir, data)
+        except Exception as exc:  # noqa: BLE001 - preserve evaluator context in feedback
+            issues.append(OracleGoldenIssue(line_no=line_no, reason=str(exc)))
+            continue
+        if not compare_expected(actual, expected, oracle_ir.get("compare", {})):
+            issues.append(
+                OracleGoldenIssue(
+                    line_no=line_no,
+                    reason="expected value mismatch",
+                    actual=actual,
+                    expected=expected,
+                )
+            )
+    return issues
+
+
+def compare_expected(actual: str, expected: str, compare_policy: dict[str, Any]) -> bool:
+    kind = str(compare_policy.get("kind", "exact"))
+    actual_text = normalize_compare_text(actual, compare_policy)
+    expected_text = normalize_compare_text(expected, compare_policy)
+    if kind == "exact":
+        return actual_text == expected_text
+    if kind == "prefix":
+        length = int(compare_policy.get("length", len(expected_text)))
+        return actual_text[:length] == expected_text[:length]
+    if kind == "masked_hex":
+        mask = int(str(compare_policy["mask"]).removeprefix("0x"), 16)
+        return (int(actual_text, 16) & mask) == (int(expected_text, 16) & mask)
+    if kind == "numeric_tolerance":
+        tolerance = float(compare_policy.get("tolerance", 0))
+        return abs(float(actual_text) - float(expected_text)) <= tolerance
+    raise OracleEvaluationError(f"unsupported compare kind {kind!r}")
+
+
+def normalize_compare_text(value: Any, compare_policy: dict[str, Any]) -> str:
+    text = format_expected(value)
+    normalizers = compare_policy.get("normalize", [])
+    if not isinstance(normalizers, list):
+        normalizers = []
+    for normalizer in normalizers:
+        if normalizer == "strip_0x":
+            text = text.removeprefix("0x").removeprefix("0X")
+        elif normalizer == "lower_hex":
+            text = text.lower()
+        elif normalizer == "upper_hex":
+            text = text.upper()
+    return text
+
+
+def golden_data(golden_case: Any) -> dict[str, Any]:
+    if hasattr(golden_case, "data"):
+        data = golden_case.data
+    elif isinstance(golden_case, dict):
+        data = golden_case.get("data", golden_case.get("case"))
+    else:
+        data = None
+    if not isinstance(data, dict):
+        raise OracleEvaluationError("golden case must define data or case object")
+    return data
+
+
+def golden_expected(golden_case: Any) -> Any:
+    if hasattr(golden_case, "expected"):
+        return golden_case.expected
+    if isinstance(golden_case, dict) and "expected" in golden_case:
+        return golden_case["expected"]
+    raise OracleEvaluationError("golden case must define expected")
+
+
+def golden_line_no(golden_case: Any, default: int) -> int:
+    if hasattr(golden_case, "line_no"):
+        return int(golden_case.line_no)
+    if isinstance(golden_case, dict):
+        return int(golden_case.get("line_no", default))
+    return default

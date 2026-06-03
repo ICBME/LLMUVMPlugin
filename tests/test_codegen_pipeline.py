@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from rtlagent_bfm.codegen.artifacts import ArtifactBundle, ArtifactBundleError
+from rtlagent_bfm.codegen.cli import main as codegen_cli_main
 from rtlagent_bfm.codegen.manifest import update_manifest_text
 from rtlagent_bfm.codegen.oracle_codegen import (
     build_oracle_plugin_bundle,
@@ -13,6 +14,7 @@ from rtlagent_bfm.codegen.oracle_codegen import (
 from rtlagent_bfm.codegen.oracle_eval import evaluate_oracle_ir
 from rtlagent_bfm.codegen.oracle_feedback import (
     build_oracle_ir_repair_prompt,
+    collect_oracle_feedback_issues,
     normalize_oracle_ir_response,
     repair_oracle_ir_with_feedback,
 )
@@ -340,6 +342,67 @@ class TestCodegenPipeline(unittest.TestCase):
         expected = evaluate_oracle_ir(oracle_ir, {"payload": "616263"})
 
         self.assertEqual(expected, hashlib.sha256(b"abc").hexdigest())
+
+    def test_oracle_feedback_reports_golden_case_mismatch(self):
+        oracle_ir = _sha256_payload_oracle_ir()
+        golden_cases = (
+            GoldenCase(
+                target="demo",
+                data={"target": "demo", "payload": "616263"},
+                expected="wrong",
+            ),
+        )
+
+        issues = collect_oracle_feedback_issues(
+            oracle_ir,
+            target="demo",
+            require_rules=True,
+            golden_cases=golden_cases,
+        )
+        prompt = build_oracle_ir_repair_prompt(
+            oracle_ir,
+            target="demo",
+            require_rules=True,
+            golden_cases=golden_cases,
+        )
+
+        self.assertTrue(any("expected value mismatch" in issue.message for issue in issues))
+        self.assertTrue(
+            any("expected value mismatch" in item["message"] for item in prompt["validation_issues"])
+        )
+
+    def test_validate_oracle_ir_cli_uses_golden_cases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            oracle_ir_path = root / "oracle_ir.json"
+            golden_path = root / "golden.json"
+            oracle_ir_path.write_text(json.dumps(_sha256_payload_oracle_ir()))
+            golden_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "target": "demo",
+                            "data": {"target": "demo", "payload": "616263"},
+                            "expected": hashlib.sha256(b"abc").hexdigest(),
+                        }
+                    ]
+                )
+            )
+
+            status = codegen_cli_main(
+                [
+                    "validate-oracle-ir",
+                    "--oracle-ir",
+                    str(oracle_ir_path),
+                    "--target",
+                    "demo",
+                    "--require-rules",
+                    "--golden-cases",
+                    str(golden_path),
+                ]
+            )
+
+            self.assertEqual(status, 0)
 
     def test_oracle_ir_codegen_bundle_validates_with_golden_case(self):
         with tempfile.TemporaryDirectory() as tmp:

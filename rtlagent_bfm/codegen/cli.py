@@ -9,12 +9,12 @@ import sys
 
 from .oracle_feedback import (
     build_oracle_ir_repair_prompt,
+    collect_oracle_feedback_issues,
     maybe_call_oracle_ir_llm,
     repair_oracle_ir_with_feedback,
 )
 from .oracle_codegen import build_oracle_plugin_bundle_from_file, write_oracle_plugin_bundle
 from .oracle_ir import (
-    collect_oracle_ir_issues,
     generate_oracle_ir,
     load_oracle_ir,
     write_oracle_ir,
@@ -46,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     validate_oracle_ir.add_argument("--manifest", type=Path)
     validate_oracle_ir.add_argument("--target")
     validate_oracle_ir.add_argument("--require-rules", action="store_true")
+    validate_oracle_ir.add_argument("--golden-cases", type=Path)
 
     repair_oracle_ir = subparsers.add_parser("repair-oracle-ir")
     repair_oracle_ir.add_argument("--oracle-ir", required=True, type=Path)
@@ -53,6 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     repair_oracle_ir.add_argument("--spec", action="append", default=[], type=Path)
     repair_oracle_ir.add_argument("--target")
     repair_oracle_ir.add_argument("--require-rules", action="store_true")
+    repair_oracle_ir.add_argument("--golden-cases", type=Path)
     repair_oracle_ir.add_argument("--out", type=Path)
     repair_oracle_ir.add_argument("--prompt-out", type=Path)
     repair_oracle_ir.add_argument("--llm", action="store_true")
@@ -109,11 +111,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote OracleIR: {args.out}")
         return 0
     if args.command == "validate-oracle-ir":
-        issues = collect_oracle_ir_issues(
-            load_oracle_ir(args.oracle_ir),
+        oracle_ir_value = load_oracle_ir(args.oracle_ir)
+        target = args.target or str(oracle_ir_value.get("target") or "dut")
+        issues = collect_oracle_feedback_issues(
+            oracle_ir_value,
             manifest_path=args.manifest,
-            target=args.target,
+            target=target,
             require_rules=args.require_rules,
+            golden_cases=_load_optional_golden(args.golden_cases, target),
         )
         if issues:
             for issue in issues:
@@ -123,12 +128,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "repair-oracle-ir":
         oracle_ir_value = load_oracle_ir(args.oracle_ir)
+        target = args.target or str(oracle_ir_value.get("target") or "dut")
+        golden_cases = _load_optional_golden(args.golden_cases, target)
         prompt = build_oracle_ir_repair_prompt(
             oracle_ir_value,
             manifest_path=args.manifest,
             spec_paths=tuple(args.spec),
-            target=args.target,
+            target=target,
             require_rules=args.require_rules,
+            golden_cases=golden_cases,
         )
         if args.prompt_out:
             write_json(args.prompt_out, prompt)
@@ -136,8 +144,9 @@ def main(argv: list[str] | None = None) -> int:
             oracle_ir_value,
             manifest_path=args.manifest,
             spec_paths=tuple(args.spec),
-            target=args.target,
+            target=target,
             require_rules=args.require_rules,
+            golden_cases=golden_cases,
             llm_callable=maybe_call_oracle_ir_llm if args.llm else None,
             model=args.model,
             max_attempts=args.max_attempts,

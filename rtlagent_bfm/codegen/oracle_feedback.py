@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 from typing import Any, Callable, Iterable
 
+from .oracle_eval import collect_oracle_golden_issues
 from .oracle_ir import (
     ALLOWED_CALL_FORMATS,
     ALLOWED_CALLS,
@@ -32,14 +33,16 @@ def build_oracle_ir_repair_prompt(
     spec_paths: Iterable[str | Path] = (),
     target: str | None = None,
     require_rules: bool = False,
+    golden_cases: Iterable[Any] = (),
 ) -> dict[str, Any]:
     """Build a strict JSON prompt for repairing an invalid OracleIR."""
 
-    issues = collect_oracle_ir_issues(
+    issues = collect_oracle_feedback_issues(
         oracle_ir,
         manifest_path=manifest_path,
         target=target,
         require_rules=require_rules,
+        golden_cases=golden_cases,
     )
     specs = load_spec_documents(spec_paths)
     prompt: dict[str, Any] = {
@@ -84,6 +87,7 @@ def repair_oracle_ir_with_feedback(
     spec_paths: Iterable[str | Path] = (),
     target: str | None = None,
     require_rules: bool = False,
+    golden_cases: Iterable[Any] = (),
     llm_callable: OracleIRRepairCallable | None = None,
     model: str | None = None,
     max_attempts: int = 2,
@@ -102,12 +106,14 @@ def repair_oracle_ir_with_feedback(
         spec_paths=spec_paths,
         target=target,
         require_rules=require_rules,
+        golden_cases=golden_cases,
     )
-    issues = collect_oracle_ir_issues(
+    issues = collect_oracle_feedback_issues(
         current,
         manifest_path=manifest_path,
         target=target,
         require_rules=require_rules,
+        golden_cases=golden_cases,
     )
     if not issues:
         return repair_result("valid", current, prompt, issues, llm_responses)
@@ -132,11 +138,12 @@ def repair_oracle_ir_with_feedback(
             ]
             return repair_result("llm_invalid_response", current, prompt, issues, llm_responses)
 
-        issues = collect_oracle_ir_issues(
+        issues = collect_oracle_feedback_issues(
             current,
             manifest_path=manifest_path,
             target=target,
             require_rules=require_rules,
+            golden_cases=golden_cases,
         )
         prompt = build_oracle_ir_repair_prompt(
             current,
@@ -144,11 +151,32 @@ def repair_oracle_ir_with_feedback(
             spec_paths=spec_paths,
             target=target,
             require_rules=require_rules,
+            golden_cases=golden_cases,
         )
         if not issues:
             return repair_result("repaired", current, prompt, issues, llm_responses)
 
     return repair_result("repair_failed", current, prompt, issues, llm_responses)
+
+
+def collect_oracle_feedback_issues(
+    oracle_ir: dict[str, Any],
+    *,
+    manifest_path: str | Path | None = None,
+    target: str | None = None,
+    require_rules: bool = False,
+    golden_cases: Iterable[Any] = (),
+) -> list[Any]:
+    issues: list[Any] = collect_oracle_ir_issues(
+        oracle_ir,
+        manifest_path=manifest_path,
+        target=target,
+        require_rules=require_rules,
+    )
+    golden_case_tuple = tuple(golden_cases)
+    if golden_case_tuple:
+        issues.extend(collect_oracle_golden_issues(oracle_ir, golden_case_tuple))
+    return issues
 
 
 def maybe_call_oracle_ir_llm(

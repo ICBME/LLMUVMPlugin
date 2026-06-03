@@ -15,6 +15,7 @@ from .oracle_codegen import build_oracle_plugin_bundle
 from .oracle_eval import OracleEvaluationError, evaluate_oracle_ir
 from .oracle_feedback import (
     build_oracle_ir_repair_prompt,
+    collect_oracle_feedback_issues,
     normalize_oracle_ir_response,
     repair_oracle_ir_with_feedback,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "build_generation_prompt",
     "build_oracle_plugin_bundle",
     "build_oracle_ir_repair_prompt",
+    "collect_oracle_feedback_issues",
     "collect_oracle_ir_issues",
     "evaluate_oracle_ir",
     "finalize_bundle",
