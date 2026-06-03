@@ -6,6 +6,12 @@ import argparse
 from pathlib import Path
 import sys
 
+from .oracle_ir import (
+    collect_oracle_ir_issues,
+    generate_oracle_ir,
+    load_oracle_ir,
+    write_oracle_ir,
+)
 from .pipeline import CodegenPipelineConfig, finalize_bundle, promote_candidate, write_candidate_bundle
 from .prompt import write_generation_prompt
 from .validation import load_golden_cases, validate_artifact_dir
@@ -21,6 +27,18 @@ def main(argv: list[str] | None = None) -> int:
     prompt.add_argument("--spec", action="append", default=[], type=Path)
     prompt.add_argument("--plugin-contracts", default=Path("docs/reference/plugin_contracts.md"), type=Path)
     prompt.add_argument("--out", required=True, type=Path)
+
+    oracle_ir = subparsers.add_parser("generate-oracle-ir")
+    oracle_ir.add_argument("--manifest", required=True, type=Path)
+    oracle_ir.add_argument("--spec", action="append", default=[], type=Path)
+    oracle_ir.add_argument("--target")
+    oracle_ir.add_argument("--out", required=True, type=Path)
+
+    validate_oracle_ir = subparsers.add_parser("validate-oracle-ir")
+    validate_oracle_ir.add_argument("--oracle-ir", required=True, type=Path)
+    validate_oracle_ir.add_argument("--manifest", type=Path)
+    validate_oracle_ir.add_argument("--target")
+    validate_oracle_ir.add_argument("--require-rules", action="store_true")
 
     candidate = subparsers.add_parser("write-candidate")
     candidate.add_argument("--bundle", required=True, type=Path)
@@ -52,6 +70,28 @@ def main(argv: list[str] | None = None) -> int:
             plugin_contracts_path=args.plugin_contracts,
         )
         print(f"wrote prompt: {args.out}")
+        return 0
+    if args.command == "generate-oracle-ir":
+        ir = generate_oracle_ir(
+            manifest_path=args.manifest,
+            spec_paths=tuple(args.spec),
+            target=args.target,
+        )
+        write_oracle_ir(args.out, ir)
+        print(f"wrote OracleIR: {args.out}")
+        return 0
+    if args.command == "validate-oracle-ir":
+        issues = collect_oracle_ir_issues(
+            load_oracle_ir(args.oracle_ir),
+            manifest_path=args.manifest,
+            target=args.target,
+            require_rules=args.require_rules,
+        )
+        if issues:
+            for issue in issues:
+                print(issue.format(), file=sys.stderr)
+            return 1
+        print(f"validated OracleIR: {args.oracle_ir}")
         return 0
     if args.command == "write-candidate":
         written = write_candidate_bundle(args.bundle, args.candidate_dir)

@@ -5,6 +5,12 @@ import unittest
 
 from rtlagent_bfm.codegen.artifacts import ArtifactBundle, ArtifactBundleError
 from rtlagent_bfm.codegen.manifest import update_manifest_text
+from rtlagent_bfm.codegen.oracle_ir import (
+    OracleIRValidationError,
+    collect_oracle_ir_issues,
+    generate_oracle_ir,
+    validate_oracle_ir,
+)
 from rtlagent_bfm.codegen.pipeline import CodegenPipelineConfig, finalize_bundle
 from rtlagent_bfm.codegen.prompt import build_generation_prompt
 from rtlagent_bfm.codegen.validation import (
@@ -147,6 +153,101 @@ class TestCodegenPipeline(unittest.TestCase):
         self.assertIn('ref_model = "new:Ref"', updated)
         self.assertIn('scoreboard = "new:Scoreboard"', updated)
         self.assertIn('ref_model = "not_top_level"', updated)
+
+    def test_generate_oracle_ir_infers_sha_hashlib_rules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(
+                "\n".join(
+                    [
+                        'name = "demo_sha"',
+                        'driver = "demo_driver:Driver"',
+                        "",
+                        "[[field]]",
+                        'name = "mode"',
+                        'kind = "enum"',
+                        'choices = ["sha224", "sha256"]',
+                        "",
+                        "[[field]]",
+                        'name = "message"',
+                        'kind = "hex"',
+                    ]
+                )
+                + "\n"
+            )
+            spec.write_text("The block computes SHA-224 or SHA-256 over the input message.\n")
+
+            oracle_ir = generate_oracle_ir(manifest_path=manifest, spec_paths=[spec])
+
+            self.assertEqual(oracle_ir["target"], "demo_sha")
+            self.assertEqual([item["name"] for item in oracle_ir["inputs"]], ["mode", "message"])
+            self.assertEqual(len(oracle_ir["rules"]), 2)
+            self.assertEqual(oracle_ir["rules"][0]["expected"]["call"], "hashlib.sha224")
+            self.assertEqual(oracle_ir["rules"][1]["expected"]["call"], "hashlib.sha256")
+            self.assertEqual(oracle_ir["compare"], {"kind": "exact", "normalize": ["lower_hex"]})
+            validate_oracle_ir(oracle_ir, manifest_path=manifest, require_rules=True)
+
+    def test_oracle_ir_validation_reports_unknown_field_and_disallowed_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "demo.toml"
+            manifest.write_text(
+                "\n".join(
+                    [
+                        'name = "demo"',
+                        'driver = "demo_driver:Driver"',
+                        "",
+                        "[[field]]",
+                        'name = "payload"',
+                        'kind = "hex"',
+                    ]
+                )
+                + "\n"
+            )
+            oracle_ir = {
+                "schema_version": 1,
+                "target": "demo",
+                "inputs": [{"name": "payload", "type": "hex_bytes"}],
+                "rules": [
+                    {
+                        "expected": {
+                            "call": "os.system",
+                            "args": [{"bytes_from_hex": {"field": "missing"}}],
+                            "format": "hexdigest",
+                        }
+                    }
+                ],
+                "compare": {"kind": "exact", "normalize": ["lower_hex"]},
+            }
+
+            issues = collect_oracle_ir_issues(oracle_ir, manifest_path=manifest)
+
+            self.assertTrue(any("os.system" in issue.message for issue in issues))
+            self.assertTrue(any("missing" in issue.message for issue in issues))
+            with self.assertRaises(OracleIRValidationError):
+                validate_oracle_ir(oracle_ir, manifest_path=manifest)
+
+    def test_oracle_ir_validation_can_require_prediction_rules(self):
+        oracle_ir = {
+            "schema_version": 1,
+            "target": "demo",
+            "inputs": [{"name": "op", "type": "enum"}],
+            "rules": [],
+            "compare": {"kind": "exact", "normalize": []},
+            "unsupported": [
+                {
+                    "reason": "manual rules required",
+                    "requires": "spec review",
+                }
+            ],
+        }
+
+        validate_oracle_ir(oracle_ir)
+        issues = collect_oracle_ir_issues(oracle_ir, require_rules=True)
+
+        self.assertTrue(any("at least one prediction rule" in issue.message for issue in issues))
 
 
 def _valid_bundle():

@@ -11,6 +11,12 @@ outside the replay core. The intended flow is:
 
 from .artifacts import ArtifactBundle, GeneratedFile
 from .manifest import update_manifest_plugins
+from .oracle_ir import (
+    OracleIRValidationError,
+    collect_oracle_ir_issues,
+    generate_oracle_ir,
+    validate_oracle_ir,
+)
 from .pipeline import (
     CodegenPipelineConfig,
     finalize_bundle,
@@ -25,11 +31,15 @@ __all__ = [
     "CodegenPipelineConfig",
     "GeneratedFile",
     "GoldenCase",
+    "OracleIRValidationError",
     "build_generation_prompt",
+    "collect_oracle_ir_issues",
     "finalize_bundle",
+    "generate_oracle_ir",
     "promote_candidate",
     "update_manifest_plugins",
     "validate_artifact_dir",
+    "validate_oracle_ir",
     "write_candidate_bundle",
     "write_generation_prompt",
 ]
