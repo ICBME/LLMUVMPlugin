@@ -11,6 +11,8 @@ outside the replay core. The intended flow is:
 
 from .artifacts import ArtifactBundle, GeneratedFile
 from .manifest import update_manifest_plugins
+from .oracle_codegen import build_oracle_plugin_bundle
+from .oracle_eval import OracleEvaluationError, evaluate_oracle_ir
 from .oracle_feedback import (
     build_oracle_ir_repair_prompt,
     normalize_oracle_ir_response,
@@ -37,9 +39,12 @@ __all__ = [
     "GeneratedFile",
     "GoldenCase",
     "OracleIRValidationError",
+    "OracleEvaluationError",
     "build_generation_prompt",
+    "build_oracle_plugin_bundle",
     "build_oracle_ir_repair_prompt",
     "collect_oracle_ir_issues",
+    "evaluate_oracle_ir",
     "finalize_bundle",
     "generate_oracle_ir",
     "normalize_oracle_ir_response",

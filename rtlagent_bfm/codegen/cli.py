@@ -12,6 +12,7 @@ from .oracle_feedback import (
     maybe_call_oracle_ir_llm,
     repair_oracle_ir_with_feedback,
 )
+from .oracle_codegen import build_oracle_plugin_bundle_from_file, write_oracle_plugin_bundle
 from .oracle_ir import (
     collect_oracle_ir_issues,
     generate_oracle_ir,
@@ -58,6 +59,14 @@ def main(argv: list[str] | None = None) -> int:
     repair_oracle_ir.add_argument("--model")
     repair_oracle_ir.add_argument("--llm-response-out", type=Path)
     repair_oracle_ir.add_argument("--max-attempts", type=int, default=2)
+
+    oracle_plugins = subparsers.add_parser("generate-oracle-plugins")
+    oracle_plugins.add_argument("--oracle-ir", required=True, type=Path)
+    oracle_plugins.add_argument("--target")
+    oracle_plugins.add_argument("--package", default="generated")
+    oracle_plugins.add_argument("--module-name")
+    oracle_plugins.add_argument("--class-name", default="GeneratedOracleRefModel")
+    oracle_plugins.add_argument("--out-bundle", required=True, type=Path)
 
     candidate = subparsers.add_parser("write-candidate")
     candidate.add_argument("--bundle", required=True, type=Path)
@@ -155,6 +164,20 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(f"OracleIR repair status: {result['status']}", file=sys.stderr)
         return 1
+    if args.command == "generate-oracle-plugins":
+        bundle = build_oracle_plugin_bundle_from_file(
+            args.oracle_ir,
+            target=args.target,
+            package=args.package,
+            module_name=args.module_name,
+            class_name=args.class_name,
+        )
+        write_oracle_plugin_bundle(args.out_bundle, bundle)
+        print(f"wrote OracleIR plugin bundle: {args.out_bundle}")
+        ref_model = bundle.metadata.get("ref_model")
+        if ref_model:
+            print(f"ref_model={ref_model}")
+        return 0
     if args.command == "write-candidate":
         written = write_candidate_bundle(args.bundle, args.candidate_dir)
         print(f"wrote {len(written)} candidate files to {args.candidate_dir}")

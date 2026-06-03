@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -5,6 +6,11 @@ import unittest
 
 from rtlagent_bfm.codegen.artifacts import ArtifactBundle, ArtifactBundleError
 from rtlagent_bfm.codegen.manifest import update_manifest_text
+from rtlagent_bfm.codegen.oracle_codegen import (
+    build_oracle_plugin_bundle,
+    write_oracle_plugin_bundle,
+)
+from rtlagent_bfm.codegen.oracle_eval import evaluate_oracle_ir
 from rtlagent_bfm.codegen.oracle_feedback import (
     build_oracle_ir_repair_prompt,
     normalize_oracle_ir_response,
@@ -328,6 +334,48 @@ class TestCodegenPipeline(unittest.TestCase):
             oracle_ir,
         )
 
+    def test_oracle_ir_evaluator_computes_sha_expected(self):
+        oracle_ir = _sha256_payload_oracle_ir()
+
+        expected = evaluate_oracle_ir(oracle_ir, {"payload": "616263"})
+
+        self.assertEqual(expected, hashlib.sha256(b"abc").hexdigest())
+
+    def test_oracle_ir_codegen_bundle_validates_with_golden_case(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundle_path = root / "oracle_bundle.json"
+            bundle = build_oracle_plugin_bundle(
+                _sha256_payload_oracle_ir(),
+                target="demo",
+                package="generated",
+            )
+            write_oracle_plugin_bundle(bundle_path, bundle)
+
+            self.assertEqual(
+                bundle.metadata["ref_model"],
+                "generated.demo_ref_model:GeneratedOracleRefModel",
+            )
+            copied = finalize_bundle(
+                CodegenPipelineConfig(
+                    bundle_path=bundle_path,
+                    candidate_dir=root / "candidate",
+                    final_dir=root / "final",
+                    target="demo",
+                    ref_model=bundle.metadata["ref_model"],
+                    golden_cases=(
+                        GoldenCase(
+                            target="demo",
+                            data={"target": "demo", "payload": "616263"},
+                            expected=hashlib.sha256(b"abc").hexdigest(),
+                        ),
+                    ),
+                )
+            )
+
+            self.assertEqual(len(copied), 2)
+            self.assertTrue((root / "final" / "generated" / "demo_ref_model.py").exists())
+
 
 def _valid_bundle():
     return {
@@ -402,6 +450,25 @@ def _invalid_payload_oracle_ir():
                     "args": [{"bytes_from_hex": {"field": "missing"}}],
                     "format": "hexdigest",
                 }
+            }
+        ],
+        "compare": {"kind": "exact", "normalize": ["lower_hex"]},
+    }
+
+
+def _sha256_payload_oracle_ir():
+    return {
+        "schema_version": 1,
+        "target": "demo",
+        "inputs": [{"name": "payload", "type": "hex_bytes"}],
+        "rules": [
+            {
+                "name": "sha256_payload",
+                "expected": {
+                    "call": "hashlib.sha256",
+                    "args": [{"bytes_from_hex": {"field": "payload"}}],
+                    "format": "hexdigest",
+                },
             }
         ],
         "compare": {"kind": "exact", "normalize": ["lower_hex"]},
