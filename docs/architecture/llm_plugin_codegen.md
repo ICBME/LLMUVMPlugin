@@ -3,6 +3,11 @@
 本文档描述第一版不引入 DSL 的 LLM reference model / scoreboard 生成流程。
 该流程只作为目标侧产物生成与验证工具，不改变 replay core 的职责边界。
 
+OracleIR ref model 是同一验证/接入链路上的受限 DSL 变体：先生成结构化
+`OracleIR`，再由 codegen 生成 Python `GeneratedOracleRefModel` bundle，并复用
+candidate validation、golden case validation 和 final artifact promotion。
+当前链路评估见 [Reference Model OracleIR 评估](ref_model_oracle_ir_eval.md)。
+
 ## 目标
 
 - 在 IR 已生成之后，让 LLM 基于 spec、manifest、IR 和插件契约生成初版
@@ -152,3 +157,18 @@ python3 -m rtlagent_bfm.codegen.cli finalize \
 - `libafl_bfm_fuzz` replay 仍只通过 manifest 加载 plugin。
 - 生成的 ref model 和 scoreboard 与手写 plugin 使用同一契约。
 - 产物提升后，manifest 中的 `bfm_ir`、`ref_model`、`scoreboard` 指向 final artifact。
+
+## OracleIR 链路状态
+
+OracleIR 路径当前已接入 `example/verilog-eval` smoke 测试脚本：
+
+```sh
+uv run python libafl_bfm_fuzz/scripts/verilog_eval_oracle_chain_test.py \
+  --limit -1 \
+  --max-input-bits 8
+```
+
+该脚本使用 Verilator 从 VerilogEval `RefModule` 生成 golden truth table，再生成
+OracleIR ref model bundle，并通过 `finalize_bundle()` 验证和提升。2026-06-04 的
+结果是在当前 stateless 可表示集合上 54/54 通过；完整数据集覆盖 54/156。主要限制是
+truth-table 状态空间、latch/时序状态和 `x/z` 四值逻辑。

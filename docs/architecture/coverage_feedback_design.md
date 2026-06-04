@@ -952,6 +952,18 @@ functional_gap: message_length 56+ uncovered
   Layer 2/Layer 3 无法计算 point/gap 级 resolved，只能使用整体 coverage delta 和 functional bins。
 - 结构覆盖仍缺少 per-case attribution，无法判断某个 corpus case 是否贡献了某个新 gap。
 
+## Evaluation Status
+
+2026-06-04 已完成两轮端到端 feedback chain 评估：
+
+- combined feedback：RTL code coverage + UVM functional coverage gap。
+- code-only feedback：只使用 RTL code coverage 生成反馈。
+
+结果显示三层链路已经能够贯通 summary、Layer 2/3 state、Layer 1 directives、新 corpus
+生成和 replay/coverage 对比。AES 上真实 LLM feedback 明显优于 heuristic；SHA-256 上
+heuristic 已能消除当前 message length gap，LLM 生成更多 case 但没有进一步提高最终
+coverage。详细数据见 [Coverage Feedback 评估](coverage_feedback_eval.md)。
+
 ## Next Steps
 
 1. 将 Makefile/feedback-fuzz 接入 Layer 1/2/3 state 文件，自动串起多轮闭环。
@@ -959,5 +971,6 @@ functional_gap: message_length 56+ uncovered
 3. 扩展 Rust generator 支持 variable-length hex directives，例如 `message_lengths`。
 4. 为 LLM 输出增加更严格的 directive/case validation。
 5. 增加 waiver/unreachable 标注，避免 defensive/default branch 反复污染反馈。
-6. 比较 heuristic structural directives、Layer 1 stateful directives 和 LLM structural directives 的覆盖率收益。
-7. 按同一 `CoverageExport` 模型接入 functional coverage export。
+6. 扩大 target 数量和反馈轮数，确认 AES/SHA-256 之外的收益稳定性。
+7. 增加 per-case attribution，减少 Layer 3 对 aggregate delta 的归因误差。
+8. 按同一 `CoverageExport` 模型接入 functional coverage export。

@@ -94,6 +94,9 @@ JSONL corpus ----------------------> pyUVM sequence
 - IR 描述语义信号与 HDL path 的绑定。
 - LLM 生成的 ref model / scoreboard 必须先通过 candidate validation，再作为
   final plugin 由 manifest 接入。
+- OracleIR 生成的 ref model 也复用同一条 candidate/final validation 链路；当前
+  VerilogEval smoke 测试覆盖 stateless 小规模组合逻辑，详见
+  [Reference Model OracleIR 评估](ref_model_oracle_ir_eval.md)。
 - Rust generator 只理解 manifest field schema，不理解 DUT 语义。
 - pyUVM replay 只理解 `reset()` / `execute(case)` driver 协议。
 - coverage feedback 只能产生符合 schema 的 directives。

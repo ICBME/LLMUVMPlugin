@@ -1,6 +1,104 @@
 # Coverage Feedback Evaluation
 
-本文档记录 2026-06-01 对当前 functional coverage feedback 的 smoke 评估。
+本文档记录 coverage feedback 的离线和端到端评估。最新结果优先放在前面；
+2026-06-01 的 functional coverage feedback smoke 评估保留为历史基线。
+
+## 2026-06-04 端到端反馈链路评估
+
+当前已有两组两轮反馈链路 artifacts：
+
+- `libafl_bfm_fuzz/coverage/feedback_chain_compare_env/`：同时使用 RTL code coverage
+  和 UVM functional coverage gap 生成反馈。
+- `libafl_bfm_fuzz/coverage/feedback_chain_code_only_env/`：反馈生成时忽略 UVM
+  functional coverage，只使用 RTL code coverage。
+
+两组实验均比较三种模式：
+
+- `no_feedback`：不使用反馈生成下一轮 corpus。
+- `heuristic_feedback`：使用规则型 feedback/directives。
+- `llm_feedback`：调用真实 LLM 生成反馈 directives；报告中的 `LLM Real=True` 表示
+  本轮确实调用了模型。
+
+### RTL + Functional Feedback
+
+主要报告：
+
+```text
+libafl_bfm_fuzz/coverage/feedback_chain_compare_env/feedback_chain_comparison.md
+libafl_bfm_fuzz/coverage/feedback_chain_compare_env/feedback_chain_code_coverage.md
+```
+
+最终覆盖率：
+
+| Target | Mode | Final Overall | Cases | Uncovered Lines | Functional Gap | LLM Real |
+| --- | --- | ---: | ---: | ---: | --- | --- |
+| secworks_aes | no_feedback | 95.818% | 13 | 20 | none | False |
+| secworks_aes | heuristic_feedback | 95.818% | 13 | 20 | none | False |
+| secworks_aes | llm_feedback | 99.633% | 47 | 18 | none | True |
+| secworks_sha256 | no_feedback | 98.795% | 6 | 34 | `message_length`: `1..15`, `32..55`, `56+` | False |
+| secworks_sha256 | heuristic_feedback | 99.293% | 14 | 14 | none | False |
+| secworks_sha256 | llm_feedback | 99.293% | 27 | 14 | none | True |
+
+RTL code coverage 增益：
+
+| Target | Mode | Overall Δ vs No Feedback | Line Δ | Toggle Δ | Branch Δ | Expr Δ |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| secworks_aes | heuristic_feedback | +0.000% | +0.000% | +0.000% | +0.000% | +0.000% |
+| secworks_aes | llm_feedback | +3.815% | +0.204% | +4.195% | +0.746% | +0.000% |
+| secworks_sha256 | heuristic_feedback | +0.498% | +3.425% | +0.162% | +3.030% | +0.000% |
+| secworks_sha256 | llm_feedback | +0.498% | +3.425% | +0.162% | +3.030% | +0.000% |
+
+观察：
+
+- AES 的 heuristic feedback 没有带来增益；真实 LLM feedback 明显提高 toggle 和
+  overall coverage，并减少 2 条 uncovered lines。
+- SHA-256 的 heuristic feedback 已经能利用 functional `message_length` gap 生成有效
+  case，消除 functional gap，并减少 20 条 uncovered lines。
+- SHA-256 的 LLM feedback 生成更多 case，但最终 RTL coverage 与 heuristic 相同；
+  当前 LLM 的额外价值主要体现在 case 多样性，而非最终覆盖率。
+- Layer 2 能观察到 gap resolved/stale/open 状态；Layer 3 在有效方向上产生
+  `increase_weight`，说明三层反馈状态已经能贯穿评估链路。
+
+### RTL Code-Only Feedback
+
+主要报告：
+
+```text
+libafl_bfm_fuzz/coverage/feedback_chain_code_only_env/feedback_chain_code_only_comparison.md
+libafl_bfm_fuzz/coverage/feedback_chain_code_only_env/feedback_chain_code_only_coverage.md
+```
+
+最终覆盖率：
+
+| Target | Mode | Final Overall | Cases | Uncovered Lines | LLM Real |
+| --- | --- | ---: | ---: | ---: | --- |
+| secworks_aes | no_feedback | 95.818% | 13 | 20 | False |
+| secworks_aes | heuristic_feedback | 95.818% | 13 | 20 | False |
+| secworks_aes | llm_feedback | 99.701% | 91 | 18 | True |
+| secworks_sha256 | no_feedback | 98.795% | 6 | 34 | False |
+| secworks_sha256 | heuristic_feedback | 99.293% | 14 | 14 | False |
+| secworks_sha256 | llm_feedback | 99.293% | 24 | 14 | True |
+
+与 RTL + functional 版本相比：
+
+- AES code-only LLM 结果略高，为 99.701%，但需要更多 case。
+- SHA-256 code-only 和 combined feedback 的最终 coverage 一致，说明当前 heuristic
+  已经能从 structural gap 中推导出足够有效的 message length 相关 case。
+- code-only 场景下 functional gap 被有意忽略，报告中的 functional gap 字段不能用于判断
+  UVM coverpoint 是否完成。
+
+### 当前结论
+
+- 三层 feedback 链路已经可以端到端运行：coverage summary -> Layer 2/3 feedback ->
+  Layer 1 directives -> 新 corpus -> replay/coverage -> 对比报告。
+- LLM feedback 对 AES 这类 heuristic 难以推进的 gap 有明显收益。
+- SHA-256 当前规则路径已经足够强，LLM 没有进一步提高最终 coverage。
+- 后续评估应增加更多 target 和轮数，并记录 per-case attribution，避免只能从 aggregate
+  delta 归因。
+
+## 2026-06-01 Functional Feedback Smoke
+
+本节记录 2026-06-01 对 functional coverage feedback 的 smoke 评估。
 实验目标是区分三件事：
 
 - 当前 heuristic feedback 是否能提高覆盖率。
