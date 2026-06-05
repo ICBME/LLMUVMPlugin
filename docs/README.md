@@ -42,5 +42,5 @@
 - DUT 专用协议、reference model、scoreboard 和 coverage model 均通过插件接入。
 - Manifest 是 Rust corpus generator 和 Python replay/validation 之间的共享契约。
 - IR 只描述语义名到 HDL path 的映射，不表达协议行为。
-- LLM 生成的 ref model / scoreboard 先作为 candidate artifact，经验证后才能提升为
-  manifest 指向的 final artifact。
+- LLM 生成的 ref model / scoreboard 和 OracleIR 生成的 ref model 都先作为 candidate
+  artifact，经验证后才能提升为 manifest 指向的 final artifact。

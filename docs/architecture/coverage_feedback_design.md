@@ -4,7 +4,9 @@
 artifact 先归一化为稳定的 coverage export，再派生出可供 heuristic advisor 和
 LLM advisor 共同消费的 `rtl_gap`。
 
-当前实现优先覆盖 RTL structural coverage；functional coverage 后续按同一接口扩展。
+当前实现已经同时消费 RTL structural coverage 和 UVM functional coverage summary。
+`CoverageExport` 仍首先服务于 RTL structural coverage；functional coverage 已在 summary
+和 advisor 层接入，后续再按同一 point/export 模型归一化。
 
 ## 设计目标
 
@@ -63,7 +65,7 @@ Layer 1 负责理解当前覆盖率缺口，Layer 2 负责判断 gap 是否被�
 - 定义通用 `CoveragePoint` 和 `CoverageExport`。
 - 负责 point-level 稳定 `id`、hit/uncovered 判断、按 kind/file/module 汇总。
 - 不理解 Verilator、LCOV 或 DUT 语义。
-- 后续 functional coverage point 也应复用该数据模型。
+- 当前主要导出 RTL structural coverage point；后续 functional coverage point 也应复用该数据模型。
 
 `py/fuzz_feedback/rtl_structure_coverage.py`
 
@@ -915,7 +917,9 @@ uv run python libafl_bfm_fuzz/scripts/layer3_mutation_feedback_eval.py \
 
 ## Functional Coverage Extension
 
-后续 functional coverage 不应直接塞进 `rtl_gap`。建议先导出为同一类
+当前 functional coverage 已经作为 `uvm_functional_coverage` summary 进入
+`coverage.py`、advisor 和 feedback chain。下一步不应把 functional coverage 直接塞进
+`rtl_gap`，而应导出为同一类
 `CoverageExport(domain="uvm_functional")`，例如：
 
 ```json
@@ -968,7 +972,8 @@ coverage。详细数据见 [Coverage Feedback 评估](coverage_feedback_eval.md)
 
 1. 将 Makefile/feedback-fuzz 接入 Layer 1/2/3 state 文件，自动串起多轮闭环。
 2. 导出 full gap catalog 或 all gap ids，避免 Layer 2 受 `top_gaps` 截断影响。
-3. 扩展 Rust generator 支持 variable-length hex directives，例如 `message_lengths`。
+3. 扩展 Rust generator 支持更直接的 variable-length hex bucket directives，例如
+   `message_lengths`；当前可通过显式 `cases` 覆盖代表长度。
 4. 为 LLM 输出增加更严格的 directive/case validation。
 5. 增加 waiver/unreachable 标注，避免 defensive/default branch 反复污染反馈。
 6. 扩大 target 数量和反馈轮数，确认 AES/SHA-256 之外的收益稳定性。

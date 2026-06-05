@@ -32,10 +32,11 @@ source bundle / RTL / docs / registers
 系统分为两条主线：
 
 - `rtlagent_bfm`：提供 IR、HDL path resolver 和生成 BFM 的运行时访问层。
-- `rtlagent_bfm.codegen`：提供第一版无 DSL 的 LLM plugin candidate 写入、
+- `rtlagent_bfm.codegen`：提供 LLM plugin candidate 写入、OracleIR ref model 生成、
   校验、提升和 manifest 接入工具。
 - `libafl_bfm_fuzz`：提供 corpus generation、JSONL validation、pyUVM replay、
-  scoreboard/ref-model hook、functional coverage 和 coverage feedback。
+  scoreboard/ref-model hook、functional coverage 和 coverage feedback；仓库内的
+  `fuzz_examples` 与 `targets/secworks_*` 是 smoke/example target，不是核心依赖。
 
 ## 数据流
 
@@ -105,7 +106,7 @@ JSONL corpus ----------------------> pyUVM sequence
 
 ## 非目标
 
-- 不在框架核心内置任何 DUT 或示例工程。
+- 不让框架核心依赖任何 DUT 或示例工程；示例 target 只能通过普通 manifest/plugin 接入。
 - 不在框架核心实现 memory-mapped、streaming、AXI、APB 等协议。
 - 不在 IR resolver 中执行 cocotb timing 操作。
 - 不让 LLM 输出绕过 schema validation。

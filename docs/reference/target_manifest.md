@@ -60,8 +60,9 @@ hex_len = 16
 
 ## LLM 生成产物接入
 
-第一版无 DSL codegen 流程中，LLM 生成的 ref model / scoreboard 先写入
-candidate 目录。验证通过后，工具会将候选产物提升到 final 目录，并更新 manifest：
+codegen 流程中，LLM 生成的 ref model / scoreboard 或 OracleIR 生成的 ref model
+bundle 会先写入 candidate 目录。验证通过后，工具会将候选产物提升到 final 目录，并更新
+manifest：
 
 ```toml
 bfm_ir = "generated/final/my_dut_ir.json"
@@ -174,4 +175,6 @@ corpus generator 的 schema decode 规则。为了避免过大的 summary，默�
 3. `FUZZ_TARGETS_DIR/<target>.toml`。
 4. 默认 `libafl_bfm_fuzz/targets/<target>.toml`。
 
-清理后的框架不自带具体 DUT manifest。新 DUT 应显式提供 manifest。
+仓库内 `libafl_bfm_fuzz/targets/secworks_aes.toml` 和
+`libafl_bfm_fuzz/targets/secworks_sha256.toml` 是 smoke/example target manifest。新
+DUT 仍应显式提供自己的 manifest；不要依赖框架核心隐式推断 DUT 配置。

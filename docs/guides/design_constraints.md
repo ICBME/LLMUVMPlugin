@@ -4,7 +4,8 @@
 
 ## 核心边界
 
-- 框架核心不得出现特定 DUT、示例工程或协议实现。
+- 可复用框架核心不得依赖特定 DUT、示例工程或协议实现；仓库中的
+  `py/fuzz_examples/` 和 `targets/secworks_*` 只作为 smoke/example 插件存在。
 - 新目标必须通过 manifest 和 plugin 接入。
 - Manifest schema 是 Rust generator 和 Python validator/replay 的共享契约。
 - IR 只描述语义绑定，不描述协议行为。
@@ -46,12 +47,16 @@
 - Coverage model 负责目标语义覆盖；需要 result/error 上下文时实现 `sample_record(record)`。
 - Plugin constructor 应显式声明需要的参数，减少静默忽略错误。
 
+## 已完成扩展
+
+- Coverage schema：manifest 已支持 `[[coverpoint]]` 和 `[[cross]]`，默认 coverage
+  model 和 feedback advisor 已消费这些声明。
+- DSL codegen 初版：OracleIR 已作为 reference model 的受限 DSL 接入验证和插件生成链路。
+
 ## 推荐扩展顺序
 
 1. Manifest validation：统一 Rust/Python 错误报告。
 2. Scoreboard policy：提供 smoke scoreboard 或 `allow_missing_expected`。
 3. Sequence plugin：支持多阶段初始化、burst 和 stateful replay。
 4. Mutator schema：支持字段权重、边界值、交叉约束和依赖关系。
-5. Coverage schema：用 manifest 声明通用 coverpoint/cross。
-6. DSL codegen：在直接生成 Python 难以稳定时，将 ref model / scoreboard 语义收敛到
-   可验证 DSL。
+5. 扩展 OracleIR 或后续 DSL 到表达式级组合逻辑、stateful oracle 和 scoreboard 语义。

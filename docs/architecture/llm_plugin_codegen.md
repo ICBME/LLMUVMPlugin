@@ -1,7 +1,8 @@
 # LLM Plugin Codegen Architecture
 
-本文档描述第一版不引入 DSL 的 LLM reference model / scoreboard 生成流程。
-该流程只作为目标侧产物生成与验证工具，不改变 replay core 的职责边界。
+本文档描述 reference model / scoreboard 生成和验证流程。直接 Python plugin 路径仍
+不引入通用 DSL；OracleIR 是当前已接入的受限 reference model DSL。该流程只作为
+目标侧产物生成与验证工具，不改变 replay core 的职责边界。
 
 OracleIR ref model 是同一验证/接入链路上的受限 DSL 变体：先生成结构化
 `OracleIR`，再由 codegen 生成 Python `GeneratedOracleRefModel` bundle，并复用
@@ -18,7 +19,8 @@ candidate validation、golden case validation 和 final artifact promotion。
 
 ## 非目标
 
-- 本阶段不实现 DSL。
+- 直接 Python plugin 路径不实现通用协议 DSL 或 scoreboard DSL；当前只有 OracleIR
+  这一条受限 reference model DSL。
 - 不让 LLM 修改 `libafl_bfm_fuzz` replay core。
 - 不让未验证的 LLM 代码直接进入 final artifact 或 manifest。
 - 不在 IR 中表达协议预测规则、scoreboard 策略或 timing 行为。
@@ -108,7 +110,7 @@ review。复杂状态机、乱序响应、多周期 monitor-driven scoreboard �
 生成 prompt：
 
 ```sh
-python3 -m rtlagent_bfm.codegen.cli write-prompt \
+uv run python -m rtlagent_bfm.codegen.cli write-prompt \
   --manifest /path/to/target.toml \
   --ir /path/to/generated_ir.json \
   --spec /path/to/spec.md \
@@ -118,7 +120,7 @@ python3 -m rtlagent_bfm.codegen.cli write-prompt \
 写入 candidate：
 
 ```sh
-python3 -m rtlagent_bfm.codegen.cli write-candidate \
+uv run python -m rtlagent_bfm.codegen.cli write-candidate \
   --bundle generated/candidates/run_001/llm_bundle.json \
   --candidate-dir generated/candidates/run_001/artifacts
 ```
@@ -126,7 +128,7 @@ python3 -m rtlagent_bfm.codegen.cli write-candidate \
 验证 candidate：
 
 ```sh
-python3 -m rtlagent_bfm.codegen.cli validate \
+uv run python -m rtlagent_bfm.codegen.cli validate \
   --artifact-dir generated/candidates/run_001/artifacts \
   --target my_dut \
   --ref-model generated.my_dut_ref_model:MyRefModel \
@@ -138,7 +140,7 @@ python3 -m rtlagent_bfm.codegen.cli validate \
 验证、提升并更新 manifest：
 
 ```sh
-python3 -m rtlagent_bfm.codegen.cli finalize \
+uv run python -m rtlagent_bfm.codegen.cli finalize \
   --bundle generated/candidates/run_001/llm_bundle.json \
   --candidate-dir generated/candidates/run_001/artifacts \
   --final-dir generated/final \
@@ -149,6 +151,28 @@ python3 -m rtlagent_bfm.codegen.cli finalize \
   --bfm-ir generated/final/my_dut_ir.json \
   --python-path libafl_bfm_fuzz/py \
   --golden-cases tests/my_dut_golden.json
+```
+
+OracleIR ref model 路径：
+
+```sh
+uv run python -m rtlagent_bfm.codegen.cli generate-oracle-ir \
+  --manifest /path/to/target.toml \
+  --spec /path/to/spec.md \
+  --target my_dut \
+  --out generated/candidates/run_001/oracle_ir.json
+
+uv run python -m rtlagent_bfm.codegen.cli validate-oracle-ir \
+  --oracle-ir generated/candidates/run_001/oracle_ir.json \
+  --manifest /path/to/target.toml \
+  --target my_dut \
+  --require-rules \
+  --golden-cases tests/my_dut_golden.json
+
+uv run python -m rtlagent_bfm.codegen.cli generate-oracle-plugins \
+  --oracle-ir generated/candidates/run_001/oracle_ir.json \
+  --target my_dut \
+  --out-bundle generated/candidates/run_001/oracle_bundle.json
 ```
 
 ## 与现有框架的关系

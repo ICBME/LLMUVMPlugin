@@ -122,7 +122,7 @@ mutation directives 重新生成 corpus 并重新采集 RTL coverage。AES 运�
 可用一键脚本复现实验并生成 JSON/Markdown 对比结果：
 
 ```sh
-uv run python3 libafl_bfm_fuzz/scripts/coverage_feedback_compare.py --quiet
+uv run python libafl_bfm_fuzz/scripts/coverage_feedback_compare.py --quiet
 ```
 
 默认运行 `secworks_aes` 和 `secworks_sha256` 的三组结果：
@@ -140,7 +140,8 @@ uv run python3 libafl_bfm_fuzz/scripts/coverage_feedback_compare.py --quiet
 - 每个 target/mode 的 corpus、coverage summary、functional coverage、directives
   和命令日志。
 
-当前环境未设置 `OPENAI_API_KEY`。因此 `--llm` 路径不会真实调用模型，实际输出为：
+2026-06-01 smoke 运行时未设置 `OPENAI_API_KEY`。因此该次 `--llm` 路径没有真实调用模型，
+实际输出为：
 
 ```text
 source=heuristic; OPENAI_API_KEY not set
@@ -153,7 +154,7 @@ source=heuristic; OPENAI_API_KEY not set
 export OPENAI_API_KEY=...
 export LANGSMITH_TRACING=true
 export LANGSMITH_API_KEY=...
-uv run python3 libafl_bfm_fuzz/scripts/coverage_feedback_compare.py \
+uv run python libafl_bfm_fuzz/scripts/coverage_feedback_compare.py \
   --require-real-llm \
   --llm-model gpt-4.1-mini
 ```

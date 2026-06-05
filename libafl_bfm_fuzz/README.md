@@ -25,9 +25,11 @@ constraints are documented in
   optional LLM calls, directive validation, and the CLI used by
   `coverage_feedback.py`.
 
-Framework code does not include DUT-specific BFMs, reference models, vectors, or
-hardcoded example paths. A DUT is added by providing a target manifest plus
-driver/ref-model/coverage plugins generated or maintained outside this core.
+Reusable framework code does not depend on DUT-specific BFMs, reference models,
+vectors, or hardcoded RTL paths. The repository does include `py/fuzz_examples`
+and `targets/secworks_*` smoke targets, but they are ordinary manifest/plugin
+examples rather than core dependencies. A new DUT is added by providing its own
+target manifest plus driver/ref-model/coverage plugins.
 
 ## Target Manifest
 
@@ -128,12 +130,22 @@ coverage defaults to `coverage/<target>_uvm_functional_coverage.json`; override
 prefers that replay-exported JSON and falls back to corpus-derived schema
 coverage when it is missing.
 
-To compare baseline, heuristic feedback, and LLM feedback across the local
-Secworks examples:
+To compare baseline, heuristic feedback, and real LLM feedback across the local
+Secworks examples for multiple feedback rounds:
 
 ```sh
-uv run python3 libafl_bfm_fuzz/scripts/coverage_feedback_compare.py --quiet
+uv run python libafl_bfm_fuzz/scripts/feedback_chain_compare.py --quiet --rounds 2
 ```
+
+For RTL-code-coverage-only feedback, use:
+
+```sh
+uv run python libafl_bfm_fuzz/scripts/feedback_chain_code_only.py --quiet --rounds 2
+```
+
+The older `coverage_feedback_compare.py` script remains useful for single-step
+smoke comparison, but the `feedback_chain_*` scripts are the current end-to-end
+evaluation entry points.
 
 LLM feedback uses LangChain's OpenAI chat integration, so LangSmith tracing can
 be enabled with `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY`.

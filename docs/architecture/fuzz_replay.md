@@ -41,6 +41,8 @@
 - `rtl_gap.py`：从 uncovered structural coverage point 聚合结构化 `rtl_gap`。
 - `mutation_planner.py`：将清晰 `rtl_gap` 转换为 mutation directives，将复杂 gap
   压缩为 LLM 输入。
+- `feedback_loop.py`：实现 Layer 2 per-gap feedback、Layer 3 mutation direction
+  feedback 和 directives 权重/状态更新。
 - `advisors.py`：生成 generic directives 或调用 LLM。
 - `cli.py`：命令行入口。
 
@@ -78,11 +80,13 @@
    functional coverage 和 stimulus summary。
    它优先读取 UVM replay 导出的 functional coverage JSON；如果文件不存在，则回退到
    从 JSONL corpus 重新计算 schema-level functional coverage。
-5. `advisors.py` 生成 generic directives。当前优先使用 functional coverage 中的
+5. `feedback_loop.py` 可根据上一轮 summary/directives/state 生成 Layer 2 gap feedback
+   和 Layer 3 mutation feedback；没有上一轮输入时保持单轮旧行为。
+6. `advisors.py` 生成 generic directives。当前优先使用 functional coverage 中的
    uncovered field/coverpoint；`mutation_planner.py` 会把清晰 `rtl_gap` 转换为
    structural directives，并把复杂 gap 放入 LLM prompt；最后回退到 sparse stimulus
    field heuristic。也可调用 LLM 生成 directives。
-6. 下一轮 `generate-corpus` 通过 `--directives` 读取 directives。
+7. 下一轮 `generate-corpus` 通过 `--directives` 读取 directives。
 
 结构化 coverage export 和 `rtl_gap` 的 schema 见
 [Coverage Feedback 设计](coverage_feedback_design.md)。

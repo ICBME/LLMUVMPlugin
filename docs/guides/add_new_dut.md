@@ -51,7 +51,7 @@ async def execute(self, case) -> ReplayResult:
 如果没有 expected，但只想 smoke replay，请使用自定义 scoreboard，默认 scoreboard
 会要求 expected 存在。
 
-也可以使用第一版无 DSL LLM codegen 生成 ref model / scoreboard 初版：
+也可以使用 LLM/codegen 流程生成 ref model / scoreboard 初版：
 
 1. 使用已生成 IR、manifest 和 spec 生成 LLM prompt。
 2. 将 LLM 返回的 file bundle 写入 candidate 目录。
@@ -60,6 +60,11 @@ async def execute(self, case) -> ReplayResult:
    `scoreboard`。
 
 详见 [LLM Plugin Codegen 架构](../architecture/llm_plugin_codegen.md)。
+
+如果 ref model 能表达为 deterministic、stateless 的输入到输出预测，也可以优先尝试
+OracleIR 路径：生成或手写 `OracleIR`，验证 golden cases，然后生成
+`GeneratedOracleRefModel` bundle。当前链路和边界见
+[Reference Model OracleIR 评估](../architecture/ref_model_oracle_ir_eval.md)。
 
 ## 5. 编写 Target Manifest
 
@@ -126,7 +131,8 @@ UVM_FUNCTIONAL_COVERAGE_OUT=/path/to/my_dut_functional.json
 
 ## 9. 保持目标代码外置
 
-目标专用文件应保存在目标工程或插件目录中，不放进框架核心：
+新目标的专用文件应保存在目标工程或插件目录中，不放进可复用框架核心。仓库内
+`fuzz_examples` 和 `targets/secworks_*` 只作为 smoke/example target：
 
 - driver plugin
 - ref model
