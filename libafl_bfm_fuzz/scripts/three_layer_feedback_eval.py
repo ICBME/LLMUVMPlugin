@@ -14,8 +14,18 @@ PY_DIR = FUZZ_DIR / "py"
 if str(PY_DIR) not in sys.path:
     sys.path.insert(0, str(PY_DIR))
 
-from fuzz_feedback.advisors import propose_directives  # noqa: E402
+from connector_observe import Connector, ObservationContext, observer_from_env  # noqa: E402
+from fuzz_feedback.advisors import propose_directives_from_plan  # noqa: E402
 from fuzz_feedback.feedback_loop import build_gap_feedback, build_mutation_feedback  # noqa: E402
+from fuzz_feedback.mutation_planner import plan_mutations_from_rtl_gaps  # noqa: E402
+from fuzz_pipeline.coverage_feedback import (  # noqa: E402
+    directives_metrics,
+    gap_feedback_metrics,
+    layer1_plan_metrics,
+    mutation_feedback_metrics,
+    write_json as write_pipeline_json,
+)
+from fuzz_pipeline.topology import COVERAGE_FEEDBACK_TOPOLOGY  # noqa: E402
 
 
 DEFAULT_ROUNDS = ("baseline", "heuristic", "llm")
@@ -33,7 +43,24 @@ def main() -> int:
     output_dir = args.out_dir or args.run_dir / "three_layer_eval"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    evaluation = build_evaluation(target, runs, output_dir)
+    observer = observer_from_env(
+        args.observation_out,
+        monitoring_path=args.monitoring_out,
+    )
+    context = ObservationContext.from_env(observer=observer)
+    if args.observation_run_id:
+        context = ObservationContext(
+            run_id=args.observation_run_id,
+            observer=context.observer,
+            strict=context.strict,
+        )
+
+    try:
+        if args.topology_out:
+            write_pipeline_json(args.topology_out, COVERAGE_FEEDBACK_TOPOLOGY.to_json())
+        evaluation = build_evaluation(target, runs, output_dir, context)
+    finally:
+        observer.close()
     json_out = args.json_out or output_dir / f"{target}_three_layer_feedback_eval.json"
     markdown_out = args.markdown_out or output_dir / f"{target}_three_layer_feedback_eval.md"
     write_json(json_out, evaluation)
@@ -67,6 +94,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path)
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--markdown-out", type=Path)
+    parser.add_argument("--observation-out", type=Path)
+    parser.add_argument("--monitoring-out", type=Path)
+    parser.add_argument("--topology-out", type=Path)
+    parser.add_argument("--observation-run-id")
     return parser.parse_args()
 
 
@@ -111,7 +142,9 @@ def build_evaluation(
     target: str,
     runs: list[dict[str, Any]],
     output_dir: Path,
+    context: ObservationContext | None = None,
 ) -> dict[str, Any]:
+    context = context or ObservationContext()
     round_rows = [summarize_round(run) for run in runs]
     transitions: list[dict[str, Any]] = []
     previous_gap_feedback: dict[str, Any] | None = None
@@ -124,27 +157,74 @@ def build_evaluation(
         current_summary = current_run["summary"]
         applied_directives = transition_applied_directives(previous_run, current_run)
 
-        mutation_feedback = build_mutation_feedback(
+        mutation_feedback = connector(
+            "summary_to_mutation_feedback",
+            "coverage_summary",
+            "mutation_feedback",
+            context,
+        ).run(
+            build_mutation_feedback,
             previous_summary,
             current_summary,
             applied_directives,
             previous_feedback=previous_mutation_feedback,
+            metrics=mutation_feedback_metrics,
+            metadata={
+                "target": target,
+                "transition": f"{previous_run['name']}->{current_run['name']}",
+            },
         )
-        gap_feedback = build_gap_feedback(
+        gap_feedback = connector(
+            "layer3_feedback_to_layer2_feedback",
+            "mutation_feedback",
+            "gap_feedback",
+            context,
+        ).run(
+            build_gap_feedback,
             previous_summary,
             current_summary,
             applied_directives,
             previous_gap_feedback=previous_gap_feedback,
             mutation_feedback=mutation_feedback,
+            metrics=gap_feedback_metrics,
+            metadata={
+                "target": target,
+                "transition": f"{previous_run['name']}->{current_run['name']}",
+            },
         )
-        next_directives = propose_directives(
+        structural_plan = connector(
+            "layer2_layer3_feedback_to_layer1_plan",
+            "gap_feedback",
+            "layer1_plan",
+            context,
+        ).run(
+            plan_mutations_from_rtl_gaps,
             current_summary,
             gap_feedback=gap_feedback,
             mutation_feedback=mutation_feedback,
+            metrics=layer1_plan_metrics,
+            metadata={
+                "target": target,
+                "transition": f"{previous_run['name']}->{current_run['name']}",
+            },
         )
-        structural_plan = next_directives.get("rtl_gap_mutation_plan", {})
-        if not isinstance(structural_plan, dict):
-            structural_plan = {}
+        next_directives = connector(
+            "layer1_plan_to_directives",
+            "layer1_plan",
+            "mutation_directives",
+            context,
+        ).run(
+            propose_directives_from_plan,
+            current_summary,
+            structural_plan,
+            gap_feedback=gap_feedback,
+            mutation_feedback=mutation_feedback,
+            metrics=directives_metrics,
+            metadata={
+                "target": target,
+                "transition": f"{previous_run['name']}->{current_run['name']}",
+            },
+        )
 
         prefix = f"transition_{index:02d}_{previous_run['name']}_to_{current_run['name']}"
         layer2_out = output_dir / f"{prefix}_layer2_gap_feedback.json"
@@ -184,6 +264,10 @@ def build_evaluation(
         "transitions": transitions,
         "summary": summarize_overall(round_rows, transitions),
     }
+
+
+def connector(name: str, from_layer: str, to_layer: str, context: ObservationContext) -> Connector:
+    return Connector.from_context(name, from_layer, to_layer, context)
 
 
 def summarize_round(run: dict[str, Any]) -> dict[str, Any]:

@@ -2,7 +2,7 @@
 
 from .coverage import build_summary
 from .coverage_export import CoverageExport, CoveragePoint
-from .advisors import propose_directives, validate_directives
+from .advisors import propose_directives, propose_directives_from_plan, validate_directives
 from .feedback_loop import build_gap_feedback, build_mutation_feedback, update_mutation_directions
 from .mutation_planner import plan_mutations_from_rtl_gaps
 from .rtl_gap import RTL_GAP_DOMAIN, build_rtl_gap_export, build_rtl_gap_summary
@@ -28,6 +28,7 @@ __all__ = [
     "build_mutation_feedback",
     "plan_mutations_from_rtl_gaps",
     "propose_directives",
+    "propose_directives_from_plan",
     "update_mutation_directions",
     "validate_directives",
 ]

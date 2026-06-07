@@ -5,6 +5,7 @@ from queue import Full, Queue
 from threading import Lock, Thread
 from typing import Protocol
 import json
+import os
 
 from .schema import ConnectorEvent
 
@@ -97,6 +98,100 @@ class CompositeObserver:
             raise errors[0]
 
 
+class MonitoringObserver:
+    """Aggregate connector-level health metrics without touching main results."""
+
+    def __init__(self, path: str | Path | None = None):
+        self.path = Path(path) if path is not None else None
+        self._lock = Lock()
+        self._connectors: dict[str, dict] = {}
+        self._edges: dict[str, dict] = {}
+        self._event_count = 0
+
+    def on_event(self, event: ConnectorEvent) -> None:
+        with self._lock:
+            self._event_count += 1
+            connector = self._connectors.setdefault(
+                event.connector,
+                {
+                    "connector": event.connector,
+                    "from_layer": event.from_layer,
+                    "to_layer": event.to_layer,
+                    "started": 0,
+                    "finished": 0,
+                    "failed": 0,
+                    "total_duration_ms": 0.0,
+                    "last_status": None,
+                    "last_error": None,
+                    "metrics": {},
+                },
+            )
+            edge_key = f"{event.from_layer}->{event.to_layer}"
+            edge = self._edges.setdefault(
+                edge_key,
+                {
+                    "from_layer": event.from_layer,
+                    "to_layer": event.to_layer,
+                    "connectors": set(),
+                    "event_count": 0,
+                },
+            )
+            edge["connectors"].add(event.connector)
+            edge["event_count"] += 1
+
+            if event.event_type == "connector.started":
+                connector["started"] += 1
+            elif event.event_type == "connector.finished":
+                connector["finished"] += 1
+            elif event.event_type == "connector.failed":
+                connector["failed"] += 1
+                connector["last_error"] = event.error
+            if event.duration_ms is not None:
+                connector["total_duration_ms"] = round(
+                    float(connector["total_duration_ms"]) + event.duration_ms,
+                    6,
+                )
+            if event.status is not None:
+                connector["last_status"] = event.status
+            if event.metrics:
+                connector["metrics"] = event.metrics
+
+    def flush(self) -> None:
+        if self.path is None:
+            return
+        snapshot = self.snapshot()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
+
+    def close(self) -> None:
+        self.flush()
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            connectors = []
+            for item in self._connectors.values():
+                row = dict(item)
+                if row["finished"] or row["failed"]:
+                    completed = row["finished"] + row["failed"]
+                    row["avg_duration_ms"] = round(row["total_duration_ms"] / completed, 6)
+                else:
+                    row["avg_duration_ms"] = 0.0
+                connectors.append(row)
+            edges = []
+            for item in self._edges.values():
+                row = dict(item)
+                row["connectors"] = sorted(row["connectors"])
+                edges.append(row)
+            return {
+                "schema_version": 1,
+                "event_count": self._event_count,
+                "connector_count": len(connectors),
+                "failed_connector_count": sum(1 for item in connectors if item["failed"]),
+                "connectors": sorted(connectors, key=lambda item: item["connector"]),
+                "edges": sorted(edges, key=lambda item: (item["from_layer"], item["to_layer"])),
+            }
+
+
 class AsyncObserver:
     def __init__(self, observer: Observer, *, max_queue_size: int = 1024):
         self.observer = observer
@@ -139,3 +234,29 @@ class AsyncObserver:
                     pass
             finally:
                 self._queue.task_done()
+
+
+def observer_from_env(
+    path: str | Path | None = None,
+    *,
+    monitoring_path: str | Path | None = None,
+) -> Observer:
+    output_path = path or os.getenv("CONNECTOR_OBSERVE_OUT")
+    monitor_path = monitoring_path or os.getenv("CONNECTOR_MONITOR_OUT")
+    observers: list[Observer] = []
+    if output_path is not None and str(output_path).strip():
+        observer: Observer = JsonlObserver(output_path)
+        if os.getenv("CONNECTOR_OBSERVE_ASYNC", "1") not in {"0", "false", "FALSE", "no", "NO"}:
+            try:
+                queue_size = int(os.getenv("CONNECTOR_OBSERVE_QUEUE", "1024"))
+            except ValueError:
+                queue_size = 1024
+            observer = AsyncObserver(observer, max_queue_size=queue_size)
+        observers.append(observer)
+    if monitor_path is not None and str(monitor_path).strip():
+        observers.append(MonitoringObserver(monitor_path))
+    if not observers:
+        return NullObserver()
+    if len(observers) == 1:
+        return observers[0]
+    return CompositeObserver(observers)

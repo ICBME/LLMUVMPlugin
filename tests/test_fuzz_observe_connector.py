@@ -8,8 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "libafl_bfm_fuzz" / "py"))
 
-from fuzz_observe import AsyncObserver, Connector, JsonlObserver  # noqa: E402
-from fuzz_observe.schema import normalize_artifact_refs  # noqa: E402
+from connector_observe import AsyncObserver, Connector, JsonlObserver  # noqa: E402
+from connector_observe.schema import normalize_artifact_refs  # noqa: E402
 
 
 class FailingObserver:

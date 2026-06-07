@@ -129,10 +129,15 @@ class TestThreeLayerFeedbackEval(unittest.TestCase):
                 {"source": "llm", "directives": []},
             )
             out_dir = tmp_path / "eval"
+            observation_out = out_dir / "events.jsonl"
+            monitoring_out = out_dir / "monitor.json"
+            topology_out = out_dir / "topology.json"
 
             old_argv = sys.argv
             old_config = os.environ.get("FUZZ_TARGET_CONFIG")
+            old_async = os.environ.get("CONNECTOR_OBSERVE_ASYNC")
             os.environ["FUZZ_TARGET_CONFIG"] = str(config_path)
+            os.environ["CONNECTOR_OBSERVE_ASYNC"] = "0"
             try:
                 sys.argv = [
                     "three_layer_feedback_eval.py",
@@ -148,6 +153,14 @@ class TestThreeLayerFeedbackEval(unittest.TestCase):
                     "llm",
                     "--out-dir",
                     str(out_dir),
+                    "--observation-out",
+                    str(observation_out),
+                    "--monitoring-out",
+                    str(monitoring_out),
+                    "--topology-out",
+                    str(topology_out),
+                    "--observation-run-id",
+                    "three-layer-demo",
                 ]
                 status = eval3.main()
             finally:
@@ -156,9 +169,16 @@ class TestThreeLayerFeedbackEval(unittest.TestCase):
                     os.environ.pop("FUZZ_TARGET_CONFIG", None)
                 else:
                     os.environ["FUZZ_TARGET_CONFIG"] = old_config
+                if old_async is None:
+                    os.environ.pop("CONNECTOR_OBSERVE_ASYNC", None)
+                else:
+                    os.environ["CONNECTOR_OBSERVE_ASYNC"] = old_async
 
             report = json.loads((out_dir / "demo_three_layer_feedback_eval.json").read_text())
             markdown = (out_dir / "demo_three_layer_feedback_eval.md").read_text()
+            events = [json.loads(line) for line in observation_out.read_text().splitlines()]
+            monitor = json.loads(monitoring_out.read_text())
+            topology = json.loads(topology_out.read_text())
 
         self.assertEqual(status, 0)
         self.assertEqual(report["summary"]["transition_count"], 2)
@@ -167,6 +187,14 @@ class TestThreeLayerFeedbackEval(unittest.TestCase):
         self.assertEqual(report["transitions"][1]["layer2"]["stale_targeted_gap_count"], 1)
         self.assertIn("Three-Layer Feedback Evaluation", markdown)
         self.assertIn("baseline->heuristic", markdown)
+        finished = {event["connector"] for event in events if event["event_type"] == "connector.finished"}
+        self.assertIn("summary_to_mutation_feedback", finished)
+        self.assertIn("layer3_feedback_to_layer2_feedback", finished)
+        self.assertIn("layer2_layer3_feedback_to_layer1_plan", finished)
+        self.assertIn("layer1_plan_to_directives", finished)
+        self.assertTrue(all(event.get("run_id") == "three-layer-demo" for event in events))
+        self.assertEqual(monitor["failed_connector_count"], 0)
+        self.assertIn("layer3_feedback_to_layer2_feedback", {item["name"] for item in topology["connectors"]})
 
 
 if __name__ == "__main__":

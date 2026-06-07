@@ -20,15 +20,29 @@ def propose_directives(
     gap_feedback: dict[str, Any] | None = None,
     mutation_feedback: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    target = summary["target"]
-    uncovered_count = int(summary.get("uncovered_line_count", 0))
-    sparse_fields = sparse_field_names(summary)
-    functional_updates = functional_uncovered_values(summary)
     structural_plan = plan_mutations_from_rtl_gaps(
         summary,
         gap_feedback=gap_feedback,
         mutation_feedback=mutation_feedback,
     )
+    return propose_directives_from_plan(
+        summary,
+        structural_plan,
+        gap_feedback=gap_feedback,
+        mutation_feedback=mutation_feedback,
+    )
+
+
+def propose_directives_from_plan(
+    summary: dict[str, Any],
+    structural_plan: dict[str, Any],
+    gap_feedback: dict[str, Any] | None = None,
+    mutation_feedback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    target = summary["target"]
+    uncovered_count = int(summary.get("uncovered_line_count", 0))
+    sparse_fields = sparse_field_names(summary)
+    functional_updates = functional_uncovered_values(summary)
     structural_directives = structural_plan.get("directives", [])
     directives: list[dict[str, Any]] = []
 

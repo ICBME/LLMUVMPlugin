@@ -15,6 +15,10 @@ LLM_RESPONSE ?= $(COVERAGE_DIR)/$(TARGET)_llm_response.json
 MUTATION_DIRECTIVES ?= $(COVERAGE_DIR)/$(TARGET)_mutation_directives.json
 GAP_FEEDBACK ?= $(COVERAGE_DIR)/$(TARGET)_gap_feedback.json
 MUTATION_FEEDBACK ?= $(COVERAGE_DIR)/$(TARGET)_mutation_feedback.json
+CONNECTOR_OBSERVE_OUT ?=
+CONNECTOR_OBSERVE_RUN_ID ?=
+CONNECTOR_MONITOR_OUT ?=
+CONNECTOR_TOPOLOGY_OUT ?=
 PREVIOUS_COVERAGE_SUMMARY ?=
 PREVIOUS_MUTATION_DIRECTIVES ?=
 PREVIOUS_GAP_FEEDBACK ?=
@@ -140,6 +144,10 @@ coverage-feedback: coverage-report
 		$(if $(PREVIOUS_GAP_FEEDBACK),--previous-gap-feedback $(PREVIOUS_GAP_FEEDBACK),) \
 		$(if $(PREVIOUS_MUTATION_FEEDBACK),--previous-mutation-feedback $(PREVIOUS_MUTATION_FEEDBACK),) \
 		--llm-response-out $(LLM_RESPONSE) \
+		$(if $(CONNECTOR_OBSERVE_OUT),--observation-out $(CONNECTOR_OBSERVE_OUT),) \
+		$(if $(CONNECTOR_MONITOR_OUT),--monitoring-out $(CONNECTOR_MONITOR_OUT),) \
+		$(if $(CONNECTOR_TOPOLOGY_OUT),--topology-out $(CONNECTOR_TOPOLOGY_OUT),) \
+		$(if $(CONNECTOR_OBSERVE_RUN_ID),--observation-run-id $(CONNECTOR_OBSERVE_RUN_ID),) \
 		$(if $(filter 1,$(LLM_FEEDBACK)),--llm,) \
 		$(if $(LLM_MODEL),--model $(LLM_MODEL),)
 
