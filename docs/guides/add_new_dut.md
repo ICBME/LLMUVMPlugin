@@ -90,6 +90,10 @@ make -C libafl_bfm_fuzz \
   generate-corpus
 ```
 
+该目标会通过 `scripts/run_fuzz_pipeline.py generate-corpus` 串联 Rust corpus
+generator 和 Python corpus validation。若需要指定 cargo toolchain 或 wrapper，可传入
+quoted `CARGO`，例如 `CARGO='cargo +nightly'`。
+
 ## 7. Replay
 
 ```sh

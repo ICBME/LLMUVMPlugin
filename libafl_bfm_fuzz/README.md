@@ -30,7 +30,8 @@ constraints are documented in
   is the orchestration layer: components expose handlers/adapters, while
   `StepSpec` wiring decides connector names, artifact roles, metrics, and
   failure policy. `py/fuzz_pipeline/replay_orchestrator.py` applies the same
-  pattern to pyUVM replay.
+  pattern to pyUVM replay, and `py/fuzz_pipeline/run_orchestrator.py` starts to
+  move top-level fuzz stages out of Makefile recipes.
 
 Reusable framework code does not depend on DUT-specific BFMs, reference models,
 vectors, or hardcoded RTL paths. The repository does include `py/fuzz_examples`
@@ -91,7 +92,18 @@ unless `FUZZ_CORPUS` is set.
 `generate-corpus` is connector-observable. When observation is enabled, the
 Rust corpus generator emits `corpus_generator_to_corpus`, and the Python
 validator emits `corpus_to_validation`. Both are wrapped by the pipeline
-orchestrator rather than by DUT-specific code.
+orchestrator rather than by DUT-specific code. The Makefile delegates this to
+`scripts/run_fuzz_pipeline.py generate-corpus`.
+
+When invoking `scripts/run_fuzz_pipeline.py generate-corpus` directly, `--cwd`
+sets the working directory for the Rust generator. Relative corpus, target
+manifest, directives, and LibAFL manifest paths are resolved from that same
+directory so generation and validation read the same artifacts. `--topology-out`
+is still interpreted by the Python caller.
+
+The Makefile passes `CARGO` through to the pipeline runner, so cargo wrappers can
+be selected with a quoted value, for example `CARGO='cargo +nightly'` or
+`CARGO='sccache cargo'`.
 
 ## Replay Against RTL
 
@@ -160,7 +172,8 @@ make -C libafl_bfm_fuzz check
 ```
 
 `check` runs Rust unit tests and Python syntax checks. Corpus and UVM replay
-checks require a target manifest and, for simulation, the RTL source list.
+checks require a target manifest and, for simulation, the RTL source list. The
+syntax check includes the shared `py/fuzz_pipeline/` orchestration modules.
 
 ## Coverage-Guided Feedback
 

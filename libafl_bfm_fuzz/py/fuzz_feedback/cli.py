@@ -3,26 +3,18 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from connector_observe import ObservationContext, observer_from_env
 from fuzz_pipeline import CoverageFeedbackConfig, run_coverage_feedback_pipeline
+from fuzz_pipeline.observation import ObservationRuntime
 
 
 def main() -> int:
     args = parse_args()
-    observer = observer_from_env(
-        args.observation_out,
-        monitoring_path=args.monitoring_out,
+    runtime = ObservationRuntime.from_env(
+        observation_out=args.observation_out,
+        monitoring_out=args.monitoring_out,
+        topology_out=args.topology_out,
+        run_id=args.observation_run_id,
     )
-    context = ObservationContext.from_env(observer=observer)
-    if args.observation_run_id:
-        context = ObservationContext(
-            run_id=args.observation_run_id,
-            round_id=context.round_id,
-            stage_id=context.stage_id,
-            parent_event_id=context.parent_event_id,
-            observer=context.observer,
-            strict=context.strict,
-        )
 
     try:
         result = run_coverage_feedback_pipeline(
@@ -45,12 +37,12 @@ def main() -> int:
                 llm=args.llm,
                 llm_response_out=args.llm_response_out,
                 model=args.model,
-                topology_out=args.topology_out,
+                topology_out=runtime.topology_out,
             ),
-            context,
+            runtime.context,
         )
     finally:
-        observer.close()
+        runtime.close()
 
     print(
         f"coverage feedback: target={args.target} "

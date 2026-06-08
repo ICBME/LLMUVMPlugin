@@ -31,6 +31,7 @@ from fuzz_pipeline.orchestrator import (  # noqa: E402
     StepSpec,
 )
 from fuzz_pipeline.replay_orchestrator import ReplayPipelineOrchestrator  # noqa: E402
+from fuzz_pipeline.run_orchestrator import FuzzRunConfig, FuzzRunOrchestrator  # noqa: E402
 from fuzz_pipeline.topology import ComponentNode, ConnectorEdge, PipelineTopology  # noqa: E402
 from fuzz_uvm.context import ReplayContext  # noqa: E402
 from fuzz_uvm.transactions import ReplayRecord  # noqa: E402
@@ -277,6 +278,125 @@ class TestConnectorObserve(unittest.TestCase):
         self.assertIn("driver_to_scoreboard", finished_connectors)
         self.assertIn("functional_coverage_to_summary", finished_connectors)
         self.assertTrue(coverage_exists)
+
+    def test_fuzz_run_orchestrator_generates_and_validates_corpus(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "demo.toml"
+            manifest.write_text(
+                "\n".join(
+                    [
+                        'name = "demo"',
+                        'driver = "demo_driver:Driver"',
+                        "",
+                        "[[field]]",
+                        'name = "mode"',
+                        'kind = "enum"',
+                        'choices = ["read", "write"]',
+                    ]
+                )
+                + "\n"
+            )
+            corpus = root / "corpus.jsonl"
+            events_out = root / "events.jsonl"
+            topology_out = root / "topology.json"
+            observer = JsonlObserver(events_out)
+            config = FuzzRunConfig(
+                target="demo",
+                target_config=manifest,
+                corpus=corpus,
+                libafl_manifest=root / "Cargo.toml",
+                topology_out=topology_out,
+                generator_command=(
+                    sys.executable,
+                    "-c",
+                    f"from pathlib import Path; Path({str(corpus)!r}).write_text('{{\"target\":\"demo\",\"mode\":\"read\"}}\\n')",
+                ),
+            )
+
+            cases = FuzzRunOrchestrator(
+                config,
+                ObservationContext(run_id="fuzz-run-demo", observer=observer),
+            ).generate_and_validate()
+            observer.close()
+            events = [json.loads(line) for line in events_out.read_text().splitlines()]
+            topology = json.loads(topology_out.read_text())
+
+        finished_connectors = {
+            event["connector"]
+            for event in events
+            if event["event_type"] == "connector.finished"
+        }
+        self.assertEqual(len(cases), 1)
+        self.assertEqual(cases[0].data["mode"], "read")
+        self.assertIn("corpus_generator_to_corpus", finished_connectors)
+        self.assertIn("corpus_to_validation", finished_connectors)
+        self.assertTrue(all(event.get("run_id") == "fuzz-run-demo" for event in events))
+        self.assertEqual(topology["name"], "libafl_bfm_fuzz")
+
+    def test_fuzz_run_orchestrator_resolves_relative_artifacts_from_cwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            (work_dir / "demo.toml").write_text(
+                "\n".join(
+                    [
+                        'name = "demo"',
+                        'driver = "demo_driver:Driver"',
+                        "",
+                        "[[field]]",
+                        'name = "mode"',
+                        'kind = "enum"',
+                        'choices = ["read"]',
+                    ]
+                )
+                + "\n"
+            )
+            config = FuzzRunConfig(
+                target="demo",
+                target_config=Path("demo.toml"),
+                corpus=Path("corpus.jsonl"),
+                libafl_manifest=Path("Cargo.toml"),
+                cwd=work_dir,
+                generator_command=(
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; "
+                    "Path('corpus.jsonl').write_text("
+                    "'{\"target\":\"demo\",\"mode\":\"read\"}\\n'"
+                    ")",
+                ),
+            )
+
+            cases = FuzzRunOrchestrator(config, ObservationContext()).generate_and_validate()
+            corpus_exists = (work_dir / "corpus.jsonl").exists()
+
+        self.assertEqual(len(cases), 1)
+        self.assertEqual(cases[0].data["mode"], "read")
+        self.assertTrue(corpus_exists)
+
+    def test_fuzz_run_orchestrator_splits_cargo_wrapper_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = FuzzRunConfig(
+                target="demo",
+                target_config=Path("demo.toml"),
+                corpus=Path("corpus.jsonl"),
+                libafl_manifest=Path("Cargo.toml"),
+                cwd=root,
+                cargo="cargo +nightly",
+            )
+
+            command = FuzzRunOrchestrator(
+                config,
+                ObservationContext(),
+            )._default_generator_command()
+
+        self.assertEqual(command[:4], ("cargo", "+nightly", "run", "--quiet"))
+        self.assertIn(str(root / "Cargo.toml"), command)
+        self.assertIn(str(root / "demo.toml"), command)
+        self.assertIn(str(root / "corpus.jsonl"), command)
 
     def test_connector_preserves_return_value_and_writes_events(self):
         with tempfile.TemporaryDirectory() as tmp:

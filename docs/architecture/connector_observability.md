@@ -60,14 +60,34 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 - 维护 replay 期间共享的 `PipelineContext`，统一写入 `target_manifest`、`corpus` 和
   `functional_coverage` artifact roles。
 
+`py/fuzz_pipeline/run_orchestrator.py`
+
+- 定义 `FuzzRunOrchestrator`，用于顶层 fuzz harness 阶段编排。
+- 当前负责 `generate-corpus` 的 Rust corpus generator step 和 Python corpus validation
+  step，后续可继续接管 coverage report、feedback 和 feedback replay。
+
+`py/fuzz_pipeline/observation.py`
+
+- 定义 `ObservationRuntime`，统一 CLI 入口的 observer/context/topology_out 创建与关闭。
+
 `py/fuzz_pipeline/harness.py`
 
 - 为 Makefile 命令包装和 observation context 提供通用 helper。
 - 负责从环境变量创建 observation context、导出拓扑、包装外部命令。
 
+`scripts/run_fuzz_pipeline.py`
+
+- 顶层 pipeline CLI。`generate-corpus` 子命令通过 `FuzzRunOrchestrator` 串联
+  corpus generation 和 corpus validation。
+- `generate-corpus --cwd DIR` 会让 Rust generator 在 `DIR` 内执行；相对的 corpus、
+  target manifest、directives 和 LibAFL manifest artifact 路径也按 `DIR` 解析，
+  保证 generation 与 validation 使用同一组文件。
+- `--cargo` 可接收 wrapper 字符串，例如 `cargo +nightly` 或 `sccache cargo`，
+  orchestrator 会拆成 subprocess argv。
+
 `scripts/run_connector.py`
 
-- 命令包装入口，用于观测 Rust LibAFL corpus generator 等外部进程。
+- 通用命令包装入口，保留给尚未拥有专用 orchestrator 的外部进程。
 
 `py/fuzz_uvm/observable.py`
 
@@ -88,14 +108,15 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   role 到路径的映射；`PipelineContext.metadata` 保存 run/target/case 等上下文。
 - 每个 `StepSpec.connector` 必须存在于 `PipelineTopology`；step 声明的
   `input_roles`/`output_roles` 必须覆盖 `ConnectorEdge` 的 contract。
-- `scripts/run_connector.py` 还会校验 CLI 传入的 `--from-layer` / `--to-layer` 与
-  topology 中的 connector endpoint 一致。
+- 通用 `scripts/run_connector.py` 会校验 CLI 传入的 `--from-layer` / `--to-layer`
+  与 topology 中的 connector endpoint 一致。
 - observer 仍默认 fail-open；只有 `STRICT_OBSERVATION=1` 或 step policy 关闭
   `fail_open_observation` 时，观测失败才会影响主链路。
 
 当前迁移状态：
 
-- corpus generation、corpus validation 和 coverage feedback 已由 `PipelineOrchestrator`
+- corpus generation、corpus validation 已由 `FuzzRunOrchestrator` 编排。
+- coverage feedback 和离线三层 feedback evaluation 已由 `PipelineOrchestrator`
   编排。
 - pyUVM replay 仍在 cocotb/pyUVM 生命周期内执行，但 replay context、sequence、
   driver/ref-model、scoreboard 和 coverage 的 connector 创建已统一迁移到
@@ -220,6 +241,15 @@ uv run make -C libafl_bfm_fuzz \
   CONNECTOR_MONITOR_OUT=libafl_bfm_fuzz/coverage/observe_smoke/monitor.json \
   CONNECTOR_TOPOLOGY_OUT=libafl_bfm_fuzz/coverage/observe_smoke/topology.json \
   CONNECTOR_OBSERVE_RUN_ID=observe_smoke \
+  generate-corpus
+```
+
+需要指定 cargo wrapper 时，把 `CARGO` 作为一个 quoted Makefile 变量传入：
+
+```sh
+uv run make -C libafl_bfm_fuzz \
+  TARGET=secworks_sha256 \
+  CARGO='cargo +nightly' \
   generate-corpus
 ```
 

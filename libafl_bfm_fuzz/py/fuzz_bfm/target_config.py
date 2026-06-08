@@ -66,8 +66,13 @@ def default_targets_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "targets"
 
 
-def load_target_config(target: str, targets_dir: Path | None = None) -> TargetConfig:
-    path = _resolve_target_path(target, targets_dir)
+def load_target_config(
+    target: str,
+    targets_dir: Path | None = None,
+    *,
+    target_config: Path | None = None,
+) -> TargetConfig:
+    path = _resolve_target_path(target, targets_dir, target_config=target_config)
     data = _load_toml(path)
     name = str(data.get("name", target))
     driver = data.get("driver")
@@ -98,7 +103,17 @@ def load_target_config(target: str, targets_dir: Path | None = None) -> TargetCo
     )
 
 
-def _resolve_target_path(target: str, targets_dir: Path | None) -> Path:
+def _resolve_target_path(
+    target: str,
+    targets_dir: Path | None,
+    *,
+    target_config: Path | None = None,
+) -> Path:
+    if target_config is not None:
+        path = Path(target_config)
+        if not path.exists():
+            raise FileNotFoundError(f"target_config does not exist: {path}")
+        return path
     explicit = os.getenv("FUZZ_TARGET_CONFIG")
     if explicit:
         path = Path(explicit)

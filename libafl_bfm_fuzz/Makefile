@@ -3,7 +3,7 @@ TARGET ?= dut
 TARGET_CONFIG ?=
 LIBAFL_MANIFEST ?= $(CWD)/Cargo.toml
 COVERAGE_FEEDBACK ?= $(CWD)/coverage_feedback.py
-CONNECTOR_RUN ?= $(CWD)/scripts/run_connector.py
+FUZZ_PIPELINE_RUN ?= $(CWD)/scripts/run_fuzz_pipeline.py
 RTL_COVERAGE ?= 0
 COVERAGE_DIR ?= $(CWD)/coverage
 COVERAGE_DAT ?= $(COVERAGE_DIR)/$(TARGET)_coverage.dat
@@ -101,30 +101,21 @@ require-rtl:
 
 generate-corpus: require-target-config
 	mkdir -p $(dir $(FUZZ_CORPUS))
-	$(PYTHON) $(CONNECTOR_RUN) \
-		--connector corpus_generator_to_corpus \
-		--from-layer corpus_generator \
-		--to-layer corpus \
-		--metadata target=$(TARGET) \
-		--metadata iters=$(LIBAFL_ITERS) \
-		--metadata max_seeds=$(LIBAFL_MAX_SEEDS) \
-		$(if $(TARGET_CONFIG),--input target_manifest=$(TARGET_CONFIG),) \
-		$(if $(FUZZ_DIRECTIVES),--input directives=$(FUZZ_DIRECTIVES),) \
-		--output corpus=$(FUZZ_CORPUS) \
-		$(if $(CONNECTOR_TOPOLOGY_OUT),--topology-out $(CONNECTOR_TOPOLOGY_OUT),) \
-		-- $(CARGO) run --quiet --manifest-path $(LIBAFL_MANIFEST) -- \
-			--target $(TARGET) \
-			$(if $(TARGET_CONFIG),--target-config $(TARGET_CONFIG),) \
-			--corpus-out $(FUZZ_CORPUS) \
-			--iters $(LIBAFL_ITERS) \
-			--max-seeds $(LIBAFL_MAX_SEEDS) \
-			--seed $(LIBAFL_SEED) \
-			$(if $(FUZZ_DIRECTIVES),--directives $(FUZZ_DIRECTIVES),)
-	$(PYTHON) validate_corpus.py --target $(TARGET) $(FUZZ_CORPUS)
+	$(PYTHON) $(FUZZ_PIPELINE_RUN) generate-corpus \
+		--target $(TARGET) \
+		$(if $(TARGET_CONFIG),--target-config $(TARGET_CONFIG),) \
+		--corpus-out $(FUZZ_CORPUS) \
+		--libafl-manifest $(LIBAFL_MANIFEST) \
+		--iters $(LIBAFL_ITERS) \
+		--max-seeds $(LIBAFL_MAX_SEEDS) \
+		--seed $(LIBAFL_SEED) \
+		--cargo "$(CARGO)" \
+		$(if $(FUZZ_DIRECTIVES),--directives $(FUZZ_DIRECTIVES),) \
+		$(if $(CONNECTOR_TOPOLOGY_OUT),--topology-out $(CONNECTOR_TOPOLOGY_OUT),)
 
 check:
 	$(CARGO) test --manifest-path $(LIBAFL_MANIFEST)
-	$(PYTHON) -m py_compile coverage_feedback.py validate_corpus.py py/fuzz_bfm/*.py py/fuzz_feedback/*.py py/fuzz_uvm/*.py py/fuzz_examples/*.py scripts/*.py
+	$(PYTHON) -m py_compile coverage_feedback.py validate_corpus.py py/fuzz_bfm/*.py py/fuzz_feedback/*.py py/fuzz_pipeline/*.py py/fuzz_uvm/*.py py/fuzz_examples/*.py scripts/*.py
 
 check-corpus: generate-corpus
 

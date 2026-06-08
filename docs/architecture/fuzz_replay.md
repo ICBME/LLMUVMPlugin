@@ -59,6 +59,9 @@
   纯逻辑 handler、外部命令和 artifact role contract 编排成可观测步骤。
 - `replay_orchestrator.py`：`ReplayPipelineOrchestrator`，负责 pyUVM replay 各组件边界的
   StepSpec 编排。
+- `run_orchestrator.py`：`FuzzRunOrchestrator`，负责顶层 corpus generation /
+  validation 等 harness 阶段编排。
+- `observation.py`：`ObservationRuntime`，统一 CLI observer/context 创建。
 - `harness.py`：Makefile 命令包装和 pyUVM replay 共用的 observation helper。
 - `coverage_feedback.py`：带 connector 的 coverage feedback pipeline。
 - `observable.py` 位于 `py/fuzz_uvm/`，集中封装 pyUVM replay driver/ref-model、
@@ -67,16 +70,26 @@
 
 ## Corpus Generation Flow
 
-1. `make generate-corpus` 通过 `scripts/run_connector.py` 调用 Rust binary；
-   `run_connector.py` 会构造 external command `StepSpec`，由
-   `PipelineOrchestrator` 观测 `corpus_generator_to_corpus`。
+1. `make generate-corpus` 通过 `scripts/run_fuzz_pipeline.py generate-corpus` 调用
+   `FuzzRunOrchestrator`；该 orchestrator 会构造 external command `StepSpec` 运行
+   Rust binary，并观测 `corpus_generator_to_corpus`。
 2. Rust 读取 target manifest。
 3. LibAFL 产生 byte input。
 4. `src/app.rs` 根据 field schema 解码 semantic case。
 5. 合并 schema edge、directed 和 LibAFL corpus cases。
 6. 写出 JSONL。
-7. Python validator 按同一 manifest 校验 JSONL；CLI 内部调用
-   `run_corpus_validation_pipeline()`，由 orchestrator 观测 `corpus_to_validation`。
+7. `FuzzRunOrchestrator` 随后按同一 manifest 校验 JSONL，并观测
+   `corpus_to_validation`。
+
+`scripts/run_fuzz_pipeline.py generate-corpus` 也可独立调用。若传入 `--cwd`，
+Rust generator 在该目录下执行；`FuzzRunOrchestrator` 会把相对的 corpus、
+target manifest、directives 和 LibAFL manifest 路径解析到同一目录下，避免
+generation 与 validation 看到不同 artifact。`--topology-out` 仍按 Python CLI
+调用者的路径解析。
+
+Makefile 会把 `CARGO` 作为一个完整 wrapper 字符串传给 pipeline runner；
+`FuzzRunOrchestrator` 再按 shell token 规则拆成 argv，因此 `CARGO='cargo +nightly'`
+或 `CARGO='sccache cargo'` 可用于选择 toolchain/wrapper。
 
 ## Replay Flow
 
