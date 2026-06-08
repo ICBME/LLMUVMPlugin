@@ -46,26 +46,50 @@
 - `advisors.py`：生成 generic directives 或调用 LLM。
 - `cli.py`：命令行入口。
 
+`py/connector_observe/`
+
+- `connector.py`：同步/异步 connector wrapper 和 observation context。
+- `schema.py`：connector event 与 artifact reference schema。
+- `observers.py`：JSONL observer、monitoring observer、async observer。
+
+`py/fuzz_pipeline/`
+
+- `topology.py`：harness、coverage feedback 和 full fuzz topology。
+- `orchestrator.py`：`StepSpec` / `PipelineContext` / `PipelineOrchestrator`，负责把
+  纯逻辑 handler、外部命令和 artifact role contract 编排成可观测步骤。
+- `harness.py`：Makefile 命令包装和 pyUVM replay 共用的 observation helper。
+- `coverage_feedback.py`：带 connector 的 coverage feedback pipeline。
+- `observable.py` 位于 `py/fuzz_uvm/`，集中封装 pyUVM replay driver/ref-model、
+  scoreboard 和 functional coverage 的 connector adapter。
+
 ## Corpus Generation Flow
 
-1. `make generate-corpus` 调用 Rust binary。
+1. `make generate-corpus` 通过 `scripts/run_connector.py` 调用 Rust binary；
+   `run_connector.py` 会构造 external command `StepSpec`，由
+   `PipelineOrchestrator` 观测 `corpus_generator_to_corpus`。
 2. Rust 读取 target manifest。
 3. LibAFL 产生 byte input。
 4. `src/app.rs` 根据 field schema 解码 semantic case。
 5. 合并 schema edge、directed 和 LibAFL corpus cases。
 6. 写出 JSONL。
-7. Python validator 按同一 manifest 校验 JSONL。
+7. Python validator 按同一 manifest 校验 JSONL；CLI 内部调用
+   `run_corpus_validation_pipeline()`，由 orchestrator 观测 `corpus_to_validation`。
 
 ## Replay Flow
 
 1. cocotb 加载 `fuzz_uvm.testbench`。
-2. `ReplayContext.from_env()` 加载 manifest 和 corpus。
+2. `ReplayContext.from_env()` 加载 manifest 和 corpus，并观测
+   `corpus_to_replay_context`。
 3. `LibAflUvmReplayTest` 启动 manifest 指定的 clock。
-4. `CorpusReplaySequence` 顺序发送 case。
-5. `ReplayDriver` 调用目标 driver plugin。
-6. 可选 ref model 填充 expected。
-7. Scoreboard 检查 result。
-8. Functional coverage subscriber 输出 JSON summary。默认路径为
+4. `CorpusReplaySequence` 顺序发送 case，并观测 `case_to_replay_driver`。
+5. `ReplayDriver` 通过 `ObservableReplayDriverAdapter` 调用目标 driver plugin，并观测
+   `driver_reset_to_dut` 和 `case_to_dut`。
+6. 可选 ref model 填充 expected，并观测 `manifest_to_ref_model` 和
+   `case_to_ref_model`。
+7. Scoreboard 通过 `ObservableScoreboardAdapter` 检查 result，并观测 `driver_to_scoreboard` 和
+   `scoreboard_to_report`。
+8. Functional coverage subscriber 通过 `ObservableCoverageAdapter` 输出 JSON summary，并观测
+   `driver_to_functional_coverage` 和 `functional_coverage_to_summary`。默认路径为
    `coverage/<target>_uvm_functional_coverage.json`，可由
    `UVM_FUNCTIONAL_COVERAGE_OUT` 覆盖。
 
@@ -90,6 +114,23 @@
 
 结构化 coverage export 和 `rtl_gap` 的 schema 见
 [Coverage Feedback 设计](coverage_feedback_design.md)。
+
+## Connector Observation Flow
+
+设置以下环境变量可为 corpus generation、validation、replay 和 feedback 导出观测：
+
+```sh
+CONNECTOR_OBSERVE_OUT=coverage/connector_events.jsonl
+CONNECTOR_MONITOR_OUT=coverage/component_monitor.json
+CONNECTOR_TOPOLOGY_OUT=coverage/component_topology.json
+CONNECTOR_OBSERVE_RUN_ID=my_run
+```
+
+事件文件记录每条 connector 的 started/finished/failed，monitor 文件聚合每个
+connector 的 started、finished、failed、duration 和最近一次 metrics。完整拓扑名为
+`libafl_bfm_fuzz`，包含 harness 和 coverage feedback 两部分。
+
+详见 [Connector Observability 架构](connector_observability.md)。
 
 ## 当前 replay 粒度
 

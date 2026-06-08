@@ -102,7 +102,37 @@ UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz \
   sim
 ```
 
-## 8. Coverage Feedback
+## 8. 可选：打开 Connector 观测
+
+任意 Makefile 目标都可以设置 connector 输出，用于观察 corpus generation、
+validation、replay、scoreboard、functional coverage 和 feedback 各层：
+
+```sh
+CONNECTOR_OBSERVE_OUT=/path/to/events.jsonl
+CONNECTOR_MONITOR_OUT=/path/to/monitor.json
+CONNECTOR_TOPOLOGY_OUT=/path/to/topology.json
+CONNECTOR_OBSERVE_RUN_ID=my_dut_smoke
+```
+
+例如：
+
+```sh
+uv run make -C libafl_bfm_fuzz \
+  TARGET=my_dut \
+  TARGET_CONFIG=/path/to/my_dut.toml \
+  VERILOG_SOURCES="/path/to/rtl/a.v /path/to/rtl/b.v" \
+  TOPLEVEL=my_dut_top \
+  CONNECTOR_OBSERVE_OUT=/tmp/my_dut_events.jsonl \
+  CONNECTOR_MONITOR_OUT=/tmp/my_dut_monitor.json \
+  CONNECTOR_TOPOLOGY_OUT=/tmp/my_dut_topology.json \
+  CONNECTOR_OBSERVE_RUN_ID=my_dut_smoke \
+  sim
+```
+
+详细事件 schema 和 connector 列表见
+[Connector Observability 架构](../architecture/connector_observability.md)。
+
+## 9. Coverage Feedback
 
 ```sh
 UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz \
@@ -129,7 +159,7 @@ UVM_FUNCTIONAL_COVERAGE_OUT=/path/to/my_dut_functional.json
 如果覆盖点需要 DUT response、错误类型或协议状态机上下文，应提供目标专用
 `coverage_model` plugin，并可实现 `sample_record(record)`。
 
-## 9. 保持目标代码外置
+## 10. 保持目标代码外置
 
 新目标的专用文件应保存在目标工程或插件目录中，不放进可复用框架核心。仓库内
 `fuzz_examples` 和 `targets/secworks_*` 只作为 smoke/example target：

@@ -17,6 +17,9 @@ def main() -> int:
     if args.observation_run_id:
         context = ObservationContext(
             run_id=args.observation_run_id,
+            round_id=context.round_id,
+            stage_id=context.stage_id,
+            parent_event_id=context.parent_event_id,
             observer=context.observer,
             strict=context.strict,
         )

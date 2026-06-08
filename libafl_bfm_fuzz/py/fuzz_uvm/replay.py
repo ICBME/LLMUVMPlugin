@@ -11,6 +11,7 @@ from fuzz_uvm.context import ReplayContext
 from fuzz_uvm.env import FuzzEnv
 from fuzz_uvm.sequences import CorpusReplaySequence
 from fuzz_uvm.transactions import FuzzSeqItem, ReplayRecord
+from fuzz_pipeline.harness import connector_from_env
 
 
 class LibAflUvmReplayTest(uvm_test):
@@ -40,7 +41,17 @@ class LibAflUvmReplayTest(uvm_test):
                 len(self.context.cases),
             )
             sequence = CorpusReplaySequence("corpus_replay", self.context.cases)
-            await sequence.start(self.env.seqr)
+            await connector_from_env(
+                "replay_context_to_sequence",
+                "replay_context",
+                "sequencer",
+            ).run_async(
+                sequence.start,
+                self.env.seqr,
+                inputs={"corpus": self.context.corpus},
+                metrics=lambda _value: {"case_count": len(self.context.cases)},
+                metadata={"target": self.context.target},
+            )
         finally:
             self.drop_objection()
 

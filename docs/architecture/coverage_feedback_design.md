@@ -91,6 +91,10 @@ Layer 1 负责理解当前覆盖率缺口，Layer 2 负责判断 gap 是否被�
 
 - 消费结构化 summary，尤其是 `rtl_gap_summary.top_gaps`。
 - 不应解析 `.info` / `.dat`，也不应依赖 Verilator metadata 的细节。
+- `propose_directives()` 保持兼容入口；connector pipeline 内部会先调用
+  `plan_mutations_from_rtl_gaps()` 生成 Layer 1 plan，再通过
+  `propose_directives_from_plan()` 合成 directives，以便单独观测 planning 和 directive
+  generation。
 
 `py/fuzz_feedback/mutation_planner.py`
 
@@ -476,20 +480,34 @@ python libafl_bfm_fuzz/coverage_feedback.py \
   --previous-gap-feedback previous_layer2_gap_feedback.json \
   --previous-mutation-feedback previous_layer3_mutation_feedback.json \
   --gap-feedback-out current_layer2_gap_feedback.json \
-  --mutation-feedback-out current_layer3_mutation_feedback.json
+  --mutation-feedback-out current_layer3_mutation_feedback.json \
+  --observation-out connector_events.jsonl \
+  --monitoring-out component_monitor.json \
+  --topology-out component_topology.json \
+  --observation-run-id feedback_round_01
 ```
 
 当提供 `--previous-summary` 时，CLI 会在同一次运行中：
 
 ```text
 1. build_summary(current artifacts)
-2. build_mutation_feedback(previous_summary, current_summary, previous_directives)
-3. build_gap_feedback(previous_summary, current_summary, previous_directives, mutation_feedback)
-4. propose_directives(current_summary, gap_feedback, mutation_feedback)
-5. write current summary, Layer 2 state, Layer 3 state, next directives, LLM prompt
+2. summary_to_mutation_feedback connector 调用
+   build_mutation_feedback(previous_summary, current_summary, previous_directives)。
+3. layer3_feedback_to_layer2_feedback connector 调用
+   build_gap_feedback(previous_summary, current_summary, previous_directives, mutation_feedback)。
+4. layer2_layer3_feedback_to_layer1_plan connector 调用
+   plan_mutations_from_rtl_gaps(current_summary, gap_feedback, mutation_feedback)。
+5. layer1_plan_to_directives connector 调用
+   propose_directives_from_plan(current_summary, layer1_plan, gap_feedback, mutation_feedback)。
+6. write current summary, Layer 2 state, Layer 3 state, next directives, LLM prompt
 ```
 
 没有上一轮 state 时，CLI 保持旧行为：只基于当前 summary 生成 heuristic/LLM prompt。
+此时仍会观测 `coverage_to_summary`、`layer2_layer3_feedback_to_layer1_plan`、
+`layer1_plan_to_directives` 和 `summary_to_llm_prompt`。
+
+connector topology 和事件 schema 见
+[Connector Observability 架构](connector_observability.md)。
 
 ### Evaluation Script
 

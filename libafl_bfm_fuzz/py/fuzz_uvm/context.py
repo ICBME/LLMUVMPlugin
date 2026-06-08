@@ -6,6 +6,11 @@ from pathlib import Path
 
 from fuzz_bfm.corpus import FuzzCase, load_cases
 from fuzz_bfm.target_config import TargetConfig, load_target_config
+from fuzz_pipeline.harness import (
+    connector_from_env,
+    replay_context_metrics,
+    write_observation_topology,
+)
 
 
 @dataclass(frozen=True)
@@ -17,6 +22,15 @@ class ReplayContext:
 
     @classmethod
     def from_env(cls) -> ReplayContext:
+        write_observation_topology()
+        return connector_from_env("corpus_to_replay_context", "corpus", "replay_context").run(
+            cls._from_env,
+            outputs=lambda context: {"corpus": context.corpus},
+            metrics=replay_context_metrics,
+        )
+
+    @classmethod
+    def _from_env(cls) -> ReplayContext:
         target = os.getenv("FUZZ_TARGET")
         if target is None and os.getenv("FUZZ_TARGET_CONFIG") is None:
             raise RuntimeError("FUZZ_TARGET or FUZZ_TARGET_CONFIG must be set")

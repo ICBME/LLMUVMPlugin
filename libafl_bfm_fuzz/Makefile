@@ -3,6 +3,7 @@ TARGET ?= dut
 TARGET_CONFIG ?=
 LIBAFL_MANIFEST ?= $(CWD)/Cargo.toml
 COVERAGE_FEEDBACK ?= $(CWD)/coverage_feedback.py
+CONNECTOR_RUN ?= $(CWD)/scripts/run_connector.py
 RTL_COVERAGE ?= 0
 COVERAGE_DIR ?= $(CWD)/coverage
 COVERAGE_DAT ?= $(COVERAGE_DIR)/$(TARGET)_coverage.dat
@@ -39,6 +40,10 @@ export PYTHONPATH := $(CWD)/py:$(EXTRA_PYTHONPATH):$(PYTHONPATH)
 export LIBAFL_CORPUS := $(FUZZ_CORPUS)
 export FUZZ_TARGET := $(TARGET)
 export UVM_FUNCTIONAL_COVERAGE_OUT
+export CONNECTOR_OBSERVE_OUT
+export CONNECTOR_OBSERVE_RUN_ID
+export CONNECTOR_MONITOR_OUT
+export CONNECTOR_TOPOLOGY_OUT
 ifneq ($(strip $(TARGET_CONFIG)),)
 export FUZZ_TARGET_CONFIG := $(TARGET_CONFIG)
 endif
@@ -96,14 +101,25 @@ require-rtl:
 
 generate-corpus: require-target-config
 	mkdir -p $(dir $(FUZZ_CORPUS))
-	$(CARGO) run --quiet --manifest-path $(LIBAFL_MANIFEST) -- \
-		--target $(TARGET) \
-		$(if $(TARGET_CONFIG),--target-config $(TARGET_CONFIG),) \
-		--corpus-out $(FUZZ_CORPUS) \
-		--iters $(LIBAFL_ITERS) \
-		--max-seeds $(LIBAFL_MAX_SEEDS) \
-		--seed $(LIBAFL_SEED) \
-		$(if $(FUZZ_DIRECTIVES),--directives $(FUZZ_DIRECTIVES),)
+	$(PYTHON) $(CONNECTOR_RUN) \
+		--connector corpus_generator_to_corpus \
+		--from-layer corpus_generator \
+		--to-layer corpus \
+		--metadata target=$(TARGET) \
+		--metadata iters=$(LIBAFL_ITERS) \
+		--metadata max_seeds=$(LIBAFL_MAX_SEEDS) \
+		$(if $(TARGET_CONFIG),--input target_manifest=$(TARGET_CONFIG),) \
+		$(if $(FUZZ_DIRECTIVES),--input directives=$(FUZZ_DIRECTIVES),) \
+		--output corpus=$(FUZZ_CORPUS) \
+		$(if $(CONNECTOR_TOPOLOGY_OUT),--topology-out $(CONNECTOR_TOPOLOGY_OUT),) \
+		-- $(CARGO) run --quiet --manifest-path $(LIBAFL_MANIFEST) -- \
+			--target $(TARGET) \
+			$(if $(TARGET_CONFIG),--target-config $(TARGET_CONFIG),) \
+			--corpus-out $(FUZZ_CORPUS) \
+			--iters $(LIBAFL_ITERS) \
+			--max-seeds $(LIBAFL_MAX_SEEDS) \
+			--seed $(LIBAFL_SEED) \
+			$(if $(FUZZ_DIRECTIVES),--directives $(FUZZ_DIRECTIVES),)
 	$(PYTHON) validate_corpus.py --target $(TARGET) $(FUZZ_CORPUS)
 
 check:

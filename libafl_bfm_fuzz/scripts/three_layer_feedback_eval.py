@@ -25,7 +25,7 @@ from fuzz_pipeline.coverage_feedback import (  # noqa: E402
     mutation_feedback_metrics,
     write_json as write_pipeline_json,
 )
-from fuzz_pipeline.topology import COVERAGE_FEEDBACK_TOPOLOGY  # noqa: E402
+from fuzz_pipeline.topology import FULL_FUZZ_TOPOLOGY  # noqa: E402
 
 
 DEFAULT_ROUNDS = ("baseline", "heuristic", "llm")
@@ -57,7 +57,7 @@ def main() -> int:
 
     try:
         if args.topology_out:
-            write_pipeline_json(args.topology_out, COVERAGE_FEEDBACK_TOPOLOGY.to_json())
+            write_pipeline_json(args.topology_out, FULL_FUZZ_TOPOLOGY.to_json())
         evaluation = build_evaluation(target, runs, output_dir, context)
     finally:
         observer.close()

@@ -5,6 +5,7 @@
 - [文档总览](README.md)
 - [总体架构](architecture/overview.md)
 - [Fuzz/Replay 架构](architecture/fuzz_replay.md)
+- [Connector Observability 架构](architecture/connector_observability.md)
 - [Target Manifest 参考](reference/target_manifest.md)
 - [插件契约](reference/plugin_contracts.md)
 - [Corpus 与 Mutation Directives](reference/corpus_directives.md)

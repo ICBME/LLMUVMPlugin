@@ -1,4 +1,5 @@
 import json
+import asyncio
 import sys
 import tempfile
 import unittest
@@ -126,6 +127,29 @@ class TestConnector(unittest.TestCase):
             events = [json.loads(line) for line in path.read_text().splitlines()]
 
         self.assertTrue(any(event["event_type"] == "connector.finished" for event in events))
+
+    def test_run_async_preserves_result_and_records_events(self):
+        async def work(value):
+            return value + 1
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            observer = JsonlObserver(path)
+            connector = Connector("async_demo", "a", "b", observer=observer)
+
+            result = asyncio.run(
+                connector.run_async(
+                    work,
+                    41,
+                    metrics=lambda value: {"answer": value},
+                )
+            )
+            observer.close()
+            events = [json.loads(line) for line in path.read_text().splitlines()]
+
+        self.assertEqual(result, 42)
+        self.assertEqual(events[-1]["connector"], "async_demo")
+        self.assertEqual(events[-1]["metrics"]["answer"], 42)
 
 
 if __name__ == "__main__":

@@ -69,6 +69,17 @@ JSONL corpus ----------------------> pyUVM sequence
                                                    mutation directives
 ```
 
+框架同时维护一张 connector topology，用于观测上图中关键组件连接：
+
+```text
+corpus_generator -> corpus -> replay_context -> sequencer -> replay_driver
+replay_driver -> dut / ref_model / scoreboard / functional_coverage
+coverage_artifacts -> coverage_summary -> Layer 2/3 feedback -> Layer 1 plan
+```
+
+connector 事件、monitor 汇总和 topology JSON 的格式见
+[Connector Observability 架构](connector_observability.md)。
+
 ## 模块边界
 
 框架核心负责：
@@ -103,6 +114,8 @@ JSONL corpus ----------------------> pyUVM sequence
 - coverage feedback 只能产生符合 schema 的 directives。
 - advisor 只消费 coverage summary、`rtl_gap` 和 functional gap，不直接解析工具原始
   coverage artifact。
+- connector observer 只包裹组件边界；默认隔离 observer 失败，不改变 corpus、replay、
+  scoreboard 或 coverage feedback 的主结果。
 
 ## 非目标
 

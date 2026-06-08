@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import replace
-import json
 import os
 from pathlib import Path
 
 from pyuvm import ConfigDB, uvm_analysis_port, uvm_driver, uvm_subscriber
 
-from fuzz_bfm.plugin_loader import build_driver
 from fuzz_bfm.target_config import TargetConfig
-from fuzz_uvm.functional_coverage import build_coverage_model
-from fuzz_uvm.ref_models import build_ref_model
-from fuzz_uvm.scoreboards import build_scoreboard
+from fuzz_uvm.observable import (
+    ObservableCoverageAdapter,
+    ObservableReplayDriverAdapter,
+    ObservableScoreboardAdapter,
+)
 from fuzz_uvm.transactions import FuzzSeqItem, ReplayRecord
 
 
@@ -19,18 +18,14 @@ class ReplayDriver(uvm_driver):
     def build_phase(self) -> None:
         self.ap = uvm_analysis_port("ap", self)
         config: TargetConfig = ConfigDB().get(self, "", "FUZZ_TARGET_CONFIG")
-        self.ref_model = build_ref_model(config)
-        self.target_driver = build_driver(config)
+        self.driver_adapter = ObservableReplayDriverAdapter(config)
 
     async def run_phase(self) -> None:
-        await self.target_driver.reset()
+        await self.driver_adapter.reset()
         while True:
             item: FuzzSeqItem = await self.seq_item_port.get_next_item()
             try:
-                result = await self.target_driver.execute(item.case)
-                if self.ref_model is not None:
-                    expected = self.ref_model.predict(item.case)
-                    result = replace(result, expected=expected.expected)
+                result = await self.driver_adapter.execute(item.case, index=item.index)
                 item.result = result
                 self.ap.write(ReplayRecord(item.index, item.case, result=result))
                 self.logger.info(
@@ -53,16 +48,16 @@ class ReplayDriver(uvm_driver):
 class ReplayScoreboard(uvm_subscriber):
     def build_phase(self) -> None:
         config: TargetConfig = ConfigDB().get(self, "", "FUZZ_TARGET_CONFIG")
-        self.checker = build_scoreboard(config)
+        self.scoreboard_adapter = ObservableScoreboardAdapter(config)
 
     def write(self, record: ReplayRecord) -> None:
-        self.checker.write(record)
+        self.scoreboard_adapter.write(record)
 
     def check_phase(self) -> None:
-        self.checker.check()
+        self.scoreboard_adapter.check()
 
     def report_phase(self) -> None:
-        summary = self.checker.summary()
+        summary = self.scoreboard_adapter.summary()
         self.logger.info(
             "Replay scoreboard: checked=%d failures=%d",
             summary["checked"],
@@ -73,23 +68,21 @@ class ReplayScoreboard(uvm_subscriber):
 class FunctionalCoverageSubscriber(uvm_subscriber):
     def build_phase(self) -> None:
         config: TargetConfig = ConfigDB().get(self, "", "FUZZ_TARGET_CONFIG")
-        self.model = build_coverage_model(config.name, config=config)
         default_path = Path("coverage") / f"{config.name}_uvm_functional_coverage.json"
-        self.output_path = Path(os.getenv("UVM_FUNCTIONAL_COVERAGE_OUT", str(default_path)))
+        output_path = Path(os.getenv("UVM_FUNCTIONAL_COVERAGE_OUT", str(default_path)))
+        self.coverage_adapter = ObservableCoverageAdapter(
+            config,
+            output_path,
+        )
 
     def write(self, record: ReplayRecord) -> None:
-        if callable(getattr(self.model, "sample_record", None)):
-            self.model.sample_record(record)
-        elif record.error is None:
-            self.model.sample(record.case)
+        self.coverage_adapter.sample_record(record)
 
     def report_phase(self) -> None:
-        summary = self.model.to_json()
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        self.output_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+        summary = self.coverage_adapter.export_summary()
         self.logger.info(
             "UVM functional coverage: target=%s total_cases=%d out=%s",
             summary["target"],
             summary["total_cases"],
-            self.output_path,
+            self.coverage_adapter.output_path,
         )

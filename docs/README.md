@@ -10,14 +10,15 @@
 3. [LLM Plugin Codegen 架构](architecture/llm_plugin_codegen.md)
 4. [Reference Model OracleIR 评估](architecture/ref_model_oracle_ir_eval.md)
 5. [Fuzz/Replay 架构](architecture/fuzz_replay.md)
-6. [Coverage Feedback 设计](architecture/coverage_feedback_design.md)
-7. [Coverage Feedback 评估](architecture/coverage_feedback_eval.md)
-8. [Target Manifest 参考](reference/target_manifest.md)
-9. [插件契约](reference/plugin_contracts.md)
-10. [Corpus 与 Mutation Directives](reference/corpus_directives.md)
-11. [接入新 DUT 指南](guides/add_new_dut.md)
-12. [Secworks 示例闭环](guides/secworks_examples.md)
-13. [设计约束](guides/design_constraints.md)
+6. [Connector Observability 架构](architecture/connector_observability.md)
+7. [Coverage Feedback 设计](architecture/coverage_feedback_design.md)
+8. [Coverage Feedback 评估](architecture/coverage_feedback_eval.md)
+9. [Target Manifest 参考](reference/target_manifest.md)
+10. [插件契约](reference/plugin_contracts.md)
+11. [Corpus 与 Mutation Directives](reference/corpus_directives.md)
+12. [接入新 DUT 指南](guides/add_new_dut.md)
+13. [Secworks 示例闭环](guides/secworks_examples.md)
+14. [设计约束](guides/design_constraints.md)
 
 ## 文档层次
 
@@ -42,5 +43,7 @@
 - DUT 专用协议、reference model、scoreboard 和 coverage model 均通过插件接入。
 - Manifest 是 Rust corpus generator 和 Python replay/validation 之间的共享契约。
 - IR 只描述语义名到 HDL path 的映射，不表达协议行为。
+- Connector observability 只观察组件连接、artifact、metrics 和错误状态，不改变
+  harness 主链路执行结果。
 - LLM 生成的 ref model / scoreboard 和 OracleIR 生成的 ref model 都先作为 candidate
   artifact，经验证后才能提升为 manifest 指向的 final artifact。

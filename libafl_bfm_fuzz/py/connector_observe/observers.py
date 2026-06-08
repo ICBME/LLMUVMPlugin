@@ -107,6 +107,7 @@ class MonitoringObserver:
         self._connectors: dict[str, dict] = {}
         self._edges: dict[str, dict] = {}
         self._event_count = 0
+        self._load_existing_snapshot()
 
     def on_event(self, event: ConnectorEvent) -> None:
         with self._lock:
@@ -189,6 +190,48 @@ class MonitoringObserver:
                 "failed_connector_count": sum(1 for item in connectors if item["failed"]),
                 "connectors": sorted(connectors, key=lambda item: item["connector"]),
                 "edges": sorted(edges, key=lambda item: (item["from_layer"], item["to_layer"])),
+            }
+
+    def _load_existing_snapshot(self) -> None:
+        if self.path is None or not self.path.exists():
+            return
+        try:
+            snapshot = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(snapshot, dict):
+            return
+
+        self._event_count = int(snapshot.get("event_count", 0) or 0)
+        for item in snapshot.get("connectors", []):
+            if not isinstance(item, dict) or "connector" not in item:
+                continue
+            row = {
+                "connector": str(item.get("connector", "")),
+                "from_layer": str(item.get("from_layer", "")),
+                "to_layer": str(item.get("to_layer", "")),
+                "started": int(item.get("started", 0) or 0),
+                "finished": int(item.get("finished", 0) or 0),
+                "failed": int(item.get("failed", 0) or 0),
+                "total_duration_ms": float(item.get("total_duration_ms", 0.0) or 0.0),
+                "last_status": item.get("last_status"),
+                "last_error": item.get("last_error"),
+                "metrics": item.get("metrics") if isinstance(item.get("metrics"), dict) else {},
+            }
+            self._connectors[row["connector"]] = row
+        for item in snapshot.get("edges", []):
+            if not isinstance(item, dict):
+                continue
+            from_layer = str(item.get("from_layer", ""))
+            to_layer = str(item.get("to_layer", ""))
+            if not from_layer or not to_layer:
+                continue
+            connectors = item.get("connectors", [])
+            self._edges[f"{from_layer}->{to_layer}"] = {
+                "from_layer": from_layer,
+                "to_layer": to_layer,
+                "connectors": set(str(connector) for connector in connectors),
+                "event_count": int(item.get("event_count", 0) or 0),
             }
 
 

@@ -24,6 +24,12 @@ constraints are documented in
 - `py/fuzz_feedback/` contains RTL coverage parsing, generic mutation advice,
   optional LLM calls, directive validation, and the CLI used by
   `coverage_feedback.py`.
+- `py/connector_observe/` and `py/fuzz_pipeline/` provide connector-based
+  observation for corpus generation, validation, pyUVM replay, scoreboard,
+  functional coverage, and coverage feedback. `py/fuzz_pipeline/orchestrator.py`
+  is the orchestration layer: components expose handlers/adapters, while
+  `StepSpec` wiring decides connector names, artifact roles, metrics, and
+  failure policy.
 
 Reusable framework code does not depend on DUT-specific BFMs, reference models,
 vectors, or hardcoded RTL paths. The repository does include `py/fuzz_examples`
@@ -81,6 +87,11 @@ make -C libafl_bfm_fuzz TARGET=my_dut TARGET_CONFIG=/path/to/my_dut.toml generat
 The JSONL cases are written to `libafl_bfm_fuzz/coverage/<target>_corpus.jsonl`
 unless `FUZZ_CORPUS` is set.
 
+`generate-corpus` is connector-observable. When observation is enabled, the
+Rust corpus generator emits `corpus_generator_to_corpus`, and the Python
+validator emits `corpus_to_validation`. Both are wrapped by the pipeline
+orchestrator rather than by DUT-specific code.
+
 ## Replay Against RTL
 
 Provide the target manifest, DUT source list, top-level module, and any extra
@@ -99,6 +110,47 @@ UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz \
 The replay driver plugin implements the simple `reset()` and `execute(case)`
 protocol. Optional ref-model and scoreboard plugins fill expected values and own
 pass/fail policy.
+
+pyUVM replay is connector-observable at the component boundaries:
+`corpus_to_replay_context`, `case_to_replay_driver`, `case_to_dut`,
+`case_to_ref_model`, `driver_to_scoreboard`, `driver_to_functional_coverage`,
+`scoreboard_to_report`, and `functional_coverage_to_summary`. The connector
+creation is centralized in `py/fuzz_uvm/observable.py` adapters so pyUVM
+components keep their replay behavior focused on driver, scoreboard, and
+coverage responsibilities.
+
+## Connector Observation
+
+Set these variables on any Makefile target to export connector events, a
+component monitor, and the full `libafl_bfm_fuzz` topology:
+
+```sh
+CONNECTOR_OBSERVE_OUT=coverage/connector_events.jsonl
+CONNECTOR_MONITOR_OUT=coverage/component_monitor.json
+CONNECTOR_TOPOLOGY_OUT=coverage/component_topology.json
+CONNECTOR_OBSERVE_RUN_ID=my_run
+```
+
+Example:
+
+```sh
+uv run make -C libafl_bfm_fuzz \
+  TARGET=secworks_sha256 \
+  LIBAFL_ITERS=0 \
+  LIBAFL_MAX_SEEDS=0 \
+  COVERAGE_DIR=coverage/observe_smoke \
+  CONNECTOR_OBSERVE_OUT=coverage/observe_smoke/events.jsonl \
+  CONNECTOR_MONITOR_OUT=coverage/observe_smoke/monitor.json \
+  CONNECTOR_TOPOLOGY_OUT=coverage/observe_smoke/topology.json \
+  CONNECTOR_OBSERVE_RUN_ID=observe_smoke \
+  generate-corpus
+```
+
+The observer is disabled when `CONNECTOR_OBSERVE_OUT` and
+`CONNECTOR_MONITOR_OUT` are unset. Observer failures are isolated by default and
+do not change corpus generation, replay, scoreboard, or feedback results. See
+[`../docs/architecture/connector_observability.md`](../docs/architecture/connector_observability.md)
+for the event schema and full connector list.
 
 ## Validate Framework Pieces
 
@@ -129,6 +181,11 @@ coverage defaults to `coverage/<target>_uvm_functional_coverage.json`; override
 `UVM_FUNCTIONAL_COVERAGE_OUT` to write it elsewhere. The feedback summary
 prefers that replay-exported JSON and falls back to corpus-derived schema
 coverage when it is missing.
+
+`coverage-feedback` also uses connector observation. The three-layer feedback
+path is visible through `summary_to_mutation_feedback`,
+`layer3_feedback_to_layer2_feedback`,
+`layer2_layer3_feedback_to_layer1_plan`, and `layer1_plan_to_directives`.
 
 To compare baseline, heuristic feedback, and real LLM feedback across the local
 Secworks examples for multiple feedback rounds:

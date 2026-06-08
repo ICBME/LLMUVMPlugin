@@ -97,6 +97,32 @@ uv run make -C libafl_bfm_fuzz \
 7. mutation directives 生成。
 8. 使用 directives 生成 feedback corpus 并再次 replay。
 
+## Connector Observation
+
+Secworks 示例也可以导出 connector 事件、monitor 和 full topology。以 SHA-256 为例：
+
+```sh
+SHA_RTL="$(printf '%s ' /path/to/pyuvm/example/sha256/src/rtl/*.v)"
+uv run make -C libafl_bfm_fuzz \
+  TARGET=secworks_sha256 \
+  LIBAFL_ITERS=0 \
+  LIBAFL_MAX_SEEDS=0 \
+  COVERAGE_DIR=libafl_bfm_fuzz/coverage/sha256_observe \
+  VERILOG_SOURCES="$SHA_RTL" \
+  TOPLEVEL=sha256 \
+  CONNECTOR_OBSERVE_OUT=libafl_bfm_fuzz/coverage/sha256_observe/events.jsonl \
+  CONNECTOR_MONITOR_OUT=libafl_bfm_fuzz/coverage/sha256_observe/monitor.json \
+  CONNECTOR_TOPOLOGY_OUT=libafl_bfm_fuzz/coverage/sha256_observe/topology.json \
+  CONNECTOR_OBSERVE_RUN_ID=sha256_observe \
+  feedback-fuzz
+```
+
+期望输出包含：
+
+- `events.jsonl`：connector started/finished/failed 事件。
+- `monitor.json`：每个 connector 的 started、finished、failed、duration 和最新 metrics。
+- `topology.json`：`libafl_bfm_fuzz` full topology，覆盖 harness 和 coverage feedback。
+
 示例 artifacts 写入 `libafl_bfm_fuzz/coverage/`，包括：
 
 - `secworks_*_corpus.jsonl`

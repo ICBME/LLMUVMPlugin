@@ -3,15 +3,32 @@ import os
 import sys
 import tempfile
 import unittest
+import asyncio
+import time
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "libafl_bfm_fuzz" / "py"))
 
-from connector_observe import Connector, JsonlObserver, MonitoringObserver, observer_from_env  # noqa: E402
+from connector_observe import (  # noqa: E402
+    Connector,
+    JsonlObserver,
+    MonitoringObserver,
+    ObservationContext,
+    observer_from_env,
+)
 from connector_observe.schema import normalize_artifact_refs  # noqa: E402
 from fuzz_feedback import cli as feedback_cli  # noqa: E402
+from fuzz_pipeline.harness import _reset_observation_context_for_tests, run_command  # noqa: E402
+from fuzz_pipeline.orchestrator import (  # noqa: E402
+    PipelineContext,
+    PipelineOrchestrator,
+    StepPolicy,
+    StepSpec,
+)
+from fuzz_pipeline.topology import ComponentNode, ConnectorEdge, PipelineTopology  # noqa: E402
+from fuzz_uvm.context import ReplayContext  # noqa: E402
 
 
 class FailingObserver:
@@ -25,7 +42,175 @@ class FailingObserver:
         raise RuntimeError("observer failed")
 
 
+def _write_and_return(path: Path, text: str, result):
+    path.write_text(text)
+    return result
+
+
 class TestConnectorObserve(unittest.TestCase):
+    def test_orchestrator_runs_step_and_records_trace_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_path = root / "input.txt"
+            input_path.write_text("in")
+            output_path = root / "output.txt"
+            observation_out = root / "events.jsonl"
+            topology_out = root / "topology.json"
+            observer = JsonlObserver(observation_out)
+            topology = PipelineTopology(
+                name="demo_pipeline",
+                components=(
+                    ComponentNode("a", "source"),
+                    ComponentNode("b", "sink"),
+                ),
+                connectors=(
+                    ConnectorEdge(
+                        "a_to_b",
+                        "a",
+                        "b",
+                        input_roles=("input",),
+                        output_roles=("output",),
+                    ),
+                ),
+            )
+            context = PipelineContext(
+                artifacts={"input": input_path, "output": output_path},
+                metadata={"target": "demo"},
+            )
+            orchestrator = PipelineOrchestrator(
+                topology,
+                ObservationContext(
+                    run_id="run-1",
+                    round_id="round-1",
+                    stage_id="stage-1",
+                    parent_event_id="parent-1",
+                    observer=observer,
+                ),
+                topology_out=topology_out,
+            )
+
+            orchestrator.run(
+                [
+                    StepSpec(
+                        name="work",
+                        connector="a_to_b",
+                        handler=lambda _context: _write_and_return(output_path, "out", "ok"),
+                        input_roles=("input",),
+                        output_roles=("output",),
+                        metrics=lambda result: {"result": result},
+                    )
+                ],
+                context,
+            )
+            observer.close()
+            events = [json.loads(line) for line in observation_out.read_text().splitlines()]
+            topology_json = json.loads(topology_out.read_text())
+            output_text = output_path.read_text()
+
+        self.assertEqual(context.values["work"], "ok")
+        self.assertEqual(output_text, "out")
+        self.assertEqual(events[-1]["connector"], "a_to_b")
+        self.assertEqual(events[-1]["metadata"]["round_id"], "round-1")
+        self.assertEqual(events[-1]["metadata"]["stage_id"], "stage-1")
+        self.assertEqual(events[-1]["metadata"]["parent_event_id"], "parent-1")
+        self.assertEqual(events[-1]["metadata"]["target"], "demo")
+        self.assertEqual(topology_json["name"], "demo_pipeline")
+
+    def test_orchestrator_validates_connector_and_roles(self):
+        topology = PipelineTopology(
+            name="demo_pipeline",
+            components=(ComponentNode("a", "source"), ComponentNode("b", "sink")),
+            connectors=(ConnectorEdge("a_to_b", "a", "b", input_roles=("input",)),),
+        )
+        orchestrator = PipelineOrchestrator(topology)
+
+        with self.assertRaisesRegex(ValueError, "unknown connector"):
+            orchestrator.run_step(
+                StepSpec("missing", "missing", lambda _context: "ok"),
+                PipelineContext(),
+            )
+
+        with self.assertRaisesRegex(ValueError, "required input role"):
+            orchestrator.run_step(
+                StepSpec("bad_roles", "a_to_b", lambda _context: "ok"),
+                PipelineContext(),
+            )
+
+    def test_orchestrator_can_continue_when_step_error_policy_allows(self):
+        topology = PipelineTopology(
+            name="demo_pipeline",
+            components=(ComponentNode("a", "source"), ComponentNode("b", "sink")),
+            connectors=(ConnectorEdge("a_to_b", "a", "b"),),
+        )
+        context = PipelineContext()
+
+        result = PipelineOrchestrator(topology).run_step(
+            StepSpec(
+                "optional_failure",
+                "a_to_b",
+                lambda _context: (_ for _ in ()).throw(ValueError("step failed")),
+                policy=StepPolicy(fail_main_on_step_error=False),
+            ),
+            context,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(context.metadata["step_errors"][0]["step"], "optional_failure")
+
+    def test_orchestrator_run_async_records_result(self):
+        async def work(_context):
+            return "async-ok"
+
+        topology = PipelineTopology(
+            name="demo_pipeline",
+            components=(ComponentNode("a", "source"), ComponentNode("b", "sink")),
+            connectors=(ConnectorEdge("a_to_b", "a", "b"),),
+        )
+        context = PipelineContext()
+
+        asyncio.run(
+            PipelineOrchestrator(topology).run_async(
+                [StepSpec("async_work", "a_to_b", work, async_step=True)],
+                context,
+            )
+        )
+
+        self.assertEqual(context.values["async_work"], "async-ok")
+
+    def test_orchestrator_sync_run_rejects_async_step(self):
+        topology = PipelineTopology(
+            name="demo_pipeline",
+            components=(ComponentNode("a", "source"), ComponentNode("b", "sink")),
+            connectors=(ConnectorEdge("a_to_b", "a", "b"),),
+        )
+
+        with self.assertRaisesRegex(ValueError, "marked async"):
+            PipelineOrchestrator(topology).run_step(
+                StepSpec("async_work", "a_to_b", lambda _context: "ok", async_step=True),
+                PipelineContext(),
+            )
+
+    def test_orchestrator_sync_timeout_returns_without_waiting_for_handler(self):
+        topology = PipelineTopology(
+            name="demo_pipeline",
+            components=(ComponentNode("a", "source"), ComponentNode("b", "sink")),
+            connectors=(ConnectorEdge("a_to_b", "a", "b"),),
+        )
+
+        started = time.monotonic()
+        with self.assertRaisesRegex(TimeoutError, "timed out"):
+            PipelineOrchestrator(topology).run_step(
+                StepSpec(
+                    "slow_work",
+                    "a_to_b",
+                    lambda _context: time.sleep(0.4),
+                    policy=StepPolicy(timeout_s=0.01),
+                ),
+                PipelineContext(),
+            )
+
+        self.assertLess(time.monotonic() - started, 0.3)
+
     def test_connector_preserves_return_value_and_writes_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "events.jsonl"
@@ -108,6 +293,21 @@ class TestConnectorObserve(unittest.TestCase):
         self.assertEqual(monitor["connectors"][0]["finished"], 1)
         self.assertEqual(monitor["edges"][0]["from_layer"], "a")
         self.assertEqual(monitor["edges"][0]["to_layer"], "b")
+
+    def test_monitoring_observer_merges_existing_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "monitor.json"
+            first = MonitoringObserver(path)
+            Connector("first", "a", "b", observer=first).run(lambda: "ok")
+            first.close()
+
+            second = MonitoringObserver(path)
+            Connector("second", "b", "c", observer=second).run(lambda: "ok")
+            second.close()
+            monitor = json.loads(path.read_text())
+
+        self.assertEqual(monitor["connector_count"], 2)
+        self.assertEqual({"first", "second"}, {item["connector"] for item in monitor["connectors"]})
 
     def test_feedback_cli_writes_connector_events_monitoring_and_topology(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -193,7 +393,8 @@ class TestConnectorObserve(unittest.TestCase):
         self.assertIn("layer1_plan_to_directives", {event["connector"] for event in events})
         self.assertTrue(all(event.get("run_id") == "run-demo" for event in events))
         self.assertIn("coverage_to_summary", {item["connector"] for item in monitor["connectors"]})
-        self.assertIn("coverage_feedback", topology["name"])
+        self.assertEqual("libafl_bfm_fuzz", topology["name"])
+        self.assertIn("corpus_to_replay_context", {item["name"] for item in topology["connectors"]})
         self.assertIn("layer3_feedback_to_layer2_feedback", {item["name"] for item in topology["connectors"]})
         self.assertIn("layer1_plan_to_directives", {item["name"] for item in topology["connectors"]})
 
@@ -321,6 +522,133 @@ class TestConnectorObserve(unittest.TestCase):
         )
         self.assertTrue(plan_event["metrics"]["consumed_gap_feedback"])
         self.assertTrue(plan_event["metrics"]["consumed_mutation_feedback"])
+        self.assertEqual(monitor["failed_connector_count"], 0)
+
+    def test_harness_run_command_writes_connector_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            observation_out = root / "events.jsonl"
+            monitoring_out = root / "monitor.json"
+            topology_out = root / "topology.json"
+            output = root / "out.txt"
+
+            old_env = {
+                name: os.environ.get(name)
+                for name in (
+                    "CONNECTOR_OBSERVE_OUT",
+                    "CONNECTOR_MONITOR_OUT",
+                    "CONNECTOR_TOPOLOGY_OUT",
+                    "CONNECTOR_OBSERVE_RUN_ID",
+                    "CONNECTOR_OBSERVE_ASYNC",
+                )
+            }
+            os.environ["CONNECTOR_OBSERVE_OUT"] = str(observation_out)
+            os.environ["CONNECTOR_MONITOR_OUT"] = str(monitoring_out)
+            os.environ["CONNECTOR_TOPOLOGY_OUT"] = str(topology_out)
+            os.environ["CONNECTOR_OBSERVE_RUN_ID"] = "harness-demo"
+            os.environ["CONNECTOR_OBSERVE_ASYNC"] = "0"
+            _reset_observation_context_for_tests()
+            try:
+                result = run_command(
+                    [
+                        sys.executable,
+                        "-c",
+                        f"from pathlib import Path; Path({str(output)!r}).write_text('ok')",
+                    ],
+                    connector_name="corpus_generator_to_corpus",
+                    from_layer="corpus_generator",
+                    to_layer="corpus",
+                    outputs={"corpus": output},
+                    metadata={"target": "demo"},
+                )
+            finally:
+                _reset_observation_context_for_tests()
+                for name, value in old_env.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+
+            events = [json.loads(line) for line in observation_out.read_text().splitlines()]
+            monitor = json.loads(monitoring_out.read_text())
+            topology = json.loads(topology_out.read_text())
+            output_text = output.read_text()
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(output_text, "ok")
+        self.assertIn("corpus_generator_to_corpus", {event["connector"] for event in events})
+        self.assertTrue(all(event.get("run_id") == "harness-demo" for event in events))
+        self.assertEqual(monitor["failed_connector_count"], 0)
+        self.assertIn("corpus_generator_to_corpus", {item["name"] for item in topology["connectors"]})
+
+    def test_harness_run_command_validates_connector_endpoint(self):
+        with self.assertRaisesRegex(ValueError, "endpoint mismatch"):
+            run_command(
+                [sys.executable, "-c", "pass"],
+                connector_name="corpus_generator_to_corpus",
+                from_layer="wrong",
+                to_layer="corpus",
+            )
+
+    def test_replay_context_load_is_observable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "demo.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        'name = "demo"',
+                        'driver = "demo_driver:Driver"',
+                        "",
+                        "[[field]]",
+                        'name = "mode"',
+                        'kind = "enum"',
+                        'choices = ["read", "write"]',
+                    ]
+                )
+                + "\n"
+            )
+            corpus = root / "corpus.jsonl"
+            corpus.write_text('{"target":"demo","mode":"read","origin":"seed"}\n')
+            observation_out = root / "events.jsonl"
+            monitoring_out = root / "monitor.json"
+
+            old_env = {
+                name: os.environ.get(name)
+                for name in (
+                    "FUZZ_TARGET",
+                    "FUZZ_TARGET_CONFIG",
+                    "LIBAFL_CORPUS",
+                    "CONNECTOR_OBSERVE_OUT",
+                    "CONNECTOR_MONITOR_OUT",
+                    "CONNECTOR_OBSERVE_ASYNC",
+                )
+            }
+            os.environ["FUZZ_TARGET"] = "demo"
+            os.environ["FUZZ_TARGET_CONFIG"] = str(config)
+            os.environ["LIBAFL_CORPUS"] = str(corpus)
+            os.environ["CONNECTOR_OBSERVE_OUT"] = str(observation_out)
+            os.environ["CONNECTOR_MONITOR_OUT"] = str(monitoring_out)
+            os.environ["CONNECTOR_OBSERVE_ASYNC"] = "0"
+            _reset_observation_context_for_tests()
+            try:
+                context = ReplayContext.from_env()
+            finally:
+                _reset_observation_context_for_tests()
+                for name, value in old_env.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+
+            events = [json.loads(line) for line in observation_out.read_text().splitlines()]
+            monitor = json.loads(monitoring_out.read_text())
+
+        self.assertEqual(context.target, "demo")
+        self.assertEqual(len(context.cases), 1)
+        finished = [event for event in events if event["event_type"] == "connector.finished"]
+        self.assertEqual(finished[-1]["connector"], "corpus_to_replay_context")
+        self.assertEqual(finished[-1]["metrics"]["case_count"], 1)
         self.assertEqual(monitor["failed_connector_count"], 0)
 
 
