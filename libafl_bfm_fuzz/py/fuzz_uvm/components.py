@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pyuvm import ConfigDB, uvm_analysis_port, uvm_driver, uvm_subscriber
 
+from fuzz_pipeline.replay_orchestrator import ReplayPipelineOrchestrator
 from fuzz_bfm.target_config import TargetConfig
 from fuzz_uvm.observable import (
     ObservableCoverageAdapter,
@@ -18,7 +19,10 @@ class ReplayDriver(uvm_driver):
     def build_phase(self) -> None:
         self.ap = uvm_analysis_port("ap", self)
         config: TargetConfig = ConfigDB().get(self, "", "FUZZ_TARGET_CONFIG")
-        self.driver_adapter = ObservableReplayDriverAdapter(config)
+        self.driver_adapter = ObservableReplayDriverAdapter(
+            config,
+            _replay_orchestrator_from_config_db(self, config),
+        )
 
     async def run_phase(self) -> None:
         await self.driver_adapter.reset()
@@ -48,7 +52,10 @@ class ReplayDriver(uvm_driver):
 class ReplayScoreboard(uvm_subscriber):
     def build_phase(self) -> None:
         config: TargetConfig = ConfigDB().get(self, "", "FUZZ_TARGET_CONFIG")
-        self.scoreboard_adapter = ObservableScoreboardAdapter(config)
+        self.scoreboard_adapter = ObservableScoreboardAdapter(
+            config,
+            _replay_orchestrator_from_config_db(self, config),
+        )
 
     def write(self, record: ReplayRecord) -> None:
         self.scoreboard_adapter.write(record)
@@ -73,6 +80,7 @@ class FunctionalCoverageSubscriber(uvm_subscriber):
         self.coverage_adapter = ObservableCoverageAdapter(
             config,
             output_path,
+            _replay_orchestrator_from_config_db(self, config),
         )
 
     def write(self, record: ReplayRecord) -> None:
@@ -86,3 +94,13 @@ class FunctionalCoverageSubscriber(uvm_subscriber):
             summary["total_cases"],
             self.coverage_adapter.output_path,
         )
+
+
+def _replay_orchestrator_from_config_db(
+    component,
+    config: TargetConfig,
+) -> ReplayPipelineOrchestrator:
+    try:
+        return ConfigDB().get(component, "", "FUZZ_REPLAY_ORCHESTRATOR")
+    except Exception:  # noqa: BLE001 - standalone component tests may not install one
+        return ReplayPipelineOrchestrator.from_env(config=config)

@@ -29,7 +29,8 @@ constraints are documented in
   functional coverage, and coverage feedback. `py/fuzz_pipeline/orchestrator.py`
   is the orchestration layer: components expose handlers/adapters, while
   `StepSpec` wiring decides connector names, artifact roles, metrics, and
-  failure policy.
+  failure policy. `py/fuzz_pipeline/replay_orchestrator.py` applies the same
+  pattern to pyUVM replay.
 
 Reusable framework code does not depend on DUT-specific BFMs, reference models,
 vectors, or hardcoded RTL paths. The repository does include `py/fuzz_examples`
@@ -115,9 +116,9 @@ pyUVM replay is connector-observable at the component boundaries:
 `corpus_to_replay_context`, `case_to_replay_driver`, `case_to_dut`,
 `case_to_ref_model`, `driver_to_scoreboard`, `driver_to_functional_coverage`,
 `scoreboard_to_report`, and `functional_coverage_to_summary`. The connector
-creation is centralized in `py/fuzz_uvm/observable.py` adapters so pyUVM
-components keep their replay behavior focused on driver, scoreboard, and
-coverage responsibilities.
+creation is owned by `py/fuzz_pipeline/replay_orchestrator.py`; `py/fuzz_uvm`
+components and observable adapters only delegate driver, scoreboard, and coverage
+actions into that orchestration layer.
 
 ## Connector Observation
 

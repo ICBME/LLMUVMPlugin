@@ -6,10 +6,9 @@ from pathlib import Path
 
 from fuzz_bfm.corpus import FuzzCase, load_cases
 from fuzz_bfm.target_config import TargetConfig, load_target_config
-from fuzz_pipeline.harness import (
-    connector_from_env,
-    replay_context_metrics,
-    write_observation_topology,
+from fuzz_pipeline.replay_orchestrator import (
+    ReplayPipelineOrchestrator,
+    replay_corpus_from_env,
 )
 
 
@@ -22,11 +21,12 @@ class ReplayContext:
 
     @classmethod
     def from_env(cls) -> ReplayContext:
-        write_observation_topology()
-        return connector_from_env("corpus_to_replay_context", "corpus", "replay_context").run(
+        corpus = replay_corpus_from_env()
+        return ReplayPipelineOrchestrator.from_env(
+            corpus=corpus,
+        ).load_replay_context(
             cls._from_env,
-            outputs=lambda context: {"corpus": context.corpus},
-            metrics=replay_context_metrics,
+            corpus=corpus,
         )
 
     @classmethod

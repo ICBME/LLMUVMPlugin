@@ -53,9 +53,16 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 - `external_command_step()` 用于把 Rust binary、shell command 等外部进程纳入同一套
   connector 观测。
 
+`py/fuzz_pipeline/replay_orchestrator.py`
+
+- 定义 `ReplayPipelineOrchestrator`，把 pyUVM replay 的 context load、sequence、
+  driver、ref-model、scoreboard 和 functional coverage 边界映射为 `StepSpec`。
+- 维护 replay 期间共享的 `PipelineContext`，统一写入 `target_manifest`、`corpus` 和
+  `functional_coverage` artifact roles。
+
 `py/fuzz_pipeline/harness.py`
 
-- 为 Makefile 命令包装和 pyUVM replay 提供通用 helper。
+- 为 Makefile 命令包装和 observation context 提供通用 helper。
 - 负责从环境变量创建 observation context、导出拓扑、包装外部命令。
 
 `scripts/run_connector.py`
@@ -66,8 +73,8 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 
 - 提供 `ObservableReplayDriverAdapter`、`ObservableScoreboardAdapter` 和
   `ObservableCoverageAdapter`。
-- pyUVM component 通过 adapter 调用 driver/ref-model/scoreboard/coverage，不直接关心
-  observer 输出路径。
+- pyUVM component 通过 adapter 调用 driver/ref-model/scoreboard/coverage；adapter 再委托
+  `ReplayPipelineOrchestrator` 执行观测 step，不直接创建 connector。
 
 ## 编排契约
 
@@ -90,8 +97,9 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 
 - corpus generation、corpus validation 和 coverage feedback 已由 `PipelineOrchestrator`
   编排。
-- pyUVM replay 仍在 cocotb/pyUVM 生命周期内执行，但 connector 创建已集中到
-  `observable.py` adapter，后续可继续迁移到更完整的 replay orchestrator。
+- pyUVM replay 仍在 cocotb/pyUVM 生命周期内执行，但 replay context、sequence、
+  driver/ref-model、scoreboard 和 coverage 的 connector 创建已统一迁移到
+  `ReplayPipelineOrchestrator`；pyUVM component 与 adapter 只负责调用行为。
 
 ## 环境变量
 
@@ -288,8 +296,9 @@ monitor JSON 聚合：
 - 未配置 `CONNECTOR_OBSERVE_OUT` 和 `CONNECTOR_MONITOR_OUT` 时，
   `observer_from_env()` 返回 `NullObserver`，connector 直接执行被包装函数。
 - observer 异常默认被隔离，不影响主链路结果。
-- pyUVM replay 中的 driver/ref-model/scoreboard/coverage 观测使用 `run_async()`
-  或轻量同步 wrapper；metrics 只取已有 summary/result，不重新执行 DUT 行为。
+- pyUVM replay 中的 driver/ref-model/scoreboard/coverage 观测由
+  `ReplayPipelineOrchestrator` 使用 `run_step_async()` 或轻量同步 step 包装；metrics 只取
+  已有 summary/result，不重新执行 DUT 行为。
 - 多进程 Makefile 流程中，`MonitoringObserver` 会读取并合并已有 monitor snapshot，
   避免后一个进程覆盖前一个进程的汇总。
 - `PipelineOrchestrator` 的同步 timeout 会返回 `TimeoutError`；底层线程如果无法被
@@ -302,6 +311,7 @@ monitor JSON 聚合：
 - connector 同步/异步执行和失败事件。
 - observer failure isolation 和 strict mode。
 - `PipelineOrchestrator` step 执行、role contract 校验、async step 防误用和 timeout。
+- `ReplayPipelineOrchestrator` 对 driver/ref-model/scoreboard/coverage step 的委托执行。
 - monitor 聚合与跨进程 snapshot 合并。
 - coverage feedback 事件、monitor 和 topology 导出。
 - 三层 feedback connector 导出。

@@ -19,6 +19,9 @@ from connector_observe import (  # noqa: E402
     observer_from_env,
 )
 from connector_observe.schema import normalize_artifact_refs  # noqa: E402
+from fuzz_bfm.bfm_base import ReplayResult  # noqa: E402
+from fuzz_bfm.corpus import FuzzCase  # noqa: E402
+from fuzz_bfm.target_config import TargetConfig  # noqa: E402
 from fuzz_feedback import cli as feedback_cli  # noqa: E402
 from fuzz_pipeline.harness import _reset_observation_context_for_tests, run_command  # noqa: E402
 from fuzz_pipeline.orchestrator import (  # noqa: E402
@@ -27,8 +30,10 @@ from fuzz_pipeline.orchestrator import (  # noqa: E402
     StepPolicy,
     StepSpec,
 )
+from fuzz_pipeline.replay_orchestrator import ReplayPipelineOrchestrator  # noqa: E402
 from fuzz_pipeline.topology import ComponentNode, ConnectorEdge, PipelineTopology  # noqa: E402
 from fuzz_uvm.context import ReplayContext  # noqa: E402
+from fuzz_uvm.transactions import ReplayRecord  # noqa: E402
 
 
 class FailingObserver:
@@ -210,6 +215,68 @@ class TestConnectorObserve(unittest.TestCase):
             )
 
         self.assertLess(time.monotonic() - started, 0.3)
+
+    def test_replay_pipeline_orchestrator_runs_replay_steps(self):
+        async def execute_case():
+            return ReplayResult(actual="ok", detail="demo")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "demo.toml"
+            manifest.write_text('name = "demo"\ndriver = "demo_driver:Driver"\n')
+            corpus = root / "corpus.jsonl"
+            corpus.write_text('{"target":"demo","origin":"seed"}\n')
+            coverage_out = root / "functional.json"
+            events_out = root / "events.jsonl"
+            topology_out = root / "topology.json"
+            observer = JsonlObserver(events_out)
+            config = TargetConfig(name="demo", driver="demo_driver:Driver", path=manifest)
+            case = FuzzCase(target="demo", data={"origin": "seed"}, line_no=1)
+            record = ReplayRecord(0, case, result=ReplayResult(actual="ok", expected="ok"))
+            pipeline = ReplayPipelineOrchestrator(
+                observation_context=ObservationContext(run_id="replay-run", observer=observer),
+                pipeline_context=PipelineContext(
+                    artifacts={"corpus": corpus},
+                    metadata={"target": "demo"},
+                ),
+                topology_out=topology_out,
+            )
+
+            driver = pipeline.build_replay_driver(config, lambda: "driver")
+            result = asyncio.run(pipeline.execute_case(execute_case, case, index=0))
+            pipeline.scoreboard_write(
+                lambda: None,
+                record,
+                summary=lambda: {"checked": 1, "failures": 0},
+            )
+            coverage_summary = {"target": "demo", "total_cases": 1, "coverage": {"covered": 1, "total": 1, "percent": 100.0}}
+            exported = pipeline.coverage_export(
+                lambda: _write_and_return(
+                    coverage_out,
+                    json.dumps(coverage_summary),
+                    coverage_summary,
+                ),
+                output_path=coverage_out,
+            )
+            observer.close()
+            events = [json.loads(line) for line in events_out.read_text().splitlines()]
+            topology_json = json.loads(topology_out.read_text())
+            coverage_exists = coverage_out.exists()
+
+        finished_connectors = {
+            event["connector"]
+            for event in events
+            if event["event_type"] == "connector.finished"
+        }
+        self.assertEqual(driver, "driver")
+        self.assertEqual(result.actual, "ok")
+        self.assertEqual(exported["total_cases"], 1)
+        self.assertEqual(topology_json["name"], "libafl_bfm_fuzz")
+        self.assertIn("manifest_to_replay_driver", finished_connectors)
+        self.assertIn("case_to_dut", finished_connectors)
+        self.assertIn("driver_to_scoreboard", finished_connectors)
+        self.assertIn("functional_coverage_to_summary", finished_connectors)
+        self.assertTrue(coverage_exists)
 
     def test_connector_preserves_return_value_and_writes_events(self):
         with tempfile.TemporaryDirectory() as tmp:

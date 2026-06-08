@@ -11,15 +11,20 @@ from fuzz_uvm.context import ReplayContext
 from fuzz_uvm.env import FuzzEnv
 from fuzz_uvm.sequences import CorpusReplaySequence
 from fuzz_uvm.transactions import FuzzSeqItem, ReplayRecord
-from fuzz_pipeline.harness import connector_from_env
+from fuzz_pipeline.replay_orchestrator import ReplayPipelineOrchestrator
 
 
 class LibAflUvmReplayTest(uvm_test):
     def build_phase(self) -> None:
         self.context = ReplayContext.from_env()
+        self.replay_orchestrator = ReplayPipelineOrchestrator.from_env(
+            config=self.context.config,
+            corpus=self.context.corpus,
+        )
         ConfigDB().set(None, "*", "FUZZ_TARGET", self.context.target)
         ConfigDB().set(None, "*", "FUZZ_TARGET_CONFIG", self.context.config)
         ConfigDB().set(None, "*", "FUZZ_REPLAY_CONTEXT", self.context)
+        ConfigDB().set(None, "*", "FUZZ_REPLAY_ORCHESTRATOR", self.replay_orchestrator)
         self.env = FuzzEnv("env", self)
 
     async def run_phase(self) -> None:
@@ -40,17 +45,16 @@ class LibAflUvmReplayTest(uvm_test):
                 self.context.corpus,
                 len(self.context.cases),
             )
-            sequence = CorpusReplaySequence("corpus_replay", self.context.cases)
-            await connector_from_env(
-                "replay_context_to_sequence",
-                "replay_context",
-                "sequencer",
-            ).run_async(
-                sequence.start,
-                self.env.seqr,
-                inputs={"corpus": self.context.corpus},
-                metrics=lambda _value: {"case_count": len(self.context.cases)},
-                metadata={"target": self.context.target},
+            sequence = CorpusReplaySequence(
+                "corpus_replay",
+                self.context.cases,
+                self.replay_orchestrator,
+            )
+            await self.replay_orchestrator.start_sequence(
+                lambda: sequence.start(self.env.seqr),
+                corpus=self.context.corpus,
+                target=self.context.target,
+                case_count=len(self.context.cases),
             )
         finally:
             self.drop_objection()

@@ -57,10 +57,13 @@
 - `topology.py`：harness、coverage feedback 和 full fuzz topology。
 - `orchestrator.py`：`StepSpec` / `PipelineContext` / `PipelineOrchestrator`，负责把
   纯逻辑 handler、外部命令和 artifact role contract 编排成可观测步骤。
+- `replay_orchestrator.py`：`ReplayPipelineOrchestrator`，负责 pyUVM replay 各组件边界的
+  StepSpec 编排。
 - `harness.py`：Makefile 命令包装和 pyUVM replay 共用的 observation helper。
 - `coverage_feedback.py`：带 connector 的 coverage feedback pipeline。
 - `observable.py` 位于 `py/fuzz_uvm/`，集中封装 pyUVM replay driver/ref-model、
-  scoreboard 和 functional coverage 的 connector adapter。
+  scoreboard 和 functional coverage adapter；adapter 委托 `ReplayPipelineOrchestrator`
+  执行 connector step。
 
 ## Corpus Generation Flow
 
@@ -78,10 +81,11 @@
 ## Replay Flow
 
 1. cocotb 加载 `fuzz_uvm.testbench`。
-2. `ReplayContext.from_env()` 加载 manifest 和 corpus，并观测
-   `corpus_to_replay_context`。
+2. `ReplayContext.from_env()` 通过 `ReplayPipelineOrchestrator` 加载 manifest 和 corpus，
+   并观测 `corpus_to_replay_context`。
 3. `LibAflUvmReplayTest` 启动 manifest 指定的 clock。
-4. `CorpusReplaySequence` 顺序发送 case，并观测 `case_to_replay_driver`。
+4. `CorpusReplaySequence` 委托 `ReplayPipelineOrchestrator` 顺序发送 case，并观测
+   `case_to_replay_driver`。
 5. `ReplayDriver` 通过 `ObservableReplayDriverAdapter` 调用目标 driver plugin，并观测
    `driver_reset_to_dut` 和 `case_to_dut`。
 6. 可选 ref model 填充 expected，并观测 `manifest_to_ref_model` 和

@@ -10,6 +10,10 @@ from .orchestrator import (
     StepSpec,
     external_command_step,
 )
+from .replay_orchestrator import (
+    ReplayPipelineOrchestrator,
+    replay_corpus_from_env,
+)
 from .topology import (
     ComponentNode,
     ConnectorEdge,
@@ -30,8 +34,10 @@ __all__ = [
     "PipelineContext",
     "PipelineOrchestrator",
     "PipelineTopology",
+    "ReplayPipelineOrchestrator",
     "StepPolicy",
     "StepSpec",
     "external_command_step",
+    "replay_corpus_from_env",
     "run_coverage_feedback_pipeline",
 ]
