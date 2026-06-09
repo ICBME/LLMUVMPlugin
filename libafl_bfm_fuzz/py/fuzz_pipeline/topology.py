@@ -172,8 +172,89 @@ COVERAGE_FEEDBACK_TOPOLOGY = PipelineTopology(
 )
 
 
+RUN_ORCHESTRATION_TOPOLOGY = PipelineTopology(
+    name="run_orchestration",
+    components=(
+        ComponentNode("rtl_sources", "artifact_source", "DUT RTL source list"),
+        ComponentNode("uvm_replay_process", "simulator", "cocotb/pyUVM replay process"),
+        ComponentNode("rtl_coverage_dat", "artifact", "Verilator raw coverage data"),
+        ComponentNode("replay_artifacts", "artifact", "Simulation logs, waves, and replay outputs"),
+        ComponentNode("coverage_report", "analysis", "Verilator coverage report generation"),
+        ComponentNode("feedback_replay", "simulator", "Replay driven by feedback directives"),
+        ComponentNode("evaluation_report", "artifact", "Run or campaign evaluation report"),
+    ),
+    connectors=(
+        ConnectorEdge(
+            "corpus_to_uvm_replay_process",
+            "corpus",
+            "uvm_replay_process",
+            input_roles=("corpus",),
+            output_roles=("rtl_coverage_dat", "replay_artifacts"),
+        ),
+        ConnectorEdge(
+            "manifest_to_uvm_replay_process",
+            "target_manifest",
+            "uvm_replay_process",
+            input_roles=("target_manifest",),
+        ),
+        ConnectorEdge(
+            "rtl_sources_to_uvm_replay_process",
+            "rtl_sources",
+            "uvm_replay_process",
+            input_roles=("rtl_sources",),
+        ),
+        ConnectorEdge(
+            "uvm_replay_to_rtl_coverage",
+            "uvm_replay_process",
+            "rtl_coverage_dat",
+            output_roles=("rtl_coverage_dat",),
+        ),
+        ConnectorEdge(
+            "uvm_replay_to_replay_artifacts",
+            "uvm_replay_process",
+            "replay_artifacts",
+            output_roles=("replay_artifacts",),
+        ),
+        ConnectorEdge(
+            "rtl_coverage_to_coverage_report",
+            "rtl_coverage_dat",
+            "coverage_report",
+            input_roles=("rtl_coverage_dat",),
+            output_roles=("coverage_info", "coverage_annotated"),
+        ),
+        ConnectorEdge(
+            "coverage_report_to_artifacts",
+            "coverage_report",
+            "coverage_artifacts",
+            output_roles=("coverage_info", "coverage_annotated"),
+        ),
+        ConnectorEdge(
+            "directives_to_feedback_replay",
+            "mutation_directives",
+            "feedback_replay",
+            input_roles=("directives",),
+            output_roles=("corpus", "replay_artifacts"),
+        ),
+        ConnectorEdge(
+            "round_artifacts_to_evaluation",
+            "coverage_artifacts",
+            "evaluation_report",
+            input_roles=("summary",),
+            output_roles=("evaluation_report",),
+        ),
+        ConnectorEdge(
+            "campaign_to_evaluation_report",
+            "feedback_replay",
+            "evaluation_report",
+            output_roles=("evaluation_report",),
+        ),
+    ),
+)
+
+
 FULL_FUZZ_TOPOLOGY = merge_topologies(
     "libafl_bfm_fuzz",
     HARNESS_TOPOLOGY,
     COVERAGE_FEEDBACK_TOPOLOGY,
+    RUN_ORCHESTRATION_TOPOLOGY,
 )

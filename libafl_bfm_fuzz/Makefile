@@ -33,6 +33,7 @@ LLM_FEEDBACK ?= 0
 LLM_MODEL ?=
 CARGO ?= cargo
 PYTHON ?= python3
+MAKE_CMD ?= make
 EXTRA_PYTHONPATH ?=
 
 export COCOTB_REDUCED_LOG_FMT = 1
@@ -124,15 +125,48 @@ check-uvm: sim
 check-all: check
 
 coverage-run: require-rtl
-	mkdir -p $(COVERAGE_DIR)
-	$(MAKE) TARGET=$(TARGET) TARGET_CONFIG="$(TARGET_CONFIG)" clean
-	$(RM) -r $(CWD)/sim_build
-	$(MAKE) TARGET=$(TARGET) TARGET_CONFIG="$(TARGET_CONFIG)" RTL_COVERAGE=1 VERILOG_SOURCES="$(VERILOG_SOURCES)" TOPLEVEL="$(TOPLEVEL)" sim
+	$(PYTHON) $(FUZZ_PIPELINE_RUN) coverage-run \
+		--target $(TARGET) \
+		$(if $(TARGET_CONFIG),--target-config $(TARGET_CONFIG),) \
+		--corpus $(FUZZ_CORPUS) \
+		--libafl-manifest $(LIBAFL_MANIFEST) \
+		$(if $(FUZZ_DIRECTIVES),--directives $(FUZZ_DIRECTIVES),) \
+		--iters $(LIBAFL_ITERS) \
+		--max-seeds $(LIBAFL_MAX_SEEDS) \
+		--seed $(LIBAFL_SEED) \
+		--cargo "$(CARGO)" \
+		--make "$(MAKE_CMD)" \
+		--verilog-sources "$(VERILOG_SOURCES)" \
+		--toplevel "$(TOPLEVEL)" \
+		--coverage-dir $(COVERAGE_DIR) \
+		--coverage-dat $(COVERAGE_DAT) \
+		--coverage-info $(COVERAGE_INFO) \
+		--coverage-annotated $(COVERAGE_ANNOTATED) \
+		--functional-coverage $(UVM_FUNCTIONAL_COVERAGE_OUT) \
+		--cwd $(CWD) \
+		$(if $(CONNECTOR_TOPOLOGY_OUT),--topology-out $(CONNECTOR_TOPOLOGY_OUT),)
 
-coverage-report: coverage-run
-	mkdir -p $(COVERAGE_ANNOTATED)
-	verilator_coverage --annotate $(COVERAGE_ANNOTATED) $(COVERAGE_DAT)
-	verilator_coverage --write-info $(COVERAGE_INFO) $(COVERAGE_DAT)
+coverage-report: require-rtl
+	$(PYTHON) $(FUZZ_PIPELINE_RUN) coverage-report \
+		--target $(TARGET) \
+		$(if $(TARGET_CONFIG),--target-config $(TARGET_CONFIG),) \
+		--corpus $(FUZZ_CORPUS) \
+		--libafl-manifest $(LIBAFL_MANIFEST) \
+		$(if $(FUZZ_DIRECTIVES),--directives $(FUZZ_DIRECTIVES),) \
+		--iters $(LIBAFL_ITERS) \
+		--max-seeds $(LIBAFL_MAX_SEEDS) \
+		--seed $(LIBAFL_SEED) \
+		--cargo "$(CARGO)" \
+		--make "$(MAKE_CMD)" \
+		--verilog-sources "$(VERILOG_SOURCES)" \
+		--toplevel "$(TOPLEVEL)" \
+		--coverage-dir $(COVERAGE_DIR) \
+		--coverage-dat $(COVERAGE_DAT) \
+		--coverage-info $(COVERAGE_INFO) \
+		--coverage-annotated $(COVERAGE_ANNOTATED) \
+		--functional-coverage $(UVM_FUNCTIONAL_COVERAGE_OUT) \
+		--cwd $(CWD) \
+		$(if $(CONNECTOR_TOPOLOGY_OUT),--topology-out $(CONNECTOR_TOPOLOGY_OUT),)
 
 coverage-feedback: coverage-report
 	$(PYTHON) $(COVERAGE_FEEDBACK) \

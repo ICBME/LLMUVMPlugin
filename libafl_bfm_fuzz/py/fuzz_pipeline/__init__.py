@@ -18,6 +18,7 @@ from .replay_orchestrator import (
 from .run_orchestrator import (
     FuzzRunConfig,
     FuzzRunOrchestrator,
+    run_coverage_report_pipeline,
     run_generate_corpus_pipeline,
 )
 from .topology import (
@@ -27,6 +28,7 @@ from .topology import (
     FULL_FUZZ_TOPOLOGY,
     HARNESS_TOPOLOGY,
     PipelineTopology,
+    RUN_ORCHESTRATION_TOPOLOGY,
 )
 
 __all__ = [
@@ -44,10 +46,12 @@ __all__ = [
     "PipelineOrchestrator",
     "PipelineTopology",
     "ReplayPipelineOrchestrator",
+    "RUN_ORCHESTRATION_TOPOLOGY",
     "StepPolicy",
     "StepSpec",
     "external_command_step",
     "replay_corpus_from_env",
+    "run_coverage_report_pipeline",
     "run_generate_corpus_pipeline",
     "run_coverage_feedback_pipeline",
 ]

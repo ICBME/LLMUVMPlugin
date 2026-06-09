@@ -116,11 +116,166 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 当前迁移状态：
 
 - corpus generation、corpus validation 已由 `FuzzRunOrchestrator` 编排。
+- `coverage-run` / `coverage-report` 已由 `FuzzRunOrchestrator` 通过 run-level
+  connector 编排；Makefile 保留为薄 wrapper。
 - coverage feedback 和离线三层 feedback evaluation 已由 `PipelineOrchestrator`
   编排。
 - pyUVM replay 仍在 cocotb/pyUVM 生命周期内执行，但 replay context、sequence、
   driver/ref-model、scoreboard 和 coverage 的 connector 创建已统一迁移到
   `ReplayPipelineOrchestrator`；pyUVM component 与 adapter 只负责调用行为。
+
+## 后续迁移计划
+
+迁移目标是将“调度编排逻辑”和“具体业务逻辑”分离，让后续可以在编排层中插入新的
+agent、oracle、monitor、coverage advisor、trace collector、fault injector 或评测模块，
+而不需要改动 DUT driver、pyUVM component 或 coverage/feedback 的核心业务实现。
+
+### Connector 能力边界
+
+当前 `Connector` 适合承担可观测调用边，而不是完整调度器：
+
+- 适合：包装同步/异步调用，导出 started/finished/failed 事件，记录 metrics、
+  metadata、artifact refs 和错误状态。
+- 适合：在未启用 observer 时走低开销快速路径；启用后用 JSONL/monitor/topology
+  记录组件健康和 artifact lineage。
+- 适合：把外部命令、Python handler 和 pyUVM/cocotb 协程统一成同一套事件 schema。
+- 不适合：直接承担 DAG 依赖解析、动态分支、重试策略、资源池、并发调度、缓存命中
+  或多轮 campaign state 管理。
+- 不适合：以 per-cycle/per-signal 粒度观测 RTL 仿真；默认粒度应保持在
+  run、round、stage、case、transaction、coverage export 等边界。
+
+因此后续迁移应继续把 connector 保持为“边”，把调度能力放在
+`PipelineOrchestrator`、专用 orchestrator facade 和 topology/manifest 层。
+
+### 分层目标
+
+建议固定以下边界：
+
+- `connector_observe/`：只定义事件、artifact reference、observer 和 connector wrapper。
+- `fuzz_pipeline/orchestrator.py`：通用编排内核，负责 `StepSpec`、`PipelineContext`、
+  role contract 校验、timeout、失败策略和 topology 导出。
+- `fuzz_pipeline/stages/`：新增目录，放可复用 stage handler，例如 corpus generation、
+  validation、UVM replay process、coverage report、coverage summary 和 feedback planning。
+- `fuzz_pipeline/run_orchestrator.py`：顶层 campaign/round 编排，只组合 step，不直接写
+  业务逻辑。
+- `fuzz_pipeline/replay_orchestrator.py`：pyUVM replay 内部边界编排，只暴露 context、
+  sequence、driver、ref model、scoreboard 和 coverage 的 step facade。
+- `fuzz_bfm/`、`fuzz_uvm/`、`fuzz_feedback/`：保留业务实现，不直接创建 observer，
+  不读取 connector 输出路径，不知道自己处在哪个 campaign。
+- Makefile 和 CLI：逐步退化为薄入口，只解析环境/参数并调用 pipeline runner。
+
+### 业务 handler contract
+
+每个业务能力应拆成可被编排层调用的 handler。handler 可以读写 artifact，但不直接创建
+connector，也不决定 topology 边：
+
+- `generate_corpus_handler(config) -> CompletedProcess | CorpusResult`
+- `validate_corpus_handler(config) -> list[FuzzCase]`
+- `run_uvm_replay_handler(config) -> ReplayProcessResult`
+- `run_verilator_coverage_handler(config) -> CoverageRunResult`
+- `build_coverage_report_handler(config) -> CoverageReportResult`
+- `build_coverage_summary_handler(config) -> dict`
+- `plan_feedback_handler(config) -> FeedbackResult`
+- `evaluate_round_handler(config) -> RoundEvaluation`
+
+对应的 orchestrator 只负责把这些 handler 包装成 `StepSpec`，声明 connector 名称、
+输入输出 artifact role、metrics、metadata、失败策略和 timeout。
+
+### 优先迁移点
+
+1. 顶层 Makefile 流程迁移。
+   `coverage-run` 和 `coverage-report` 已迁入 `FuzzRunOrchestrator`；
+   后续继续将 `coverage-feedback` 和 `feedback-fuzz` 从 Makefile/Python CLI 命令串联
+   迁入 `FuzzRunOrchestrator`。Makefile 只保留
+   `$(PYTHON) scripts/run_fuzz_pipeline.py <subcommand>` 入口。
+
+2. 扩展 `scripts/run_fuzz_pipeline.py`。
+   已在 `generate-corpus` 之后增加 `coverage-run` 和 `coverage-report`；
+   后续继续增加 `coverage-feedback`、`feedback-fuzz-round`、`feedback-campaign`、
+   `campaign-eval`。CLI 只解析参数，实际顺序由 orchestrator 决定。
+
+3. 引入 run/round manifest。
+   每轮生成 `round_manifest.json`，记录 target、mode、round、seed、输入 directives、
+   corpus、RTL sources、sim build、coverage `.dat/.info`、functional coverage、
+   summary、feedback state、connector event/monitor/topology 路径和命令 return code。
+   多轮 campaign 生成 `campaign_manifest.json` 和 `evaluation_report.json`。
+
+4. 将 `feedback_chain_*` 脚本改成 orchestrator client。
+   这些脚本保留报告渲染逻辑，但运行 round 时调用
+   `run_fuzz_pipeline.py feedback-fuzz-round`，不再直接拼 Makefile 命令。
+
+5. 拆分 pyUVM adapter。
+   当前 `ObservableReplayDriverAdapter` 同时负责构造 plugin 和把调用交给
+   `ReplayPipelineOrchestrator`。后续应拆成：
+   `ReplayPluginBundle` 负责 build driver/ref model/scoreboard/coverage；
+   `ReplayStageAdapter` 负责把 reset/execute/predict/check/sample/export 包装成
+   orchestrator step。这样插入新的 oracle、monitor、trace collector 时不需要改
+   driver 业务代码。
+
+6. 保持 cocotb/pyUVM scheduler 边界。
+   connector 不直接驱动 cocotb timing，也不替换 pyUVM phase。复杂初始化、burst、
+   stateful flow 和 monitor-driven checking 应通过 sequence/monitor plugin contract
+   扩展，再由 `ReplayPipelineOrchestrator` 暴露 `phase_to_sequence`、
+   `monitor_to_record`、`record_to_scoreboard` 等 connector。
+
+### 建议新增 run-level connector
+
+保留现有 harness/feedback connector，同时新增流程级组件和边：
+
+```text
+corpus -> uvm_replay_process
+target_manifest -> uvm_replay_process
+rtl_sources -> uvm_replay_process
+uvm_replay_process -> rtl_coverage_dat
+uvm_replay_process -> replay_artifacts
+rtl_coverage_dat -> coverage_report
+coverage_report -> coverage_artifacts
+coverage_artifacts -> coverage_summary
+mutation_directives -> feedback_replay
+round_artifacts -> round_evaluation
+campaign_manifest -> evaluation_report
+```
+
+建议 connector 名称：
+
+- `corpus_to_uvm_replay_process`
+- `manifest_to_uvm_replay_process`
+- `rtl_sources_to_uvm_replay_process`
+- `uvm_replay_to_rtl_coverage`
+- `uvm_replay_to_replay_artifacts`
+- `rtl_coverage_to_coverage_report`
+- `coverage_report_to_artifacts`
+- `directives_to_feedback_replay`
+- `round_artifacts_to_evaluation`
+- `campaign_to_evaluation_report`
+
+这些 connector 优先包住外部命令和文件产物，不进入 DUT 专用协议细节。DUT protocol、
+timing、reference model 和 scoreboard policy 仍由 plugin 或 pyUVM component 实现。
+
+### 评测指标
+
+迁移后的评测应从 connector events、monitor、round manifest 和 coverage summary 派生：
+
+- 编排健康：connector started/finished/failed、return code、duration、timeout、
+  required artifact 是否存在、topology contract 覆盖率。
+- replay 质量：case count、case validation failure、driver exception、scoreboard
+  checked/failures、ref model expected availability、functional coverage percent。
+- feedback 效果：coverage delta、resolved/open/stale gap count、directive count、
+  directive source、LLM real/fallback、每条 directive 的下一轮收益。
+- 决策质量：计划是否引用真实 gap evidence，是否生成可验证 stimulus，是否减少重复无效
+  尝试，是否触发 waiver/unreachable 标注。
+
+### 迁移约束
+
+- 新 schema 和 connector additive 增加，避免破坏已有 `coverage_feedback.py`、
+  `feedback_chain_*` 和旧 summary 消费者。
+- plugin、pyUVM component 和 feedback 业务模块不直接创建 observer，也不直接读取
+  `CONNECTOR_OBSERVE_OUT` / `CONNECTOR_MONITOR_OUT`。
+- `PipelineContext.artifacts` 是跨 step 文件契约；`PipelineContext.values` 只保存
+  当前进程内结果，不作为跨进程状态来源。
+- run/round/stage/case 必须进入 metadata：`run_id`、`round_id`、`stage_id`、
+  `target`、`mode`、`seed`、`case index`。
+- observation 默认 fail-open；CI 或复现实验可设置 `STRICT_OBSERVATION=1`。
 
 ## 环境变量
 
