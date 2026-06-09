@@ -191,8 +191,10 @@ connector，也不决定 topology 边：
 
 2. 扩展 `scripts/run_fuzz_pipeline.py`。
    已在 `generate-corpus` 之后增加 `coverage-run` 和 `coverage-report`；
-   后续继续增加 `coverage-feedback`、`feedback-fuzz-round`、`feedback-campaign`、
-   `campaign-eval`。CLI 只解析参数，实际顺序由 orchestrator 决定。
+   下一阶段增加 `coverage-feedback`，继续把 summary/directives/prompt/state artifact
+   的路径、LLM 选项和 previous-round 输入收敛到同一个 `FuzzRunConfig`；之后再增加
+   `feedback-fuzz-round`、`feedback-campaign` 和 `campaign-eval`。CLI 只解析参数，
+   实际顺序由 orchestrator 决定。
 
 3. 引入 run/round manifest。
    每轮生成 `round_manifest.json`，记录 target、mode、round、seed、输入 directives、

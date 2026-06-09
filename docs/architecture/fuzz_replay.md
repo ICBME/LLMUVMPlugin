@@ -60,7 +60,7 @@
 - `replay_orchestrator.py`：`ReplayPipelineOrchestrator`，负责 pyUVM replay 各组件边界的
   StepSpec 编排。
 - `run_orchestrator.py`：`FuzzRunOrchestrator`，负责顶层 corpus generation /
-  validation 等 harness 阶段编排。
+  validation、coverage replay 和 Verilator coverage report 等 harness 阶段编排。
 - `observation.py`：`ObservationRuntime`，统一 CLI observer/context 创建。
 - `harness.py`：Makefile 命令包装和 pyUVM replay 共用的 observation helper。
 - `coverage_feedback.py`：带 connector 的 coverage feedback pipeline。
@@ -112,22 +112,27 @@ Makefile 会把 `CARGO` 作为一个完整 wrapper 字符串传给 pipeline runn
 
 ## Coverage Feedback Flow
 
-1. Verilator coverage 输出 `.dat` / `.info`。
-2. `rtl_structure_coverage.py` 将 `.dat` / `.info` 归一化为 structured
+1. `make coverage-report` 通过 `scripts/run_fuzz_pipeline.py coverage-report`
+   调用 `FuzzRunOrchestrator`。该 orchestrator 先用
+   `corpus_to_uvm_replay_process` 包装带 RTL coverage 的 pyUVM replay，再用
+   `rtl_coverage_to_coverage_report` 包装 `verilator_coverage --annotate` 和
+   `--write-info`。
+2. Verilator coverage 输出 `.dat` / `.info`。
+3. `rtl_structure_coverage.py` 将 `.dat` / `.info` 归一化为 structured
    `CoverageExport(domain="rtl_structure")`。
-3. `rtl_gap.py` 从 uncovered structural coverage points 聚合 `rtl_gap_summary`，
+4. `rtl_gap.py` 从 uncovered structural coverage points 聚合 `rtl_gap_summary`，
    包含 gap id、源码上下文、evidence 和 advisor hints。
-4. `coverage.py` 汇总 uncovered line、structured coverage export、`rtl_gap_summary`、
+5. `coverage.py` 汇总 uncovered line、structured coverage export、`rtl_gap_summary`、
    functional coverage 和 stimulus summary。
    它优先读取 UVM replay 导出的 functional coverage JSON；如果文件不存在，则回退到
    从 JSONL corpus 重新计算 schema-level functional coverage。
-5. `feedback_loop.py` 可根据上一轮 summary/directives/state 生成 Layer 2 gap feedback
+6. `feedback_loop.py` 可根据上一轮 summary/directives/state 生成 Layer 2 gap feedback
    和 Layer 3 mutation feedback；没有上一轮输入时保持单轮旧行为。
-6. `advisors.py` 生成 generic directives。当前优先使用 functional coverage 中的
+7. `advisors.py` 生成 generic directives。当前优先使用 functional coverage 中的
    uncovered field/coverpoint；`mutation_planner.py` 会把清晰 `rtl_gap` 转换为
    structural directives，并把复杂 gap 放入 LLM prompt；最后回退到 sparse stimulus
    field heuristic。也可调用 LLM 生成 directives。
-7. 下一轮 `generate-corpus` 通过 `--directives` 读取 directives。
+8. 下一轮 `generate-corpus` 通过 `--directives` 读取 directives。
 
 结构化 coverage export 和 `rtl_gap` 的 schema 见
 [Coverage Feedback 设计](coverage_feedback_design.md)。

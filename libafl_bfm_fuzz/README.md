@@ -196,6 +196,11 @@ coverage defaults to `coverage/<target>_uvm_functional_coverage.json`; override
 prefers that replay-exported JSON and falls back to corpus-derived schema
 coverage when it is missing.
 
+`coverage-report` is also routed through `scripts/run_fuzz_pipeline.py`, so the
+coverage replay process and Verilator report generation are visible as
+run-level connectors: `corpus_to_uvm_replay_process` and
+`rtl_coverage_to_coverage_report`.
+
 `coverage-feedback` also uses connector observation. The three-layer feedback
 path is visible through `summary_to_mutation_feedback`,
 `layer3_feedback_to_layer2_feedback`,
