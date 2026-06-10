@@ -10,6 +10,7 @@ from typing import Any, Callable, Protocol
 from connector_observe import ObservationContext
 
 from .coverage_feedback import CoverageFeedbackResult
+from .harness_trace import HarnessTraceBuilder, HarnessTraceOutputs
 from .run_adapters import RunPathResolver
 
 
@@ -40,6 +41,8 @@ class EvaluationConfigView(Protocol):
     mode: str | None
     round_id: str | None
     evaluation_out: Path | None
+    observation_out: Path | None
+    monitoring_out: Path | None
     cwd: Path | None
 
 
@@ -62,6 +65,7 @@ class RunEvaluationAdapter:
         if path is None:
             raise ValueError("missing evaluation_out for round evaluation stage")
         payload = self.round_payload(stage_results)
+        self._attach_harness_trace(payload, path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(payload, indent=2, sort_keys=True) + "\n",
@@ -92,6 +96,41 @@ class RunEvaluationAdapter:
             "coverage": manifest.get("coverage", {}),
             "feedback": manifest.get("feedback", self._feedback_snapshot(feedback)),
             "manifest_artifacts": manifest.get("artifacts", {}),
+        }
+
+    def _attach_harness_trace(
+        self,
+        payload: dict[str, Any],
+        evaluation_path: Path,
+    ) -> None:
+        artifacts = _mapping(payload.get("manifest_artifacts"))
+        observation_events = _resolved_artifact_path(
+            artifacts.get("observation_events"),
+        ) or self.paths.path_from_cwd(self.config.observation_out)
+        _flush_observer(self.observation_context)
+        if observation_events is None or not observation_events.exists():
+            return
+        outputs = HarnessTraceOutputs.from_evaluation_path(evaluation_path)
+        try:
+            result = HarnessTraceBuilder(
+                observation_events=observation_events,
+                monitoring=(
+                    _resolved_artifact_path(artifacts.get("monitoring"))
+                    or self.paths.path_from_cwd(self.config.monitoring_out)
+                ),
+                round_manifest=self._round_manifest_path(),
+            ).write(outputs)
+        except Exception as exc:  # noqa: BLE001 - evaluation trace is additive
+            payload["harness_trace"] = {
+                "status": "failed",
+                "error": {"type": type(exc).__name__, "message": str(exc)},
+            }
+            return
+        payload["harness_trace"] = {
+            "status": "ok",
+            "artifacts": outputs.to_json(),
+            "summary": result.evaluation.get("summary", {}),
+            "optimization_hints": result.evaluation.get("optimization_hints", {}),
         }
 
     def _round_manifest_path(self) -> Path | None:
@@ -147,6 +186,7 @@ class CampaignEvaluationAdapter:
         campaign_manifest: dict[str, Any],
     ) -> dict[str, Any]:
         payload = self.payload(campaign_manifest)
+        self._attach_harness_trace(payload, campaign_manifest)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(
             json.dumps(payload, indent=2, sort_keys=True) + "\n",
@@ -197,6 +237,68 @@ class CampaignEvaluationAdapter:
             ],
         }
 
+    def _attach_harness_trace(
+        self,
+        payload: dict[str, Any],
+        campaign_manifest: dict[str, Any],
+    ) -> None:
+        artifacts = _mapping(campaign_manifest.get("artifacts"))
+        observation_events = _resolved_artifact_path(
+            artifacts.get("observation_events"),
+            cwd=self.cwd,
+        )
+        _flush_observer(self.observation_context)
+        if observation_events is None or not observation_events.exists():
+            return
+        outputs = HarnessTraceOutputs.from_evaluation_path(self.path)
+        try:
+            result = HarnessTraceBuilder(
+                observation_events=observation_events,
+                monitoring=_resolved_artifact_path(
+                    artifacts.get("monitoring"),
+                    cwd=self.cwd,
+                ),
+                campaign_manifest=_resolved_artifact_path(
+                    artifacts.get("campaign_manifest"),
+                    cwd=self.cwd,
+                ),
+            ).write(outputs)
+        except Exception as exc:  # noqa: BLE001 - evaluation trace is additive
+            payload["harness_trace"] = {
+                "status": "failed",
+                "error": {"type": type(exc).__name__, "message": str(exc)},
+            }
+            return
+        payload["harness_trace"] = {
+            "status": "ok",
+            "artifacts": outputs.to_json(),
+            "summary": result.evaluation.get("summary", {}),
+            "optimization_hints": result.evaluation.get("optimization_hints", {}),
+        }
+
 
 def _mapping(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _flush_observer(observation_context: ObservationContext) -> None:
+    observer = observation_context.observer
+    if observer is None:
+        return
+    try:
+        observer.flush()
+    except Exception:
+        return
+
+
+def _resolved_artifact_path(
+    value: object,
+    *,
+    cwd: Path | None = None,
+) -> Path | None:
+    if not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    if path.is_absolute() or cwd is None:
+        return path
+    return cwd / path

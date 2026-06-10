@@ -452,8 +452,29 @@ manifest 顶层字段包括：
 round/campaign evaluation 的默认 JSON report 是轻量评测快照：round report 汇总本轮
 stage 名称、return code、case count、coverage/feedback snapshot 和 manifest artifact；
 campaign report 汇总 mode/round 数、每轮 coverage/feedback snapshot 和
-`campaign_manifest` lineage。需要更复杂的 Agentic Harness Engineering 评测时，应通过
-`EvaluationBackends` 替换 backend，而不是让 run/campaign orchestrator 直接实现评测业务。
+`campaign_manifest` lineage。若本轮配置了 `observation_events`，默认 evaluation 会调用
+`HarnessTraceBuilder` 生成 harness execution records、harness evaluation 和 LLM
+optimization dataset，并把这些产物路径与摘要挂到 `harness_trace` 字段。需要替换为更复杂
+的 Agentic Harness Engineering 评测时，仍应通过 `EvaluationBackends` 注入 backend，而不是
+让 run/campaign orchestrator 直接实现评测业务。
+
+## Harness Trace 聚合
+
+`py/fuzz_pipeline/harness_trace.py` 负责把 connector event stream 与
+round/campaign manifest 聚合为三类派生产物：
+
+- `<evaluation>_harness_records.jsonl`：逐 connector 终态执行记录，每条记录包含
+  run/round/stage/case、target/mode、connector、from/to layer、step、duration、status、
+  metrics、metadata、error 和 evidence path。
+- `<evaluation>_harness_evaluation.json`：按 connector、module、case、failure cluster
+  和 slowest record 聚合的评测报告，同时保留 coverage/feedback snapshot 与 manifest
+  artifacts。
+- `<evaluation>_llm_dataset.jsonl`：面向 LLM 自动优化 harness 的样本，优先保留失败和慢
+  record，并用 artifact path 引用大文件证据。
+
+聚合器只读取已存在的 JSONL/JSON artifact，不重新执行 DUT、coverage 或 feedback 逻辑。
+默认 evaluation 在读取事件前会 flush 当前 observer；如果事件文件不存在或聚合失败，主
+evaluation report 仍保持可写，`harness_trace` 只作为 additive 诊断信息。
 
 ## 环境变量
 
@@ -484,6 +505,8 @@ CONNECTOR_OBSERVE_RUN_ID=my_run
 - `CONNECTOR_OBSERVE_OUT`：JSONL 事件，每行一个 connector event。
 - `CONNECTOR_MONITOR_OUT`：组件健康汇总 JSON。多进程流程会合并已有 snapshot。
 - `CONNECTOR_TOPOLOGY_OUT`：完整 component/connector topology JSON。
+- 启用 round/campaign evaluation 且存在 observation event 文件时，还会写出
+  `*_harness_records.jsonl`、`*_harness_evaluation.json` 和 `*_llm_dataset.jsonl`。
 
 ## 已接入的 harness 连接
 
@@ -692,6 +715,8 @@ monitor JSON 聚合：
   已有 summary/result，不重新执行 DUT 行为。
 - 多进程 Makefile 流程中，`MonitoringObserver` 会读取并合并已有 monitor snapshot，
   避免后一个进程覆盖前一个进程的汇总。
+- `HarnessTraceBuilder` 是离线聚合层，只解析 connector 终态事件和 manifest 引用；大文件
+  继续以 artifact path 形式进入 evidence，不内联到事件或 LLM dataset。
 - `PipelineOrchestrator` 的同步 timeout 会返回 `TimeoutError`；底层线程如果无法被
   Python 强制停止，可能仍短暂运行，因此 handler 应尽量保持幂等。
 
@@ -715,6 +740,9 @@ monitor JSON 聚合：
 - `feedback-fuzz` 单轮 manifest 写出和 `round_artifacts_to_round_manifest` 观测。
 - `feedback-campaign` 多轮 manifest 聚合和 `round_manifest_to_campaign_manifest` 观测。
 - `CampaignRoundScheduler` 能从上一轮 manifest 携带 directives/summary/state 到下一轮。
+- `HarnessTraceBuilder` 能把 connector events、monitor、round manifest 聚合为执行记录、
+  harness evaluation 和 LLM optimization dataset；默认 round evaluation 在发现事件文件时会
+  自动附加 `harness_trace`。
 - harness command wrapper。
 - replay context 加载观测。
 - Makefile `generate-corpus` smoke 可导出 corpus generator 和 validator 事件。

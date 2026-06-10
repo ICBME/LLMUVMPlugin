@@ -10,6 +10,11 @@ from .campaign_orchestrator import (
     normalize_campaign_modes,
     run_feedback_campaign_pipeline,
 )
+from .harness_trace import (
+    HarnessTraceBuilder,
+    HarnessTraceOutputs,
+    HarnessTraceResult,
+)
 from .orchestrator import (
     PipelineContext,
     PipelineOrchestrator,
@@ -92,6 +97,9 @@ __all__ = [
     "FuzzRunConfig",
     "FuzzRunOrchestrator",
     "HARNESS_TOPOLOGY",
+    "HarnessTraceBuilder",
+    "HarnessTraceOutputs",
+    "HarnessTraceResult",
     "ObservationRuntime",
     "PipelineContext",
     "PipelineOrchestrator",

@@ -147,7 +147,9 @@
    和 `CoverageReportAdapter`，继续走当前 cargo/make/verilator 行为。测试可注入 fake
    backend，后续 remote backend 或 agentic harness backend 可复用同一接口。
    `EvaluationBackends` 可注入 round/campaign evaluation backend，让评测逻辑独立于
-   run/campaign 编排。
+   run/campaign 编排。默认 evaluation 已接入 `HarnessTraceBuilder`，在存在 observation
+   event 文件时自动生成 execution records、harness evaluation 和 LLM optimization dataset；
+   replacement backend 仍可完全接管这部分逻辑。
 
 5. 收紧 artifact materialization。
    已完成：每个 coverage feedback connector step 声明的 output artifact 会在 step
@@ -188,6 +190,9 @@
   拒绝、round/campaign evaluation stage、`EvaluationBackends` 替换、自定义 campaign
   stage、非法 campaign DAG 拒绝，以及 `CampaignRoundScheduler` 对上一轮 manifest state
   的传递。
+- `tests/test_harness_trace.py`：覆盖 connector events 到 harness execution records 的转换、
+  connector/module/failure/case 聚合、LLM optimization dataset 写出，以及默认 round
+  evaluation 在发现 observation events 时自动附加 `harness_trace`。
 
 ## 完成标准
 
