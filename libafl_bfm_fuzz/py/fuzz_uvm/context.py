@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from pathlib import Path
 
 from fuzz_bfm.corpus import FuzzCase, load_cases
@@ -9,6 +8,7 @@ from fuzz_bfm.target_config import TargetConfig, load_target_config
 from fuzz_pipeline.replay_orchestrator import (
     ReplayPipelineOrchestrator,
     replay_corpus_from_env,
+    replay_target_from_env,
 )
 
 
@@ -21,21 +21,18 @@ class ReplayContext:
 
     @classmethod
     def from_env(cls) -> ReplayContext:
-        corpus = replay_corpus_from_env()
+        config = load_target_config(replay_target_from_env())
+        corpus = replay_corpus_from_env(config.name)
         return ReplayPipelineOrchestrator.from_env(
+            config=config,
             corpus=corpus,
         ).load_replay_context(
-            cls._from_env,
+            lambda: cls._from_config(config, corpus),
             corpus=corpus,
         )
 
     @classmethod
-    def _from_env(cls) -> ReplayContext:
-        target = os.getenv("FUZZ_TARGET")
-        if target is None and os.getenv("FUZZ_TARGET_CONFIG") is None:
-            raise RuntimeError("FUZZ_TARGET or FUZZ_TARGET_CONFIG must be set")
-        config = load_target_config(target or "dut")
+    def _from_config(cls, config: TargetConfig, corpus: Path) -> ReplayContext:
         target = config.name
-        corpus = Path(os.getenv("LIBAFL_CORPUS", f"coverage/{target}_corpus.jsonl"))
         cases = load_cases(corpus, target, config=config)
         return cls(target=target, config=config, corpus=corpus, cases=cases)

@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
 from pyuvm import ConfigDB, uvm_analysis_port, uvm_driver, uvm_subscriber
 
 from fuzz_pipeline.replay_orchestrator import ReplayPipelineOrchestrator
@@ -21,7 +18,7 @@ class ReplayDriver(uvm_driver):
         config: TargetConfig = ConfigDB().get(self, "", "FUZZ_TARGET_CONFIG")
         self.driver_adapter = ObservableReplayDriverAdapter(
             config,
-            _replay_orchestrator_from_config_db(self, config),
+            orchestrator=_replay_orchestrator_from_config_db(self),
         )
 
     async def run_phase(self) -> None:
@@ -54,7 +51,7 @@ class ReplayScoreboard(uvm_subscriber):
         config: TargetConfig = ConfigDB().get(self, "", "FUZZ_TARGET_CONFIG")
         self.scoreboard_adapter = ObservableScoreboardAdapter(
             config,
-            _replay_orchestrator_from_config_db(self, config),
+            orchestrator=_replay_orchestrator_from_config_db(self),
         )
 
     def write(self, record: ReplayRecord) -> None:
@@ -75,12 +72,9 @@ class ReplayScoreboard(uvm_subscriber):
 class FunctionalCoverageSubscriber(uvm_subscriber):
     def build_phase(self) -> None:
         config: TargetConfig = ConfigDB().get(self, "", "FUZZ_TARGET_CONFIG")
-        default_path = Path("coverage") / f"{config.name}_uvm_functional_coverage.json"
-        output_path = Path(os.getenv("UVM_FUNCTIONAL_COVERAGE_OUT", str(default_path)))
         self.coverage_adapter = ObservableCoverageAdapter(
             config,
-            output_path,
-            _replay_orchestrator_from_config_db(self, config),
+            orchestrator=_replay_orchestrator_from_config_db(self),
         )
 
     def write(self, record: ReplayRecord) -> None:
@@ -98,9 +92,8 @@ class FunctionalCoverageSubscriber(uvm_subscriber):
 
 def _replay_orchestrator_from_config_db(
     component,
-    config: TargetConfig,
-) -> ReplayPipelineOrchestrator:
+) -> ReplayPipelineOrchestrator | None:
     try:
         return ConfigDB().get(component, "", "FUZZ_REPLAY_ORCHESTRATOR")
     except Exception:  # noqa: BLE001 - standalone component tests may not install one
-        return ReplayPipelineOrchestrator.from_env(config=config)
+        return None

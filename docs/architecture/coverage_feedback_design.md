@@ -988,7 +988,8 @@ coverage。详细数据见 [Coverage Feedback 评估](coverage_feedback_eval.md)
 
 ## Next Steps
 
-1. 将 Makefile/feedback-fuzz 接入 Layer 1/2/3 state 文件，自动串起多轮闭环。
+1. 废弃旧 `feedback_chain_*` 主入口；新增基于 `campaign_manifest.json` 的
+   `campaign-eval` / `evaluation_report.json`，用于后续报告和对比。
 2. 导出 full gap catalog 或 all gap ids，避免 Layer 2 受 `top_gaps` 截断影响。
 3. 扩展 Rust generator 支持更直接的 variable-length hex bucket directives，例如
    `message_lengths`；当前可通过显式 `cases` 覆盖代表长度。

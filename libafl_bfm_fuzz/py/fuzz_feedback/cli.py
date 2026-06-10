@@ -27,6 +27,7 @@ def main() -> int:
                 corpus=args.corpus,
                 summary_out=args.summary_out,
                 directives_out=args.directives_out,
+                heuristic_directives_out=args.heuristic_directives_out,
                 prompt_out=args.prompt_out,
                 previous_summary=args.previous_summary,
                 previous_directives=args.previous_directives,
@@ -70,6 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--corpus", type=Path, required=True)
     parser.add_argument("--summary-out", type=Path, required=True)
     parser.add_argument("--directives-out", type=Path, required=True)
+    parser.add_argument("--heuristic-directives-out", type=Path)
     parser.add_argument("--prompt-out", type=Path, required=True)
     parser.add_argument("--previous-summary", type=Path)
     parser.add_argument("--previous-directives", type=Path)

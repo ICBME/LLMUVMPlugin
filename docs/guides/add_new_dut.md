@@ -100,11 +100,20 @@ quoted `CARGO`，例如 `CARGO='cargo +nightly'`。
 UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz \
   TARGET=my_dut \
   TARGET_CONFIG=/path/to/my_dut.toml \
+  EXTRA_PYTHONPATH=/path/to/plugin/python \
+  generate-corpus
+
+UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz \
+  TARGET=my_dut \
+  TARGET_CONFIG=/path/to/my_dut.toml \
   VERILOG_SOURCES="/path/to/rtl/a.v /path/to/rtl/b.v" \
   TOPLEVEL=my_dut_top \
   EXTRA_PYTHONPATH=/path/to/plugin/python \
   sim
 ```
+
+`sim` 只负责 replay 已存在的 corpus；`coverage-run`、`feedback-fuzz` 和
+`feedback-campaign` 会由 orchestrator 自动生成并校验各自需要的 corpus。
 
 ## 8. 可选：打开 Connector 观测
 
@@ -124,12 +133,24 @@ CONNECTOR_OBSERVE_RUN_ID=my_dut_smoke
 uv run make -C libafl_bfm_fuzz \
   TARGET=my_dut \
   TARGET_CONFIG=/path/to/my_dut.toml \
+  EXTRA_PYTHONPATH=/path/to/plugin/python \
+  CONNECTOR_OBSERVE_OUT=/tmp/my_dut_events.jsonl \
+  CONNECTOR_MONITOR_OUT=/tmp/my_dut_monitor.json \
+  CONNECTOR_TOPOLOGY_OUT=/tmp/my_dut_topology.json \
+  CONNECTOR_OBSERVE_RUN_ID=my_dut_smoke \
+  CONNECTOR_OBSERVE_ROUND_ID=round_00 \
+  generate-corpus
+
+uv run make -C libafl_bfm_fuzz \
+  TARGET=my_dut \
+  TARGET_CONFIG=/path/to/my_dut.toml \
   VERILOG_SOURCES="/path/to/rtl/a.v /path/to/rtl/b.v" \
   TOPLEVEL=my_dut_top \
   CONNECTOR_OBSERVE_OUT=/tmp/my_dut_events.jsonl \
   CONNECTOR_MONITOR_OUT=/tmp/my_dut_monitor.json \
   CONNECTOR_TOPOLOGY_OUT=/tmp/my_dut_topology.json \
   CONNECTOR_OBSERVE_RUN_ID=my_dut_smoke \
+  CONNECTOR_OBSERVE_ROUND_ID=round_00 \
   sim
 ```
 
@@ -152,6 +173,9 @@ UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz \
 - `<target>_coverage_summary.json`
 - `<target>_uvm_functional_coverage.json`
 - `<target>_mutation_directives.json`
+- `<target>_feedback_corpus.jsonl`
+- `<target>_round_manifest.json`
+- `<target>_campaign/campaign_manifest.json`（使用 `feedback-campaign` 时）
 
 如果需要自定义功能覆盖率输出路径，可设置：
 

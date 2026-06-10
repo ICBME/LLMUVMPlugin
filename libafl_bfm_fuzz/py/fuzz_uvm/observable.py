@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 from typing import Any
@@ -14,39 +14,143 @@ from fuzz_uvm.scoreboards import build_scoreboard
 from fuzz_uvm.transactions import ReplayRecord
 
 
+@dataclass(frozen=True)
+class ReplayPluginBundle:
+    """Business plugin builders for a replay target."""
+
+    config: TargetConfig
+
+    def build_driver(self) -> Any:
+        return build_driver(self.config)
+
+    def build_ref_model(self) -> Any:
+        return build_ref_model(self.config)
+
+    def build_scoreboard(self) -> Any:
+        return build_scoreboard(self.config)
+
+    def build_coverage_model(self) -> Any:
+        return build_coverage_model(self.config.name, config=self.config)
+
+
+class ReplayStageAdapter:
+    """Connector-wrapped replay stages around pure plugin operations."""
+
+    def __init__(
+        self,
+        config: TargetConfig,
+        orchestrator: ReplayPipelineOrchestrator | None = None,
+        plugins: ReplayPluginBundle | None = None,
+    ):
+        self.config = config
+        self.orchestrator = orchestrator or ReplayPipelineOrchestrator.from_env(config=config)
+        self.plugins = plugins or ReplayPluginBundle(config)
+
+    def build_ref_model(self) -> Any:
+        return self.orchestrator.build_ref_model(
+            self.config,
+            self.plugins.build_ref_model,
+        )
+
+    def build_replay_driver(self) -> Any:
+        return self.orchestrator.build_replay_driver(
+            self.config,
+            self.plugins.build_driver,
+        )
+
+    def build_scoreboard(self) -> Any:
+        return self.orchestrator.build_scoreboard(
+            self.config,
+            self.plugins.build_scoreboard,
+        )
+
+    def build_coverage_model(self) -> Any:
+        return self.orchestrator.build_functional_coverage(
+            self.config,
+            self.plugins.build_coverage_model,
+        )
+
+    def functional_coverage_output(self) -> Path:
+        return self.orchestrator.functional_coverage_output(self.config)
+
+    async def reset_driver(self, target_driver: Any) -> None:
+        await self.orchestrator.reset_driver(target_driver.reset)
+
+    async def execute_case(self, target_driver: Any, case: Any, *, index: int) -> Any:
+        return await self.orchestrator.execute_case(
+            lambda: target_driver.execute(case),
+            case,
+            index=index,
+        )
+
+    def predict_ref_model(self, ref_model: Any, case: Any, *, index: int) -> Any:
+        return self.orchestrator.predict_ref_model(
+            lambda: ref_model.predict(case),
+            case,
+            index=index,
+        )
+
+    def scoreboard_write(
+        self,
+        checker: Any,
+        record: ReplayRecord,
+    ) -> Any:
+        return self.orchestrator.scoreboard_write(
+            lambda: checker.write(record),
+            record,
+            summary=checker.summary,
+        )
+
+    def scoreboard_check(self, checker: Any) -> Any:
+        return self.orchestrator.scoreboard_check(checker.check)
+
+    def scoreboard_summary(self, checker: Any) -> dict[str, Any]:
+        return self.orchestrator.scoreboard_summary(checker.summary)
+
+    def coverage_sample(
+        self,
+        model: Any,
+        record: ReplayRecord,
+        sampler: Any,
+    ) -> Any:
+        return self.orchestrator.coverage_sample(
+            lambda: sampler(model, record),
+            record,
+            summary=model.to_json,
+        )
+
+    def coverage_export(
+        self,
+        summary: dict[str, Any],
+        output_path: Path,
+        writer: Any,
+    ) -> dict[str, Any]:
+        return self.orchestrator.coverage_export(
+            lambda: writer(summary, output_path),
+            output_path=output_path,
+        )
+
+
 class ObservableReplayDriverAdapter:
     def __init__(
         self,
         config: TargetConfig,
         orchestrator: ReplayPipelineOrchestrator | None = None,
+        stage_adapter: ReplayStageAdapter | None = None,
     ):
         self.config = config
-        self.orchestrator = orchestrator or ReplayPipelineOrchestrator.from_env(config=config)
-        self.ref_model = self.orchestrator.build_ref_model(
-            config,
-            lambda: build_ref_model(config),
-        )
-        self.target_driver = self.orchestrator.build_replay_driver(
-            config,
-            lambda: build_driver(config),
-        )
+        self.stage = stage_adapter or ReplayStageAdapter(config, orchestrator)
+        self.ref_model = self.stage.build_ref_model()
+        self.target_driver = self.stage.build_replay_driver()
 
     async def reset(self) -> None:
-        await self.orchestrator.reset_driver(self.target_driver.reset)
+        await self.stage.reset_driver(self.target_driver)
 
     async def execute(self, case: Any, *, index: int) -> Any:
-        result = await self.orchestrator.execute_case(
-            lambda: self.target_driver.execute(case),
-            case,
-            index=index,
-        )
+        result = await self.stage.execute_case(self.target_driver, case, index=index)
         if self.ref_model is None:
             return result
-        expected = self.orchestrator.predict_ref_model(
-            lambda: self.ref_model.predict(case),
-            case,
-            index=index,
-        )
+        expected = self.stage.predict_ref_model(self.ref_model, case, index=index)
         return replace(result, expected=expected.expected)
 
 
@@ -55,56 +159,59 @@ class ObservableScoreboardAdapter:
         self,
         config: TargetConfig,
         orchestrator: ReplayPipelineOrchestrator | None = None,
+        stage_adapter: ReplayStageAdapter | None = None,
     ):
-        self.orchestrator = orchestrator or ReplayPipelineOrchestrator.from_env(config=config)
-        self.checker = build_scoreboard(config)
+        self.stage = stage_adapter or ReplayStageAdapter(config, orchestrator)
+        self.checker = self.stage.build_scoreboard()
 
     def write(self, record: ReplayRecord) -> None:
-        self.orchestrator.scoreboard_write(
-            lambda: self.checker.write(record),
-            record,
-            summary=self.checker.summary,
-        )
+        self.stage.scoreboard_write(self.checker, record)
 
     def check(self) -> None:
-        self.orchestrator.scoreboard_check(self.checker.check)
+        self.stage.scoreboard_check(self.checker)
 
     def summary(self) -> dict[str, Any]:
-        return self.orchestrator.scoreboard_summary(self.checker.summary)
+        return self.stage.scoreboard_summary(self.checker)
 
 
 class ObservableCoverageAdapter:
     def __init__(
         self,
         config: TargetConfig,
-        output_path: Path,
+        output_path: Path | None = None,
         orchestrator: ReplayPipelineOrchestrator | None = None,
+        stage_adapter: ReplayStageAdapter | None = None,
     ):
-        self.orchestrator = orchestrator or ReplayPipelineOrchestrator.from_env(config=config)
-        self.model = build_coverage_model(config.name, config=config)
-        self.output_path = output_path
+        self.stage = stage_adapter or ReplayStageAdapter(config, orchestrator)
+        self.model = self.stage.build_coverage_model()
+        self.output_path = output_path or self.stage.functional_coverage_output()
 
     def sample_record(self, record: ReplayRecord) -> None:
-        self.orchestrator.coverage_sample(
-            lambda: self._sample_record(record),
+        self.stage.coverage_sample(
+            self.model,
             record,
-            summary=self.model.to_json,
+            self._sample_record,
         )
 
     def export_summary(self) -> dict[str, Any]:
         summary = self.model.to_json()
-        return self.orchestrator.coverage_export(
-            lambda: self._write_summary(summary),
+        return self.stage.coverage_export(
+            summary,
             output_path=self.output_path,
+            writer=self._write_summary,
         )
 
-    def _sample_record(self, record: ReplayRecord) -> None:
-        if callable(getattr(self.model, "sample_record", None)):
-            self.model.sample_record(record)
+    def _sample_record(self, model: Any, record: ReplayRecord) -> None:
+        if callable(getattr(model, "sample_record", None)):
+            model.sample_record(record)
         elif record.error is None:
-            self.model.sample(record.case)
+            model.sample(record.case)
 
-    def _write_summary(self, summary: dict[str, Any]) -> dict[str, Any]:
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        self.output_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    def _write_summary(
+        self,
+        summary: dict[str, Any],
+        output_path: Path,
+    ) -> dict[str, Any]:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
         return summary

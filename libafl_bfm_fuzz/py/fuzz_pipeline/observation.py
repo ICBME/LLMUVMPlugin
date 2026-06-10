@@ -21,18 +21,21 @@ class ObservationRuntime:
         monitoring_out: Path | None = None,
         topology_out: Path | None = None,
         run_id: str | None = None,
+        round_id: str | None = None,
+        stage_id: str | None = None,
+        parent_event_id: str | None = None,
     ) -> "ObservationRuntime":
         observer = observer_from_env(
             observation_out,
             monitoring_path=monitoring_out,
         )
         context = ObservationContext.from_env(observer=observer)
-        if run_id:
+        if run_id or round_id or stage_id or parent_event_id:
             context = ObservationContext(
-                run_id=run_id,
-                round_id=context.round_id,
-                stage_id=context.stage_id,
-                parent_event_id=context.parent_event_id,
+                run_id=run_id or context.run_id,
+                round_id=round_id or context.round_id,
+                stage_id=stage_id or context.stage_id,
+                parent_event_id=parent_event_id or context.parent_event_id,
                 observer=context.observer,
                 strict=context.strict,
             )

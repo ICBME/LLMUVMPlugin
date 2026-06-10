@@ -93,8 +93,11 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 
 - 提供 `ObservableReplayDriverAdapter`、`ObservableScoreboardAdapter` 和
   `ObservableCoverageAdapter`。
-- pyUVM component 通过 adapter 调用 driver/ref-model/scoreboard/coverage；adapter 再委托
-  `ReplayPipelineOrchestrator` 执行观测 step，不直接创建 connector。
+- `ReplayPluginBundle` 只负责构建 driver/ref-model/scoreboard/coverage 业务插件；
+  `ReplayStageAdapter` 负责把 build/reset/execute/predict/check/sample/export 包装成
+  `ReplayPipelineOrchestrator` step。
+- pyUVM component 通过 adapter 调用 driver/ref-model/scoreboard/coverage；component 不直接
+  读取 connector env，也不决定 functional coverage artifact 路径。
 
 ## 编排契约
 
@@ -117,12 +120,16 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 
 - corpus generation、corpus validation 已由 `FuzzRunOrchestrator` 编排。
 - `coverage-run` / `coverage-report` 已由 `FuzzRunOrchestrator` 通过 run-level
-  connector 编排；Makefile 保留为薄 wrapper。
-- coverage feedback 和离线三层 feedback evaluation 已由 `PipelineOrchestrator`
-  编排。
+  connector 编排；`coverage-feedback` 已由 `FuzzRunOrchestrator` 统一入口委托到
+  `CoverageFeedbackPipeline`；`feedback-fuzz` 已由 run-level
+  `directives_to_feedback_replay` connector 串起 directives + feedback corpus replay；
+  Makefile 保留为薄 wrapper。
+- coverage feedback 内部三层 pipeline 和离线三层 feedback evaluation 已由
+  `PipelineOrchestrator` 编排。
 - pyUVM replay 仍在 cocotb/pyUVM 生命周期内执行，但 replay context、sequence、
   driver/ref-model、scoreboard 和 coverage 的 connector 创建已统一迁移到
-  `ReplayPipelineOrchestrator`；pyUVM component 与 adapter 只负责调用行为。
+  `ReplayPipelineOrchestrator`；pyUVM component 只负责 phase 内调用行为，adapter 负责
+  stage 包装。
 
 ## 后续迁移计划
 
@@ -184,34 +191,41 @@ connector，也不决定 topology 边：
 ### 优先迁移点
 
 1. 顶层 Makefile 流程迁移。
-   `coverage-run` 和 `coverage-report` 已迁入 `FuzzRunOrchestrator`；
-   后续继续将 `coverage-feedback` 和 `feedback-fuzz` 从 Makefile/Python CLI 命令串联
-   迁入 `FuzzRunOrchestrator`。Makefile 只保留
-   `$(PYTHON) scripts/run_fuzz_pipeline.py <subcommand>` 入口。
+   `coverage-run`、`coverage-report`、`coverage-feedback` 和 `feedback-fuzz` 已迁入
+   `FuzzRunOrchestrator`；`feedback-fuzz` 现在会在同一编排链路中生成单轮
+   `round_manifest.json`；`feedback-campaign` 已将多轮 mode/round 状态机迁入
+   `CampaignOrchestrator` 并生成 `campaign_manifest.json`。`sim` 现在只负责 replay
+   已存在的 corpus；corpus generation/validation 由 orchestrator 显式调度。Makefile
+   只保留 `$(PYTHON) scripts/run_fuzz_pipeline.py <subcommand>` 入口。
 
 2. 扩展 `scripts/run_fuzz_pipeline.py`。
-   已在 `generate-corpus` 之后增加 `coverage-run` 和 `coverage-report`；
-   下一阶段增加 `coverage-feedback`，继续把 summary/directives/prompt/state artifact
-   的路径、LLM 选项和 previous-round 输入收敛到同一个 `FuzzRunConfig`；之后再增加
-   `feedback-fuzz-round`、`feedback-campaign` 和 `campaign-eval`。CLI 只解析参数，
-   实际顺序由 orchestrator 决定。
+   已在 `generate-corpus` 之后增加 `coverage-run`、`coverage-report` 和
+   `coverage-feedback`；`feedback-fuzz` 已把 feedback corpus、summary、directives、
+   prompt、state artifact 的路径、LLM 选项和 previous-round 输入收敛到同一个
+   `FuzzRunConfig`，并增加 `--round-manifest-out`、`--mode`、`--round-id`。
+   `feedback-campaign` 已接入 `CampaignConfig`，负责 `--modes`、`--rounds`、上一轮
+   `round_manifest` 状态读取和 campaign manifest。之后再增加 `campaign-eval`。
+   CLI 只解析参数，实际顺序由 orchestrator 决定。
 
 3. 引入 run/round manifest。
-   每轮生成 `round_manifest.json`，记录 target、mode、round、seed、输入 directives、
-   corpus、RTL sources、sim build、coverage `.dat/.info`、functional coverage、
+   单轮 `feedback-fuzz` 已生成 `round_manifest.json`，记录 target、mode、round、seed、
+   输入 directives、corpus、RTL sources、coverage `.dat/.info`、functional coverage、
    summary、feedback state、connector event/monitor/topology 路径和命令 return code。
-   多轮 campaign 生成 `campaign_manifest.json` 和 `evaluation_report.json`。
+   `round_manifest.artifacts` 只把已物化的可选输出登记为可读状态；例如首轮没有
+   previous summary 时不会登记未生成的 `gap_feedback` / `mutation_feedback`。
+   多轮 `feedback-campaign` 已聚合每轮 manifest 为 `campaign_manifest.json`；下一阶段
+   生成 `evaluation_report.json`。
 
-4. 将 `feedback_chain_*` 脚本改成 orchestrator client。
-   这些脚本保留报告渲染逻辑，但运行 round 时调用
-   `run_fuzz_pipeline.py feedback-fuzz-round`，不再直接拼 Makefile 命令。
+4. 废弃旧 `feedback_chain_*` 评测入口。
+   `feedback_chain_compare.py`、`feedback_chain_code_only.py` 和
+   `coverage_feedback_compare.py` 不再作为主 UVM-fuzz 迁移目标。新的多轮运行使用
+   `run_fuzz_pipeline.py feedback-campaign`，新的评测/报告从 `campaign_manifest.json`
+   或后续 `evaluation_report.json` 派生。
 
 5. 拆分 pyUVM adapter。
-   当前 `ObservableReplayDriverAdapter` 同时负责构造 plugin 和把调用交给
-   `ReplayPipelineOrchestrator`。后续应拆成：
-   `ReplayPluginBundle` 负责 build driver/ref model/scoreboard/coverage；
-   `ReplayStageAdapter` 负责把 reset/execute/predict/check/sample/export 包装成
-   orchestrator step。这样插入新的 oracle、monitor、trace collector 时不需要改
+   已拆成 `ReplayPluginBundle` 和 `ReplayStageAdapter`：前者负责 build driver/ref
+   model/scoreboard/coverage，后者负责把 build/reset/execute/predict/check/sample/export
+   包装成 orchestrator step。这样插入新的 oracle、monitor、trace collector 时不需要改
    driver 业务代码。
 
 6. 保持 cocotb/pyUVM scheduler 边界。
@@ -234,6 +248,8 @@ rtl_coverage_dat -> coverage_report
 coverage_report -> coverage_artifacts
 coverage_artifacts -> coverage_summary
 mutation_directives -> feedback_replay
+round_artifacts -> round_manifest
+round_manifest -> campaign_manifest
 round_artifacts -> round_evaluation
 campaign_manifest -> evaluation_report
 ```
@@ -248,6 +264,8 @@ campaign_manifest -> evaluation_report
 - `rtl_coverage_to_coverage_report`
 - `coverage_report_to_artifacts`
 - `directives_to_feedback_replay`
+- `round_artifacts_to_round_manifest`
+- `round_manifest_to_campaign_manifest`
 - `round_artifacts_to_evaluation`
 - `campaign_to_evaluation_report`
 
@@ -269,8 +287,8 @@ timing、reference model 和 scoreboard policy 仍由 plugin 或 pyUVM component
 
 ### 迁移约束
 
-- 新 schema 和 connector additive 增加，避免破坏已有 `coverage_feedback.py`、
-  `feedback_chain_*` 和旧 summary 消费者。
+- 新 schema 和 connector additive 增加，避免破坏已有 `coverage_feedback.py` 和旧
+  summary 消费者；`feedback_chain_*` 只保留历史复现用途，不作为主流程兼容目标。
 - plugin、pyUVM component 和 feedback 业务模块不直接创建 observer，也不直接读取
   `CONNECTOR_OBSERVE_OUT` / `CONNECTOR_MONITOR_OUT`。
 - `PipelineContext.artifacts` 是跨 step 文件契约；`PipelineContext.values` 只保存
@@ -278,6 +296,53 @@ timing、reference model 和 scoreboard policy 仍由 plugin 或 pyUVM component
 - run/round/stage/case 必须进入 metadata：`run_id`、`round_id`、`stage_id`、
   `target`、`mode`、`seed`、`case index`。
 - observation 默认 fail-open；CI 或复现实验可设置 `STRICT_OBSERVATION=1`。
+
+## Round Manifest
+
+`feedback-fuzz` 默认通过 `round_artifacts_to_round_manifest` connector 写出
+`coverage/<target>_round_manifest.json`。该文件是后续 campaign/evaluation 的稳定输入，
+避免多轮脚本继续从目录名和默认文件名反推本轮状态。
+
+manifest 顶层字段包括：
+
+- `target`、`mode`、`round_id`、`run_id` 和 `cwd`。
+- `config`：seed、iters、max seeds、LLM 选项、DUT top、RTL sources 和命令 wrapper。
+- `artifacts`：corpus、feedback corpus、coverage summary、coverage `.dat/.info`、
+  coverage replay functional coverage、feedback replay functional coverage、
+  heuristic/final directives、prompt、feedback state、observation/monitor/topology
+  和 manifest 自身路径。feedback 产物只在对应 stage 实际物化后登记；观测路径属于
+  run lineage，即使 monitor summary 在 orchestrator 返回后 close 写出也会登记。
+- `stages`：coverage replay、coverage report、coverage feedback 和 feedback replay 的
+  return code 与命令。
+- `coverage` 与 `feedback`：从 summary/directives 抽取的评测快照。
+
+## Campaign Manifest
+
+`feedback-campaign` 通过 `CampaignOrchestrator` 串起多轮 `feedback-fuzz`，并在最后用
+`round_manifest_to_campaign_manifest` connector 写出 `campaign_manifest.json`。campaign
+层只处理调度状态，不进入 coverage、LLM 或 pyUVM 业务逻辑。
+
+当前支持的 mode：
+
+- `no_feedback`：每轮使用新的 seed 生成 corpus，只运行 corpus validation、coverage
+  replay/report 和 round manifest，不引用上一轮 directives/state，也不生成 feedback
+  corpus 或 feedback replay。
+- `heuristic_feedback`：第 N 轮使用第 N-1 轮 directives，并把上一轮 summary、
+  gap feedback 和 mutation feedback 传给 feedback planner。
+- `llm_feedback`：接线方式同 heuristic，但启用 LLM 路径；无可用 LLM 时仍保留
+  heuristic fallback，除非显式要求 real LLM。
+
+`campaign_manifest.json` 记录：
+
+- campaign 配置：target、modes、rounds、seed、iters、LLM 选项、RTL sources。
+- 每个 mode 下每轮 `round_manifest` 路径、上一轮 `round_manifest`、应用的上一轮
+  directives/state、coverage snapshot、feedback snapshot 和 stage return code。
+- campaign 级 observation、monitor、topology 和 manifest 路径。
+
+`CampaignOrchestrator` 在 feedback mode 中把上一轮 `round_manifest` 转换为
+`RoundManifestState`，再从 manifest 的 `artifacts` 字段读取 canonical
+`coverage_summary`、`mutation_directives`、`gap_feedback` 和 `mutation_feedback` 路径。
+因此调整 round 目录命名不会影响下一轮 previous-state 接线。
 
 ## 环境变量
 
@@ -363,6 +428,7 @@ coverage_artifacts -> coverage_summary
 coverage_summary -> mutation_feedback
 mutation_feedback -> gap_feedback
 gap_feedback -> layer1_plan
+layer1_plan -> heuristic_directives
 layer1_plan -> mutation_directives
 mutation_directives -> llm_prompt
 llm_prompt -> llm_response
@@ -375,6 +441,7 @@ llm_response -> mutation_directives
 - `summary_to_mutation_feedback`
 - `layer3_feedback_to_layer2_feedback`
 - `layer2_layer3_feedback_to_layer1_plan`
+- `layer1_plan_to_heuristic_directives`
 - `layer1_plan_to_directives`
 - `summary_to_llm_prompt`
 - `llm_prompt_to_response`
@@ -421,6 +488,7 @@ uv run make -C libafl_bfm_fuzz \
   CONNECTOR_MONITOR_OUT=coverage/component_monitor.json \
   CONNECTOR_TOPOLOGY_OUT=coverage/component_topology.json \
   CONNECTOR_OBSERVE_RUN_ID=sha256_feedback \
+  ROUND_ID=round_00 \
   feedback-fuzz
 ```
 
@@ -502,6 +570,8 @@ monitor JSON 聚合：
 - monitor 聚合与跨进程 snapshot 合并。
 - coverage feedback 事件、monitor 和 topology 导出。
 - 三层 feedback connector 导出。
+- `feedback-fuzz` 单轮 manifest 写出和 `round_artifacts_to_round_manifest` 观测。
+- `feedback-campaign` 多轮 manifest 聚合和 `round_manifest_to_campaign_manifest` 观测。
 - harness command wrapper。
 - replay context 加载观测。
 - Makefile `generate-corpus` smoke 可导出 corpus generator 和 validator 事件。

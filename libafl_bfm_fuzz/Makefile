@@ -2,7 +2,6 @@ CWD=$(shell pwd)
 TARGET ?= dut
 TARGET_CONFIG ?=
 LIBAFL_MANIFEST ?= $(CWD)/Cargo.toml
-COVERAGE_FEEDBACK ?= $(CWD)/coverage_feedback.py
 FUZZ_PIPELINE_RUN ?= $(CWD)/scripts/run_fuzz_pipeline.py
 RTL_COVERAGE ?= 0
 COVERAGE_DIR ?= $(CWD)/coverage
@@ -11,13 +10,25 @@ COVERAGE_INFO ?= $(COVERAGE_DIR)/$(TARGET)_coverage.info
 COVERAGE_ANNOTATED ?= $(COVERAGE_DIR)/$(TARGET)_annotated
 COVERAGE_SUMMARY ?= $(COVERAGE_DIR)/$(TARGET)_coverage_summary.json
 UVM_FUNCTIONAL_COVERAGE_OUT ?= $(COVERAGE_DIR)/$(TARGET)_uvm_functional_coverage.json
+FEEDBACK_UVM_FUNCTIONAL_COVERAGE_OUT ?= $(COVERAGE_DIR)/$(TARGET)_feedback_uvm_functional_coverage.json
 LLM_PROMPT ?= $(COVERAGE_DIR)/$(TARGET)_llm_prompt.json
 LLM_RESPONSE ?= $(COVERAGE_DIR)/$(TARGET)_llm_response.json
+HEURISTIC_MUTATION_DIRECTIVES ?= $(COVERAGE_DIR)/$(TARGET)_heuristic_mutation_directives.json
 MUTATION_DIRECTIVES ?= $(COVERAGE_DIR)/$(TARGET)_mutation_directives.json
 GAP_FEEDBACK ?= $(COVERAGE_DIR)/$(TARGET)_gap_feedback.json
 MUTATION_FEEDBACK ?= $(COVERAGE_DIR)/$(TARGET)_mutation_feedback.json
+ROUND_MANIFEST ?= $(COVERAGE_DIR)/$(TARGET)_round_manifest.json
+FEEDBACK_MODE ?= feedback_fuzz
+ROUND_ID ?=
+CAMPAIGN_DIR ?= $(COVERAGE_DIR)/$(TARGET)_campaign
+CAMPAIGN_MANIFEST ?= $(CAMPAIGN_DIR)/campaign_manifest.json
+CAMPAIGN_MODES ?= heuristic_feedback
+CAMPAIGN_ROUNDS ?= 2
 CONNECTOR_OBSERVE_OUT ?=
 CONNECTOR_OBSERVE_RUN_ID ?=
+CONNECTOR_OBSERVE_ROUND_ID ?= $(ROUND_ID)
+CONNECTOR_OBSERVE_STAGE_ID ?=
+CONNECTOR_OBSERVE_PARENT_EVENT_ID ?=
 CONNECTOR_MONITOR_OUT ?=
 CONNECTOR_TOPOLOGY_OUT ?=
 PREVIOUS_COVERAGE_SUMMARY ?=
@@ -25,12 +36,15 @@ PREVIOUS_MUTATION_DIRECTIVES ?=
 PREVIOUS_GAP_FEEDBACK ?=
 PREVIOUS_MUTATION_FEEDBACK ?=
 FUZZ_CORPUS ?= $(COVERAGE_DIR)/$(TARGET)_corpus.jsonl
+FEEDBACK_CORPUS ?= $(COVERAGE_DIR)/$(TARGET)_feedback_corpus.jsonl
 FUZZ_DIRECTIVES ?=
 LIBAFL_ITERS ?= 256
 LIBAFL_MAX_SEEDS ?= 32
 LIBAFL_SEED ?= 1
 LLM_FEEDBACK ?= 0
 LLM_MODEL ?=
+IGNORE_FUNCTIONAL_COVERAGE ?= 0
+VERILATOR_COVERAGE ?= verilator_coverage
 CARGO ?= cargo
 PYTHON ?= python3
 MAKE_CMD ?= make
@@ -41,8 +55,12 @@ export PYTHONPATH := $(CWD)/py:$(EXTRA_PYTHONPATH):$(PYTHONPATH)
 export LIBAFL_CORPUS := $(FUZZ_CORPUS)
 export FUZZ_TARGET := $(TARGET)
 export UVM_FUNCTIONAL_COVERAGE_OUT
+export FEEDBACK_UVM_FUNCTIONAL_COVERAGE_OUT
 export CONNECTOR_OBSERVE_OUT
 export CONNECTOR_OBSERVE_RUN_ID
+export CONNECTOR_OBSERVE_ROUND_ID
+export CONNECTOR_OBSERVE_STAGE_ID
+export CONNECTOR_OBSERVE_PARENT_EVENT_ID
 export CONNECTOR_MONITOR_OUT
 export CONNECTOR_TOPOLOGY_OUT
 ifneq ($(strip $(TARGET_CONFIG)),)
@@ -74,12 +92,12 @@ GHDL_ARGS := --ieee=synopsys
 COCOTB_HDL_TIMEUNIT = 1ns
 COCOTB_HDL_TIMEPRECISION = 1ps
 
-.PHONY: generate-corpus check check-corpus check-uvm check-all coverage-run coverage-report coverage-feedback llm-coverage-feedback feedback-fuzz llm-feedback-fuzz require-target-config require-rtl
+.PHONY: generate-corpus check check-corpus check-uvm check-all coverage-run coverage-report coverage-feedback llm-coverage-feedback feedback-fuzz llm-feedback-fuzz feedback-campaign llm-feedback-campaign require-target-config require-rtl
 
 COCOTB_MAKEFILES := $(shell cocotb-config --makefiles 2>/dev/null)
 ifneq ($(COCOTB_MAKEFILES),)
 include $(COCOTB_MAKEFILES)/Makefile.sim
-sim: require-rtl generate-corpus
+sim: require-rtl
 else
 sim:
 	@echo "cocotb-config was not found; run this target inside the pyuvm/cocotb environment." >&2
@@ -120,7 +138,7 @@ check:
 
 check-corpus: generate-corpus
 
-check-uvm: sim
+check-uvm: generate-corpus sim
 
 check-all: check
 
@@ -169,14 +187,17 @@ coverage-report: require-rtl
 		$(if $(CONNECTOR_TOPOLOGY_OUT),--topology-out $(CONNECTOR_TOPOLOGY_OUT),)
 
 coverage-feedback: coverage-report
-	$(PYTHON) $(COVERAGE_FEEDBACK) \
+	$(PYTHON) $(FUZZ_PIPELINE_RUN) coverage-feedback \
 		--target $(TARGET) \
+		$(if $(TARGET_CONFIG),--target-config $(TARGET_CONFIG),) \
+		--corpus $(FUZZ_CORPUS) \
+		--libafl-manifest $(LIBAFL_MANIFEST) \
 		--coverage-info $(COVERAGE_INFO) \
 		--coverage-dat $(COVERAGE_DAT) \
 		--functional-coverage $(UVM_FUNCTIONAL_COVERAGE_OUT) \
-		--corpus $(FUZZ_CORPUS) \
 		--summary-out $(COVERAGE_SUMMARY) \
 		--directives-out $(MUTATION_DIRECTIVES) \
+		--heuristic-directives-out $(HEURISTIC_MUTATION_DIRECTIVES) \
 		--prompt-out $(LLM_PROMPT) \
 		--gap-feedback-out $(GAP_FEEDBACK) \
 		--mutation-feedback-out $(MUTATION_FEEDBACK) \
@@ -189,15 +210,83 @@ coverage-feedback: coverage-report
 		$(if $(CONNECTOR_MONITOR_OUT),--monitoring-out $(CONNECTOR_MONITOR_OUT),) \
 		$(if $(CONNECTOR_TOPOLOGY_OUT),--topology-out $(CONNECTOR_TOPOLOGY_OUT),) \
 		$(if $(CONNECTOR_OBSERVE_RUN_ID),--observation-run-id $(CONNECTOR_OBSERVE_RUN_ID),) \
+		--cwd $(CWD) \
 		$(if $(filter 1,$(LLM_FEEDBACK)),--llm,) \
 		$(if $(LLM_MODEL),--model $(LLM_MODEL),)
 
-llm-coverage-feedback:
-	$(MAKE) TARGET=$(TARGET) TARGET_CONFIG="$(TARGET_CONFIG)" LLM_FEEDBACK=1 coverage-feedback
+llm-coverage-feedback: LLM_FEEDBACK=1
+llm-coverage-feedback: coverage-feedback
 
-feedback-fuzz: coverage-feedback
-	$(MAKE) TARGET=$(TARGET) TARGET_CONFIG="$(TARGET_CONFIG)" FUZZ_DIRECTIVES=$(MUTATION_DIRECTIVES) \
-		FUZZ_CORPUS=$(COVERAGE_DIR)/$(TARGET)_feedback_corpus.jsonl VERILOG_SOURCES="$(VERILOG_SOURCES)" TOPLEVEL="$(TOPLEVEL)" sim
+feedback-fuzz: require-rtl
+	$(PYTHON) $(FUZZ_PIPELINE_RUN) feedback-fuzz \
+		--target $(TARGET) \
+		$(if $(TARGET_CONFIG),--target-config $(TARGET_CONFIG),) \
+		--corpus $(FUZZ_CORPUS) \
+		--libafl-manifest $(LIBAFL_MANIFEST) \
+		$(if $(FUZZ_DIRECTIVES),--directives $(FUZZ_DIRECTIVES),) \
+		--iters $(LIBAFL_ITERS) \
+		--max-seeds $(LIBAFL_MAX_SEEDS) \
+		--seed $(LIBAFL_SEED) \
+		--cargo "$(CARGO)" \
+		--make "$(MAKE_CMD)" \
+		--verilog-sources "$(VERILOG_SOURCES)" \
+		--toplevel "$(TOPLEVEL)" \
+		--coverage-dir $(COVERAGE_DIR) \
+		--coverage-dat $(COVERAGE_DAT) \
+		--coverage-info $(COVERAGE_INFO) \
+		--coverage-annotated $(COVERAGE_ANNOTATED) \
+		--functional-coverage $(UVM_FUNCTIONAL_COVERAGE_OUT) \
+		--feedback-functional-coverage $(FEEDBACK_UVM_FUNCTIONAL_COVERAGE_OUT) \
+		--summary-out $(COVERAGE_SUMMARY) \
+		--directives-out $(MUTATION_DIRECTIVES) \
+		--heuristic-directives-out $(HEURISTIC_MUTATION_DIRECTIVES) \
+		--prompt-out $(LLM_PROMPT) \
+		--gap-feedback-out $(GAP_FEEDBACK) \
+		--mutation-feedback-out $(MUTATION_FEEDBACK) \
+		$(if $(PREVIOUS_COVERAGE_SUMMARY),--previous-summary $(PREVIOUS_COVERAGE_SUMMARY),) \
+		$(if $(PREVIOUS_MUTATION_DIRECTIVES),--previous-directives $(PREVIOUS_MUTATION_DIRECTIVES),) \
+		$(if $(PREVIOUS_GAP_FEEDBACK),--previous-gap-feedback $(PREVIOUS_GAP_FEEDBACK),) \
+		$(if $(PREVIOUS_MUTATION_FEEDBACK),--previous-mutation-feedback $(PREVIOUS_MUTATION_FEEDBACK),) \
+		--llm-response-out $(LLM_RESPONSE) \
+		--feedback-corpus $(FEEDBACK_CORPUS) \
+		--round-manifest-out $(ROUND_MANIFEST) \
+		--mode $(FEEDBACK_MODE) \
+		$(if $(CONNECTOR_OBSERVE_ROUND_ID),--round-id $(CONNECTOR_OBSERVE_ROUND_ID),) \
+		$(if $(CONNECTOR_OBSERVE_OUT),--observation-out $(CONNECTOR_OBSERVE_OUT),) \
+		$(if $(CONNECTOR_MONITOR_OUT),--monitoring-out $(CONNECTOR_MONITOR_OUT),) \
+		$(if $(CONNECTOR_TOPOLOGY_OUT),--topology-out $(CONNECTOR_TOPOLOGY_OUT),) \
+		$(if $(CONNECTOR_OBSERVE_RUN_ID),--observation-run-id $(CONNECTOR_OBSERVE_RUN_ID),) \
+		--cwd $(CWD) \
+		$(if $(filter 1,$(LLM_FEEDBACK)),--llm,) \
+		$(if $(LLM_MODEL),--model $(LLM_MODEL),)
 
-llm-feedback-fuzz:
-	$(MAKE) TARGET=$(TARGET) TARGET_CONFIG="$(TARGET_CONFIG)" LLM_FEEDBACK=1 feedback-fuzz
+llm-feedback-fuzz: LLM_FEEDBACK=1
+llm-feedback-fuzz: feedback-fuzz
+
+feedback-campaign: require-rtl
+	$(PYTHON) $(FUZZ_PIPELINE_RUN) feedback-campaign \
+		--target $(TARGET) \
+		$(if $(TARGET_CONFIG),--target-config $(TARGET_CONFIG),) \
+		--libafl-manifest $(LIBAFL_MANIFEST) \
+		--out-dir $(CAMPAIGN_DIR) \
+		--campaign-manifest-out $(CAMPAIGN_MANIFEST) \
+		--modes $(CAMPAIGN_MODES) \
+		--rounds $(CAMPAIGN_ROUNDS) \
+		--iters $(LIBAFL_ITERS) \
+		--max-seeds $(LIBAFL_MAX_SEEDS) \
+		--seed $(LIBAFL_SEED) \
+		--cargo "$(CARGO)" \
+		--make "$(MAKE_CMD)" \
+		--verilog-sources "$(VERILOG_SOURCES)" \
+		--toplevel "$(TOPLEVEL)" \
+		--verilator-coverage "$(VERILATOR_COVERAGE)" \
+		$(if $(CONNECTOR_OBSERVE_OUT),--observation-out $(CONNECTOR_OBSERVE_OUT),) \
+		$(if $(CONNECTOR_MONITOR_OUT),--monitoring-out $(CONNECTOR_MONITOR_OUT),) \
+		$(if $(CONNECTOR_TOPOLOGY_OUT),--topology-out $(CONNECTOR_TOPOLOGY_OUT),) \
+		$(if $(CONNECTOR_OBSERVE_RUN_ID),--observation-run-id $(CONNECTOR_OBSERVE_RUN_ID),) \
+		--cwd $(CWD) \
+		$(if $(filter 1,$(IGNORE_FUNCTIONAL_COVERAGE)),--ignore-functional-coverage,) \
+		$(if $(LLM_MODEL),--model $(LLM_MODEL),)
+
+llm-feedback-campaign: CAMPAIGN_MODES=llm_feedback
+llm-feedback-campaign: feedback-campaign

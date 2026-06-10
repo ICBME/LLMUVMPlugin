@@ -11,14 +11,15 @@
 4. [Reference Model OracleIR 评估](architecture/ref_model_oracle_ir_eval.md)
 5. [Fuzz/Replay 架构](architecture/fuzz_replay.md)
 6. [Connector Observability 架构](architecture/connector_observability.md)
-7. [Coverage Feedback 设计](architecture/coverage_feedback_design.md)
-8. [Coverage Feedback 评估](architecture/coverage_feedback_eval.md)
-9. [Target Manifest 参考](reference/target_manifest.md)
-10. [插件契约](reference/plugin_contracts.md)
-11. [Corpus 与 Mutation Directives](reference/corpus_directives.md)
-12. [接入新 DUT 指南](guides/add_new_dut.md)
-13. [Secworks 示例闭环](guides/secworks_examples.md)
-14. [设计约束](guides/design_constraints.md)
+7. [UVM-Fuzz Connector 迁移计划](architecture/uvm_fuzz_connector_migration_plan.md)
+8. [Coverage Feedback 设计](architecture/coverage_feedback_design.md)
+9. [Coverage Feedback 评估](architecture/coverage_feedback_eval.md)
+10. [Target Manifest 参考](reference/target_manifest.md)
+11. [插件契约](reference/plugin_contracts.md)
+12. [Corpus 与 Mutation Directives](reference/corpus_directives.md)
+13. [接入新 DUT 指南](guides/add_new_dut.md)
+14. [Secworks 示例闭环](guides/secworks_examples.md)
+15. [设计约束](guides/design_constraints.md)
 
 ## 文档层次
 

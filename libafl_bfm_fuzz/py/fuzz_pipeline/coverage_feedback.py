@@ -11,7 +11,6 @@ from fuzz_feedback.advisors import (
     maybe_call_llm,
     propose_directives_from_plan,
     validate_directives,
-    write_llm_prompt,
 )
 from fuzz_feedback.coverage import build_summary
 from fuzz_feedback.feedback_loop import build_gap_feedback, build_mutation_feedback
@@ -32,6 +31,7 @@ class CoverageFeedbackConfig:
     coverage_dat: Path | None = None
     functional_coverage: Path | None = None
     ignore_functional_coverage: bool = False
+    heuristic_directives_out: Path | None = None
     previous_summary: Path | None = None
     previous_directives: Path | None = None
     previous_gap_feedback: Path | None = None
@@ -42,6 +42,7 @@ class CoverageFeedbackConfig:
     llm_response_out: Path | None = None
     model: str | None = None
     topology_out: Path | None = None
+    mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -80,14 +81,7 @@ class CoverageFeedbackPipeline:
             StepSpec(
                 name="summary",
                 connector="coverage_to_summary",
-                handler=lambda _context: build_summary(
-                    config.target,
-                    config.coverage_info,
-                    config.corpus,
-                    coverage_dat=config.coverage_dat,
-                    functional_coverage=config.functional_coverage,
-                    ignore_functional_coverage=config.ignore_functional_coverage,
-                ),
+                handler=lambda _context: self._build_summary_artifact(),
                 input_roles=self._summary_input_roles(),
                 output_roles=("summary",),
                 metrics=summary_metrics,
@@ -108,11 +102,11 @@ class CoverageFeedbackPipeline:
                 StepSpec(
                     name="mutation_feedback",
                     connector="summary_to_mutation_feedback",
-                    handler=lambda step_context: build_mutation_feedback(
+                    handler=lambda step_context: self._build_mutation_feedback_artifact(
                         previous_summary,
                         step_context.values["summary"],
                         applied_directives,
-                        previous_feedback=previous_mutation_feedback,
+                        previous_mutation_feedback=previous_mutation_feedback,
                     ),
                     input_roles=self._previous_artifact_roles(
                         "previous_summary",
@@ -128,7 +122,7 @@ class CoverageFeedbackPipeline:
                 StepSpec(
                     name="gap_feedback",
                     connector="layer3_feedback_to_layer2_feedback",
-                    handler=lambda step_context: build_gap_feedback(
+                    handler=lambda step_context: self._build_gap_feedback_artifact(
                         previous_summary,
                         step_context.values["summary"],
                         applied_directives,
@@ -166,14 +160,14 @@ class CoverageFeedbackPipeline:
         heuristic = self.orchestrator.run_step(
             StepSpec(
                 name="heuristic_directives",
-                connector="layer1_plan_to_directives",
-                handler=lambda step_context: propose_directives_from_plan(
+                connector="layer1_plan_to_heuristic_directives",
+                handler=lambda step_context: self._build_heuristic_directives_artifact(
                     step_context.values["summary"],
                     step_context.values["layer1_plan"],
                     gap_feedback=gap_feedback,
                     mutation_feedback=mutation_feedback,
                 ),
-                output_roles=("directives",),
+                output_roles=("heuristic_directives",),
                 metrics=directives_metrics,
                 metadata={"source": "heuristic"},
             ),
@@ -183,7 +177,7 @@ class CoverageFeedbackPipeline:
             StepSpec(
                 name="prompt",
                 connector="summary_to_llm_prompt",
-                handler=lambda step_context: build_llm_prompt(
+                handler=lambda step_context: self._build_prompt_artifact(
                     step_context.values["summary"],
                     step_context.values["heuristic_directives"],
                     gap_feedback=gap_feedback,
@@ -195,17 +189,15 @@ class CoverageFeedbackPipeline:
             pipeline_context,
         )
 
-        final_directives = heuristic
         if config.llm:
             final_directives = self._run_llm_path(prompt, heuristic, pipeline_context)
+        else:
+            final_directives = self._materialize_final_directives(
+                heuristic,
+                pipeline_context,
+                source="heuristic",
+            )
 
-        self._write_outputs(
-            summary=summary,
-            final_directives=final_directives,
-            heuristic=heuristic,
-            gap_feedback=gap_feedback,
-            mutation_feedback=mutation_feedback,
-        )
         return CoverageFeedbackResult(
             summary=summary,
             final_directives=final_directives,
@@ -227,7 +219,7 @@ class CoverageFeedbackPipeline:
                 StepSpec(
                     name="llm_response",
                     connector="llm_prompt_to_response",
-                    handler=lambda _context: maybe_call_llm(prompt, config.model),
+                    handler=lambda _context: self._call_llm_artifact(prompt),
                     output_roles=self._optional_output_role("llm_response"),
                     metrics=lambda value: {"available": value is not None},
                     metadata={"model": config.model},
@@ -237,18 +229,18 @@ class CoverageFeedbackPipeline:
             if llm_value is None:
                 result = dict(heuristic)
                 result["source"] = "heuristic; OPENAI_API_KEY not set"
-                return result
-            if config.llm_response_out:
-                config.llm_response_out.parent.mkdir(parents=True, exist_ok=True)
-                config.llm_response_out.write_text(
-                    json.dumps(llm_value, indent=2, sort_keys=True) + "\n",
-                    encoding="utf-8",
+                return self._materialize_final_directives(
+                    result,
+                    pipeline_context,
+                    source="llm_unavailable_fallback",
                 )
             return self.orchestrator.run_step(
                 StepSpec(
                     name="final_directives",
                     connector="llm_response_to_directives",
-                    handler=lambda _context: validate_directives(config.target, llm_value),
+                    handler=lambda _context: self._validate_llm_directives_artifact(
+                        llm_value
+                    ),
                     output_roles=("directives",),
                     metrics=directives_metrics,
                 ),
@@ -257,26 +249,133 @@ class CoverageFeedbackPipeline:
         except Exception as exc:  # noqa: BLE001 - keep fuzz loop moving with heuristic fallback
             result = dict(heuristic)
             result["source"] = f"heuristic; LLM failed: {exc}"
-            return result
+            return self._materialize_final_directives(
+                result,
+                pipeline_context,
+                source="llm_failed_fallback",
+            )
 
-    def _write_outputs(
+    def _build_summary_artifact(self) -> dict[str, Any]:
+        config = self.config
+        summary = build_summary(
+            config.target,
+            config.coverage_info,
+            config.corpus,
+            coverage_dat=config.coverage_dat,
+            functional_coverage=config.functional_coverage,
+            ignore_functional_coverage=config.ignore_functional_coverage,
+        )
+        write_json(config.summary_out, summary)
+        return summary
+
+    def _build_mutation_feedback_artifact(
         self,
-        *,
+        previous_summary: dict[str, Any],
         summary: dict[str, Any],
-        final_directives: dict[str, Any],
-        heuristic: dict[str, Any],
+        applied_directives: dict[str, Any],
+        *,
+        previous_mutation_feedback: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        mutation_feedback = build_mutation_feedback(
+            previous_summary,
+            summary,
+            applied_directives,
+            previous_feedback=previous_mutation_feedback,
+        )
+        if self.config.mutation_feedback_out is not None:
+            write_json(self.config.mutation_feedback_out, mutation_feedback)
+        return mutation_feedback
+
+    def _build_gap_feedback_artifact(
+        self,
+        previous_summary: dict[str, Any],
+        summary: dict[str, Any],
+        applied_directives: dict[str, Any],
+        *,
+        previous_gap_feedback: dict[str, Any] | None,
+        mutation_feedback: dict[str, Any],
+    ) -> dict[str, Any]:
+        gap_feedback = build_gap_feedback(
+            previous_summary,
+            summary,
+            applied_directives,
+            previous_gap_feedback=previous_gap_feedback,
+            mutation_feedback=mutation_feedback,
+        )
+        if self.config.gap_feedback_out is not None:
+            write_json(self.config.gap_feedback_out, gap_feedback)
+        return gap_feedback
+
+    def _build_heuristic_directives_artifact(
+        self,
+        summary: dict[str, Any],
+        layer1_plan: dict[str, Any],
+        *,
         gap_feedback: dict[str, Any] | None,
         mutation_feedback: dict[str, Any] | None,
-    ) -> None:
-        config = self.config
-        config.summary_out.parent.mkdir(parents=True, exist_ok=True)
-        write_json(config.summary_out, summary)
-        if config.gap_feedback_out and gap_feedback is not None:
-            write_json(config.gap_feedback_out, gap_feedback)
-        if config.mutation_feedback_out and mutation_feedback is not None:
-            write_json(config.mutation_feedback_out, mutation_feedback)
-        write_json(config.directives_out, final_directives)
-        write_llm_prompt(config.prompt_out, summary, heuristic)
+    ) -> dict[str, Any]:
+        heuristic = propose_directives_from_plan(
+            summary,
+            layer1_plan,
+            gap_feedback=gap_feedback,
+            mutation_feedback=mutation_feedback,
+        )
+        write_json(self._heuristic_directives_out(), heuristic)
+        return heuristic
+
+    def _build_prompt_artifact(
+        self,
+        summary: dict[str, Any],
+        heuristic: dict[str, Any],
+        *,
+        gap_feedback: dict[str, Any] | None,
+        mutation_feedback: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        prompt = build_llm_prompt(
+            summary,
+            heuristic,
+            gap_feedback=gap_feedback,
+            mutation_feedback=mutation_feedback,
+        )
+        write_json(self.config.prompt_out, prompt)
+        return prompt
+
+    def _call_llm_artifact(self, prompt: dict[str, Any]) -> dict[str, Any] | None:
+        llm_value = maybe_call_llm(prompt, self.config.model)
+        if llm_value is not None and self.config.llm_response_out is not None:
+            write_json(self.config.llm_response_out, llm_value)
+        return llm_value
+
+    def _validate_llm_directives_artifact(
+        self,
+        llm_value: dict[str, Any],
+    ) -> dict[str, Any]:
+        final_directives = validate_directives(self.config.target, llm_value)
+        write_json(self.config.directives_out, final_directives)
+        return final_directives
+
+    def _materialize_final_directives(
+        self,
+        directives: dict[str, Any],
+        pipeline_context: PipelineContext,
+        *,
+        source: str,
+    ) -> dict[str, Any]:
+        return self.orchestrator.run_step(
+            StepSpec(
+                name="final_directives",
+                connector="layer1_plan_to_directives",
+                handler=lambda _context: self._write_directives_artifact(directives),
+                output_roles=("directives",),
+                metrics=directives_metrics,
+                metadata={"source": source},
+            ),
+            pipeline_context,
+        )
+
+    def _write_directives_artifact(self, directives: dict[str, Any]) -> dict[str, Any]:
+        write_json(self.config.directives_out, directives)
+        return directives
 
     def _pipeline_context(self) -> PipelineContext:
         config = self.config
@@ -284,6 +383,7 @@ class CoverageFeedbackPipeline:
             "coverage_info": config.coverage_info,
             "corpus": config.corpus,
             "summary": config.summary_out,
+            "heuristic_directives": self._heuristic_directives_out(),
             "directives": config.directives_out,
             "prompt": config.prompt_out,
         }
@@ -305,10 +405,13 @@ class CoverageFeedbackPipeline:
                 if path is not None
             }
         )
+        metadata = {"target": config.target}
+        if config.mode is not None:
+            metadata["mode"] = config.mode
         return PipelineContext(
             run_id=self.context.run_id,
             artifacts=artifacts,
-            metadata={"target": config.target},
+            metadata=metadata,
         )
 
     def _summary_input_roles(self) -> tuple[str, ...]:
@@ -318,6 +421,12 @@ class CoverageFeedbackPipeline:
         if self.config.functional_coverage is not None:
             roles.append("functional_coverage")
         return tuple(roles)
+
+    def _heuristic_directives_out(self) -> Path:
+        if self.config.heuristic_directives_out is not None:
+            return self.config.heuristic_directives_out
+        directives = self.config.directives_out
+        return directives.with_name(f"{directives.stem}_heuristic{directives.suffix}")
 
     def _previous_artifact_roles(self, *roles: str) -> tuple[str, ...]:
         return tuple(role for role in roles if role in self._pipeline_context().artifacts)

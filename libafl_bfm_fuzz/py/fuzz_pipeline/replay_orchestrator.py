@@ -110,6 +110,43 @@ class ReplayPipelineOrchestrator:
             self.context,
         )
 
+    def build_scoreboard(self, config: TargetConfig, handler: Callable[[], Any]) -> Any:
+        self.set_target_config(config)
+        return self.orchestrator.run_step(
+            StepSpec(
+                name="scoreboard",
+                connector="manifest_to_scoreboard",
+                handler=lambda _context: handler(),
+                input_roles=("target_manifest",),
+                metrics=lambda _value: {"scoreboard": config.scoreboard or "default"},
+            ),
+            self.context,
+        )
+
+    def build_functional_coverage(
+        self,
+        config: TargetConfig,
+        handler: Callable[[], Any],
+    ) -> Any:
+        self.set_target_config(config)
+        return self.orchestrator.run_step(
+            StepSpec(
+                name="functional_coverage",
+                connector="manifest_to_functional_coverage",
+                handler=lambda _context: handler(),
+                input_roles=("target_manifest",),
+                metrics=lambda _value: {
+                    "coverage_model": config.coverage_model or "schema_default"
+                },
+            ),
+            self.context,
+        )
+
+    def functional_coverage_output(self, config: TargetConfig) -> Path:
+        output_path = functional_coverage_output_from_env(config)
+        self.context.artifacts["functional_coverage"] = output_path
+        return output_path
+
     async def start_sequence(
         self,
         handler: Callable[[], Any],
@@ -261,8 +298,21 @@ class ReplayPipelineOrchestrator:
         )
 
 
-def replay_corpus_from_env() -> Path:
-    return Path(os.getenv("LIBAFL_CORPUS", f"coverage/{os.getenv('FUZZ_TARGET', 'dut')}_corpus.jsonl"))
+def replay_target_from_env() -> str:
+    target = os.getenv("FUZZ_TARGET")
+    if target is None and os.getenv("FUZZ_TARGET_CONFIG") is None:
+        raise RuntimeError("FUZZ_TARGET or FUZZ_TARGET_CONFIG must be set")
+    return target or "dut"
+
+
+def replay_corpus_from_env(target: str | None = None) -> Path:
+    target_name = target or os.getenv("FUZZ_TARGET", "dut")
+    return Path(os.getenv("LIBAFL_CORPUS", f"coverage/{target_name}_corpus.jsonl"))
+
+
+def functional_coverage_output_from_env(config: TargetConfig) -> Path:
+    default_path = Path("coverage") / f"{config.name}_uvm_functional_coverage.json"
+    return Path(os.getenv("UVM_FUNCTIONAL_COVERAGE_OUT", str(default_path)))
 
 
 def topology_out_from_env() -> Path | None:

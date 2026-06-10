@@ -35,6 +35,12 @@ uv run make -C libafl_bfm_fuzz \
   TARGET=secworks_aes \
   LIBAFL_ITERS=0 \
   LIBAFL_MAX_SEEDS=0 \
+  generate-corpus
+
+uv run make -C libafl_bfm_fuzz \
+  TARGET=secworks_aes \
+  LIBAFL_ITERS=0 \
+  LIBAFL_MAX_SEEDS=0 \
   VERILOG_SOURCES="$AES_RTL" \
   TOPLEVEL=aes \
   EXTRA_ARGS="-Wno-UNOPTFLAT" \
@@ -48,6 +54,12 @@ SHA-256：
 
 ```sh
 SHA_RTL="$(printf '%s ' /path/to/pyuvm/example/sha256/src/rtl/*.v)"
+uv run make -C libafl_bfm_fuzz \
+  TARGET=secworks_sha256 \
+  LIBAFL_ITERS=0 \
+  LIBAFL_MAX_SEEDS=0 \
+  generate-corpus
+
 uv run make -C libafl_bfm_fuzz \
   TARGET=secworks_sha256 \
   LIBAFL_ITERS=0 \

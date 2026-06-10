@@ -114,11 +114,21 @@ Python import path needed by your plugins:
 UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz \
   TARGET=my_dut \
   TARGET_CONFIG=/path/to/my_dut.toml \
+  EXTRA_PYTHONPATH=/path/to/plugin/python \
+  generate-corpus
+
+UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz \
+  TARGET=my_dut \
+  TARGET_CONFIG=/path/to/my_dut.toml \
   VERILOG_SOURCES="/path/to/rtl/a.v /path/to/rtl/b.v" \
   TOPLEVEL=my_dut_top \
   EXTRA_PYTHONPATH=/path/to/plugin/python \
   sim
 ```
+
+`sim` is now replay-only. Higher-level targets such as `coverage-run`,
+`coverage-report`, `feedback-fuzz`, and `feedback-campaign` generate and
+validate their corpora through `FuzzRunOrchestrator` before replaying.
 
 The replay driver plugin implements the simple `reset()` and `execute(case)`
 protocol. Optional ref-model and scoreboard plugins fill expected values and own
@@ -142,6 +152,7 @@ CONNECTOR_OBSERVE_OUT=coverage/connector_events.jsonl
 CONNECTOR_MONITOR_OUT=coverage/component_monitor.json
 CONNECTOR_TOPOLOGY_OUT=coverage/component_topology.json
 CONNECTOR_OBSERVE_RUN_ID=my_run
+CONNECTOR_OBSERVE_ROUND_ID=round_00
 ```
 
 Example:
@@ -190,38 +201,71 @@ UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz \
 ```
 
 Artifacts are written under `coverage/`, including structural RTL coverage,
-UVM functional coverage, prompt payloads, and mutation directives. Functional
-coverage defaults to `coverage/<target>_uvm_functional_coverage.json`; override
-`UVM_FUNCTIONAL_COVERAGE_OUT` to write it elsewhere. The feedback summary
-prefers that replay-exported JSON and falls back to corpus-derived schema
-coverage when it is missing.
+UVM functional coverage, prompt payloads, mutation directives, feedback corpus,
+and `coverage/<target>_round_manifest.json`. Functional coverage defaults to
+`coverage/<target>_uvm_functional_coverage.json`; override
+`UVM_FUNCTIONAL_COVERAGE_OUT` to write it elsewhere. Feedback replay writes a
+separate `coverage/<target>_feedback_uvm_functional_coverage.json` artifact by
+default, so the summary continues to describe the coverage replay input. The
+feedback summary prefers the coverage-replay JSON and falls back to
+corpus-derived schema coverage when it is missing. Heuristic directives are
+also materialized separately from final mutation directives, which keeps LLM
+refinement and fallback lineage visible in the round manifest.
 
-`coverage-report` is also routed through `scripts/run_fuzz_pipeline.py`, so the
-coverage replay process and Verilator report generation are visible as
-run-level connectors: `corpus_to_uvm_replay_process` and
-`rtl_coverage_to_coverage_report`.
+`coverage-run`, `coverage-report`, `coverage-feedback`, and `feedback-fuzz` are
+routed through `scripts/run_fuzz_pipeline.py`, so corpus generation, corpus
+validation, coverage replay, Verilator report generation, feedback planning,
+feedback corpus generation, and feedback replay are all owned by the pipeline
+orchestration layer. Run-level connectors include `corpus_generator_to_corpus`,
+`corpus_to_validation`, `corpus_to_uvm_replay_process`,
+`rtl_coverage_to_coverage_report`, and `directives_to_feedback_replay`, followed
+by `round_artifacts_to_round_manifest` when `feedback-fuzz` writes the per-round
+manifest.
 
 `coverage-feedback` also uses connector observation. The three-layer feedback
 path is visible through `summary_to_mutation_feedback`,
 `layer3_feedback_to_layer2_feedback`,
-`layer2_layer3_feedback_to_layer1_plan`, and `layer1_plan_to_directives`.
+`layer2_layer3_feedback_to_layer1_plan`,
+`layer1_plan_to_heuristic_directives`, and `layer1_plan_to_directives`.
 
-To compare baseline, heuristic feedback, and real LLM feedback across the local
-Secworks examples for multiple feedback rounds:
+For orchestrated multi-round feedback, run:
+
+```sh
+UV_CACHE_DIR=/tmp/uv-cache uv run make -C libafl_bfm_fuzz \
+  TARGET=my_dut \
+  TARGET_CONFIG=/path/to/my_dut.toml \
+  VERILOG_SOURCES="/path/to/rtl/a.v /path/to/rtl/b.v" \
+  TOPLEVEL=my_dut_top \
+  CAMPAIGN_MODES=heuristic_feedback \
+  CAMPAIGN_ROUNDS=2 \
+  feedback-campaign
+```
+
+`feedback-campaign` writes per-round manifests plus
+`coverage/<target>_campaign/campaign_manifest.json`. Use `CAMPAIGN_MODES=all`
+to run `no_feedback`, `heuristic_feedback`, and `llm_feedback` in one campaign.
+Use `IGNORE_FUNCTIONAL_COVERAGE=1` for RTL-code-coverage-only feedback. In
+feedback modes, each round consumes the previous round through
+`round_manifest.artifacts`, so previous-state wiring follows the manifest rather
+than directory naming.
+
+The legacy `feedback_chain_compare.py` and `feedback_chain_code_only.py` scripts
+are deprecated as orchestration entry points. Use `feedback-campaign` for new
+multi-round runs and consume `coverage/<target>_campaign/campaign_manifest.json`
+for follow-on evaluation.
+
+Historical comparison scripts remain available only for reproducing older
+experiments:
 
 ```sh
 uv run python libafl_bfm_fuzz/scripts/feedback_chain_compare.py --quiet --rounds 2
 ```
 
-For RTL-code-coverage-only feedback, use:
+For historical RTL-code-coverage-only comparison:
 
 ```sh
 uv run python libafl_bfm_fuzz/scripts/feedback_chain_code_only.py --quiet --rounds 2
 ```
-
-The older `coverage_feedback_compare.py` script remains useful for single-step
-smoke comparison, but the `feedback_chain_*` scripts are the current end-to-end
-evaluation entry points.
 
 LLM feedback uses LangChain's OpenAI chat integration, so LangSmith tracing can
 be enabled with `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY`.

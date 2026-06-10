@@ -60,7 +60,8 @@
 - `replay_orchestrator.py`：`ReplayPipelineOrchestrator`，负责 pyUVM replay 各组件边界的
   StepSpec 编排。
 - `run_orchestrator.py`：`FuzzRunOrchestrator`，负责顶层 corpus generation /
-  validation、coverage replay 和 Verilator coverage report 等 harness 阶段编排。
+  validation、coverage replay、Verilator coverage report 和 coverage feedback 等
+  harness 阶段编排。
 - `observation.py`：`ObservationRuntime`，统一 CLI observer/context 创建。
 - `harness.py`：Makefile 命令包装和 pyUVM replay 共用的 observation helper。
 - `coverage_feedback.py`：带 connector 的 coverage feedback pipeline。
@@ -100,21 +101,23 @@ Makefile 会把 `CARGO` 作为一个完整 wrapper 字符串传给 pipeline runn
 4. `CorpusReplaySequence` 委托 `ReplayPipelineOrchestrator` 顺序发送 case，并观测
    `case_to_replay_driver`。
 5. `ReplayDriver` 通过 `ObservableReplayDriverAdapter` 调用目标 driver plugin，并观测
-   `driver_reset_to_dut` 和 `case_to_dut`。
+   `manifest_to_replay_driver`、`driver_reset_to_dut` 和 `case_to_dut`。
 6. 可选 ref model 填充 expected，并观测 `manifest_to_ref_model` 和
    `case_to_ref_model`。
-7. Scoreboard 通过 `ObservableScoreboardAdapter` 检查 result，并观测 `driver_to_scoreboard` 和
-   `scoreboard_to_report`。
+7. Scoreboard 通过 `ObservableScoreboardAdapter` 检查 result，并观测
+   `manifest_to_scoreboard`、`driver_to_scoreboard` 和 `scoreboard_to_report`。
 8. Functional coverage subscriber 通过 `ObservableCoverageAdapter` 输出 JSON summary，并观测
-   `driver_to_functional_coverage` 和 `functional_coverage_to_summary`。默认路径为
+   `manifest_to_functional_coverage`、`driver_to_functional_coverage` 和
+   `functional_coverage_to_summary`。默认路径由 `ReplayPipelineOrchestrator` 解析为
    `coverage/<target>_uvm_functional_coverage.json`，可由
    `UVM_FUNCTIONAL_COVERAGE_OUT` 覆盖。
 
 ## Coverage Feedback Flow
 
 1. `make coverage-report` 通过 `scripts/run_fuzz_pipeline.py coverage-report`
-   调用 `FuzzRunOrchestrator`。该 orchestrator 先用
-   `corpus_to_uvm_replay_process` 包装带 RTL coverage 的 pyUVM replay，再用
+   调用 `FuzzRunOrchestrator`。该 orchestrator 先显式执行 corpus generation 和
+   validation，再用 `corpus_to_uvm_replay_process` 包装带 RTL coverage 的 pyUVM
+   replay，最后用
    `rtl_coverage_to_coverage_report` 包装 `verilator_coverage --annotate` 和
    `--write-info`。
 2. Verilator coverage 输出 `.dat` / `.info`。
@@ -122,17 +125,31 @@ Makefile 会把 `CARGO` 作为一个完整 wrapper 字符串传给 pipeline runn
    `CoverageExport(domain="rtl_structure")`。
 4. `rtl_gap.py` 从 uncovered structural coverage points 聚合 `rtl_gap_summary`，
    包含 gap id、源码上下文、evidence 和 advisor hints。
-5. `coverage.py` 汇总 uncovered line、structured coverage export、`rtl_gap_summary`、
+5. `make coverage-feedback` 通过 `scripts/run_fuzz_pipeline.py coverage-feedback`
+   调用 `FuzzRunOrchestrator`，再委托 `CoverageFeedbackPipeline` 执行 feedback 内部
+   connector；`make feedback-fuzz` 使用同一个 runner 继续串起反馈 replay。
+6. `coverage.py` 汇总 uncovered line、structured coverage export、`rtl_gap_summary`、
    functional coverage 和 stimulus summary。
    它优先读取 UVM replay 导出的 functional coverage JSON；如果文件不存在，则回退到
    从 JSONL corpus 重新计算 schema-level functional coverage。
-6. `feedback_loop.py` 可根据上一轮 summary/directives/state 生成 Layer 2 gap feedback
+7. `feedback_loop.py` 可根据上一轮 summary/directives/state 生成 Layer 2 gap feedback
    和 Layer 3 mutation feedback；没有上一轮输入时保持单轮旧行为。
-7. `advisors.py` 生成 generic directives。当前优先使用 functional coverage 中的
+8. `advisors.py` 生成 generic directives。当前优先使用 functional coverage 中的
    uncovered field/coverpoint；`mutation_planner.py` 会把清晰 `rtl_gap` 转换为
    structural directives，并把复杂 gap 放入 LLM prompt；最后回退到 sparse stimulus
    field heuristic。也可调用 LLM 生成 directives。
-8. 下一轮 `generate-corpus` 通过 `--directives` 读取 directives。
+9. `feedback-fuzz` 在 coverage feedback 后显式调用 corpus generator 读取 directives，
+   生成并校验 `<target>_feedback_corpus.jsonl`；随后通过 run-level
+   `directives_to_feedback_replay` connector replay 该 feedback corpus。单独跑下一轮时，
+   `generate-corpus` 仍可通过 `--directives` 读取 directives。
+10. 同一轮结束时，`round_artifacts_to_round_manifest` 写出
+    `<target>_round_manifest.json`，记录本轮输入、输出 artifact、coverage/feedback
+    摘要、connector observation 路径和各外部命令 return code。
+11. `make feedback-campaign` / `run_fuzz_pipeline.py feedback-campaign` 使用
+    `CampaignOrchestrator` 串起多个 mode/round，并通过
+    `round_manifest_to_campaign_manifest` 写出 `campaign_manifest.json`。feedback mode
+    的下一轮从上一轮 `round_manifest.artifacts` 读取 canonical summary/directives/state
+    路径，不再从 round 目录命名规则反推 previous state。
 
 结构化 coverage export 和 `rtl_gap` 的 schema 见
 [Coverage Feedback 设计](coverage_feedback_design.md)。
@@ -146,11 +163,12 @@ CONNECTOR_OBSERVE_OUT=coverage/connector_events.jsonl
 CONNECTOR_MONITOR_OUT=coverage/component_monitor.json
 CONNECTOR_TOPOLOGY_OUT=coverage/component_topology.json
 CONNECTOR_OBSERVE_RUN_ID=my_run
+CONNECTOR_OBSERVE_ROUND_ID=round_00
 ```
 
 事件文件记录每条 connector 的 started/finished/failed，monitor 文件聚合每个
 connector 的 started、finished、failed、duration 和最近一次 metrics。完整拓扑名为
-`libafl_bfm_fuzz`，包含 harness 和 coverage feedback 两部分。
+`libafl_bfm_fuzz`，包含 harness、coverage feedback 和 run orchestration。
 
 详见 [Connector Observability 架构](connector_observability.md)。
 
