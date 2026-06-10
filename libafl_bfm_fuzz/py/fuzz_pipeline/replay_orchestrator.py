@@ -5,11 +5,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from connector_observe import ObservationContext
+from connector_observe.observers import NullObserver
 from fuzz_bfm.target_config import TargetConfig
 
 from .harness import (
     functional_coverage_metrics,
     observation_context_from_env,
+    path_sha256,
     replay_case_metadata,
     replay_context_metrics,
     replay_result_metrics,
@@ -40,6 +42,8 @@ class ReplayPipelineOrchestrator:
             topology_out=topology_out if topology_out is not None else topology_out_from_env(),
         )
         self.orchestrator.write_topology()
+        if "corpus" in self.context.artifacts:
+            self.set_corpus(self.context.artifacts["corpus"])
 
     @classmethod
     def from_env(
@@ -59,8 +63,20 @@ class ReplayPipelineOrchestrator:
         self.context.metadata["target"] = config.name
         self.context.artifacts["target_manifest"] = config.path
 
-    def set_corpus(self, corpus: Path) -> None:
-        self.context.artifacts["corpus"] = corpus
+    def set_corpus(self, corpus: Path | str) -> None:
+        corpus_path = Path(corpus)
+        self.context.artifacts["corpus"] = corpus_path
+        self.context.metadata["corpus_path"] = str(corpus_path)
+        if not self._observation_enabled():
+            self.context.metadata.pop("corpus_sha256", None)
+            return
+        digest = path_sha256(corpus_path)
+        if digest is not None:
+            self.context.metadata["corpus_sha256"] = digest
+
+    def _observation_enabled(self) -> bool:
+        observer = self.observation_context.observer
+        return observer is not None and not isinstance(observer, NullObserver)
 
     def load_replay_context(self, handler: Callable[[], Any], *, corpus: Path) -> Any:
         self.set_corpus(corpus)

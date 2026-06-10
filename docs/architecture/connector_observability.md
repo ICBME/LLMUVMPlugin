@@ -35,6 +35,13 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 - `CompositeObserver`：同时写事件和 monitor。
 - `observer_from_env()`：从环境变量构建 observer。
 
+`py/connector_observe/trace.py`
+
+- 提供可复用的 connector event JSONL 读取、JSON artifact 读取、`span_id` / status
+  提取和 trace quality 分析。
+- 只理解通用 connector event 语义，不包含 UVM-fuzz、coverage、case 或 directive
+  业务判断。
+
 `py/fuzz_pipeline/topology.py`
 
 - 定义 `PipelineTopology`、`ComponentNode`、`ConnectorEdge`。
@@ -103,6 +110,41 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 
 - 定义 `RunEvaluationAdapter`、`CampaignEvaluationAdapter` 和 `EvaluationBackends`。
 - round/campaign evaluation 都是可替换 backend，并通过 registry stage 接入主 DAG。
+
+`py/fuzz_pipeline/harness_records.py`
+
+- 把通用 connector final event 投影为 harness execution record。
+- 负责提取 run/round/stage、artifact evidence 等 harness 级字段，但不做评测判断。
+
+`py/fuzz_pipeline/harness_metadata.py`
+
+- 定义可注入的 `HarnessMetadataExtractorProtocol`。
+- 默认 `UvmFuzzMetadataExtractor` 负责 UVM-fuzz case/directive/corpus hash 归因规则，
+  包括把 pyUVM replay `origin` 作为缺省 `directive_id`。
+
+`py/fuzz_pipeline/harness_analysis.py`
+
+- 定义可注入的 `HarnessAnalyzer` protocol。
+- 默认 `UvmFuzzHarnessAnalyzer` 负责 UVM-fuzz 业务评测，包括 connector/module、
+  failure cluster、case/directive、coverage/feedback 和 optimization hints 聚合。
+
+`py/fuzz_pipeline/harness_llm_tasks.py`
+
+- 负责把 execution records 和 evaluation report 转换为 LLM optimization dataset。
+- 后续可在这里扩展 task-level prompt/evidence/replay command，而不影响 trace core。
+
+`py/fuzz_pipeline/harness_rollup.py`
+
+- 负责把 campaign manifest、harness execution records 和 harness evaluation 聚合为
+  campaign-level trace rollup。
+- 输出跨 round 的 coverage trend、failure trend、case effectiveness 和 directive
+  effectiveness，供后续 LLM 自动优化 harness 使用。
+
+`py/fuzz_pipeline/harness_trace.py`
+
+- 保留 `HarnessTraceBuilder`、`HarnessTraceOutputs` 和 `HarnessTraceResult` 兼容入口。
+- 作为 facade 串联 trace core、record projector、业务 analyzer 和 LLM dataset builder；
+  projector、analyzer 和 dataset builder 都通过 protocol 支持注入替换。
 
 `py/fuzz_pipeline/observation.py`
 
@@ -460,21 +502,46 @@ optimization dataset，并把这些产物路径与摘要挂到 `harness_trace` �
 
 ## Harness Trace 聚合
 
-`py/fuzz_pipeline/harness_trace.py` 负责把 connector event stream 与
-round/campaign manifest 聚合为三类派生产物：
+Harness Trace 聚合被拆成多层：`connector_observe.trace` 负责通用 event/quality；
+`harness_records.py` 负责 execution record 投影；`harness_metadata.py` 负责可替换的
+case/directive/corpus 归因；`harness_analysis.py` 负责 UVM-fuzz 业务评测；
+`harness_llm_tasks.py` 负责面向 LLM 的数据视图；`harness_rollup.py` 负责 campaign
+跨轮聚合。`HarnessTraceBuilder` 仍作为兼容 facade，把 connector event stream 与
+round/campaign manifest 聚合为以下派生产物：
 
 - `<evaluation>_harness_records.jsonl`：逐 connector 终态执行记录，每条记录包含
-  run/round/stage/case、target/mode、connector、from/to layer、step、duration、status、
-  metrics、metadata、error 和 evidence path。
-- `<evaluation>_harness_evaluation.json`：按 connector、module、case、failure cluster
-  和 slowest record 聚合的评测报告，同时保留 coverage/feedback snapshot 与 manifest
-  artifacts。
+  run/round/stage/case、`span_id`、`case_id`、`directive_id`、`corpus_sha256`、
+  target/mode、connector、from/to layer、step、duration、status、metrics、metadata、
+  error 和 evidence path。
+- `<evaluation>_harness_evaluation.json`：按 connector、module、case、directive、
+  failure cluster 和 slowest record 聚合的评测报告，同时保留 coverage/feedback snapshot、
+  manifest artifacts 和 `trace_quality`。
 - `<evaluation>_llm_dataset.jsonl`：面向 LLM 自动优化 harness 的样本，优先保留失败和慢
   record，并用 artifact path 引用大文件证据。
+- `<campaign_evaluation>_campaign_rollup.json`：仅 campaign evaluation 生成，按 round、
+  coverage metric、case、directive 和 failure trend 聚合跨轮表现。
 
 聚合器只读取已存在的 JSONL/JSON artifact，不重新执行 DUT、coverage 或 feedback 逻辑。
 默认 evaluation 在读取事件前会 flush 当前 observer；如果事件文件不存在或聚合失败，主
 evaluation report 仍保持可写，`harness_trace` 只作为 additive 诊断信息。
+
+如果需要接入其它业务分析，例如 Agentic Harness Engineering 的 task 生成、跨 round
+趋势分析或外部评测服务，应注入新的 metadata extractor、record projector、
+`HarnessAnalyzer` 或 LLM dataset builder，或通过 `EvaluationBackends` 替换默认
+evaluation backend；通用 trace core 不承载业务判断。
+
+每次 connector invocation 都会生成一个 top-level `span_id`，同一次调用的
+`connector.started` 与 `connector.finished` / `connector.failed` 共享该值。聚合器通过
+`span_id` 检测 hanging span、orphan final event、重复 final event 和缺失 span 的旧事件；
+默认 round/campaign evaluation 在自身 connector 尚未 finished 时读取事件，因此会把当前
+`round_artifacts_to_evaluation` / `campaign_to_evaluation_report` 的开放 span 记入
+`ignored_hanging_spans`，避免污染 harness hanging 统计。
+
+pyUVM replay 的 case 级事件会补充稳定 `case_id`、`case_sha256`、`directive_id` 和
+`corpus_sha256`。`case_id` 优先使用显式 `case_id` / `testcase_id`；否则由 stimulus payload
+hash 派生，并排除 `origin`、`directive_id` 等观测/归因字段，避免同一 stimulus 因不同
+directive 来源被误认为不同 case。`directive_id` 优先来自 case 显式字段，缺省时使用 corpus
+generator 写入的 `origin`，以便把 directive 与后续 replay/scoreboard/coverage 行为关联起来。
 
 ## 环境变量
 
@@ -663,6 +730,7 @@ JSONL event 中常用字段：
   "from_layer": "replay_driver",
   "to_layer": "dut",
   "run_id": "sha256_feedback",
+  "span_id": "3edfd6c1-7fd3-41c3-9e8a-52e3d46a41bb",
   "duration_ms": 0.123,
   "inputs": [],
   "outputs": [],
@@ -677,7 +745,11 @@ JSONL event 中常用字段：
     "round_id": "round_01",
     "stage_id": "replay",
     "index": 0,
-    "origin": "libafl_seed"
+    "origin": "libafl_seed",
+    "case_id": "b37d0e2b8f3e9a1c",
+    "case_sha256": "...",
+    "directive_id": "libafl_seed",
+    "corpus_sha256": "..."
   },
   "status": "ok"
 }
@@ -715,8 +787,11 @@ monitor JSON 聚合：
   已有 summary/result，不重新执行 DUT 行为。
 - 多进程 Makefile 流程中，`MonitoringObserver` 会读取并合并已有 monitor snapshot，
   避免后一个进程覆盖前一个进程的汇总。
-- `HarnessTraceBuilder` 是离线聚合层，只解析 connector 终态事件和 manifest 引用；大文件
-  继续以 artifact path 形式进入 evidence，不内联到事件或 LLM dataset。
+- `HarnessTraceBuilder` 是离线聚合层，只把终态事件写成 execution record，同时读取
+  started/final span 配对信息生成 `trace_quality`；大文件继续以 artifact path 形式进入
+  evidence，不内联到事件或 LLM dataset。
+- `corpus_sha256` 只在启用 observation 时计算，并按 path/size/mtime 缓存，避免无观测默认
+  replay 路径额外扫描大型 corpus。
 - `PipelineOrchestrator` 的同步 timeout 会返回 `TimeoutError`；底层线程如果无法被
   Python 强制停止，可能仍短暂运行，因此 handler 应尽量保持幂等。
 
@@ -741,8 +816,9 @@ monitor JSON 聚合：
 - `feedback-campaign` 多轮 manifest 聚合和 `round_manifest_to_campaign_manifest` 观测。
 - `CampaignRoundScheduler` 能从上一轮 manifest 携带 directives/summary/state 到下一轮。
 - `HarnessTraceBuilder` 能把 connector events、monitor、round manifest 聚合为执行记录、
-  harness evaluation 和 LLM optimization dataset；默认 round evaluation 在发现事件文件时会
-  自动附加 `harness_trace`。
+  harness evaluation 和 LLM optimization dataset，覆盖 span_id 配对、hanging span 检测、
+  case/directive 聚合、trace quality report，以及可注入 analyzer/dataset builder；默认
+  round evaluation 在发现事件文件时会自动附加 `harness_trace`。
 - harness command wrapper。
 - replay context 加载观测。
 - Makefile `generate-corpus` smoke 可导出 corpus generator 和 validator 事件。

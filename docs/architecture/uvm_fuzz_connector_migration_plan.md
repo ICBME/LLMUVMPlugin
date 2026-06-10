@@ -149,6 +149,8 @@
    `EvaluationBackends` 可注入 round/campaign evaluation backend，让评测逻辑独立于
    run/campaign 编排。默认 evaluation 已接入 `HarnessTraceBuilder`，在存在 observation
    event 文件时自动生成 execution records、harness evaluation 和 LLM optimization dataset；
+   execution records 包含 `span_id`、`case_id`、`directive_id` 和 `corpus_sha256`，
+   harness evaluation 额外提供 hanging span、case/directive 聚合和 trace quality report；
    replacement backend 仍可完全接管这部分逻辑。
 
 5. 收紧 artifact materialization。
@@ -191,8 +193,13 @@
   stage、非法 campaign DAG 拒绝，以及 `CampaignRoundScheduler` 对上一轮 manifest state
   的传递。
 - `tests/test_harness_trace.py`：覆盖 connector events 到 harness execution records 的转换、
-  connector/module/failure/case 聚合、LLM optimization dataset 写出，以及默认 round
-  evaluation 在发现 observation events 时自动附加 `harness_trace`。
+  connector/module/failure/case/directive 聚合、hanging span 检测、trace quality report、
+  LLM optimization dataset 写出、通用 trace core 独立使用、可注入 metadata extractor、
+  analyzer/dataset builder、campaign trace rollup 写出，以及默认 round evaluation 在发现
+  observation events 时自动附加 `harness_trace`。
+- `tests/test_fuzz_observe_connector.py` / `tests/test_connector_observe.py`：覆盖 connector
+  started/final 事件共享同一 `span_id`，以及 pyUVM replay 事件携带 `case_id`、
+  `directive_id` 和 `corpus_sha256`。
 
 ## 完成标准
 

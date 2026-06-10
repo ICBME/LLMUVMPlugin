@@ -74,6 +74,8 @@ class TestConnector(unittest.TestCase):
 
         self.assertEqual(result, "ok")
         self.assertEqual([event["event_type"] for event in events], ["connector.started", "connector.finished"])
+        self.assertIsInstance(events[0]["span_id"], str)
+        self.assertEqual(events[0]["span_id"], events[-1]["span_id"])
         self.assertEqual(events[-1]["run_id"], "run-1")
         self.assertEqual(events[-1]["connector"], "demo_connector")
         self.assertEqual(events[-1]["outputs"][0]["role"], "output")
@@ -113,6 +115,7 @@ class TestConnector(unittest.TestCase):
 
         self.assertEqual(events[-1]["event_type"], "connector.failed")
         self.assertEqual(events[-1]["status"], "failed")
+        self.assertEqual(events[0]["span_id"], events[-1]["span_id"])
         self.assertEqual(events[-1]["error"]["type"], "ValueError")
 
     def test_async_observer_flushes_events(self):

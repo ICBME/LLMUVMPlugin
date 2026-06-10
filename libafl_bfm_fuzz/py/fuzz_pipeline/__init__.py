@@ -15,6 +15,17 @@ from .harness_trace import (
     HarnessTraceOutputs,
     HarnessTraceResult,
 )
+from .harness_analysis import HarnessAnalyzer, UvmFuzzHarnessAnalyzer
+from .harness_llm_tasks import (
+    HarnessLlmDatasetBuilder,
+    HarnessLlmDatasetBuilderProtocol,
+)
+from .harness_metadata import (
+    HarnessMetadataExtractorProtocol,
+    UvmFuzzMetadataExtractor,
+)
+from .harness_records import HarnessRecordProjector, HarnessRecordProjectorProtocol
+from .harness_rollup import CampaignTraceRollupBuilder, campaign_trace_rollup_path
 from .orchestrator import (
     PipelineContext,
     PipelineOrchestrator,
@@ -79,6 +90,7 @@ __all__ = [
     "CampaignConfig",
     "CampaignOrchestrator",
     "CampaignRoundScheduler",
+    "CampaignTraceRollupBuilder",
     "ConnectorEdge",
     "COVERAGE_FEEDBACK_TOPOLOGY",
     "CorpusGeneratorAdapter",
@@ -100,6 +112,12 @@ __all__ = [
     "HarnessTraceBuilder",
     "HarnessTraceOutputs",
     "HarnessTraceResult",
+    "HarnessAnalyzer",
+    "HarnessLlmDatasetBuilder",
+    "HarnessLlmDatasetBuilderProtocol",
+    "HarnessMetadataExtractorProtocol",
+    "HarnessRecordProjector",
+    "HarnessRecordProjectorProtocol",
     "ObservationRuntime",
     "PipelineContext",
     "PipelineOrchestrator",
@@ -121,7 +139,10 @@ __all__ = [
     "StepPolicy",
     "StepSpec",
     "UvmReplayAdapter",
+    "UvmFuzzMetadataExtractor",
+    "UvmFuzzHarnessAnalyzer",
     "external_command_step",
+    "campaign_trace_rollup_path",
     "normalize_campaign_modes",
     "replay_corpus_from_env",
     "run_coverage_feedback_stage_pipeline",

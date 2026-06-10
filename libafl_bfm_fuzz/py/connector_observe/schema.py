@@ -68,6 +68,7 @@ class ConnectorEvent:
     to_layer: str
     run_id: str | None = None
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    span_id: str | None = None
     timestamp_ns: int = field(default_factory=time.time_ns)
     started_at_ns: int | None = None
     duration_ms: float | None = None
@@ -90,6 +91,8 @@ class ConnectorEvent:
             "inputs": [item.to_json() for item in self.inputs],
             "outputs": [item.to_json() for item in self.outputs],
         }
+        if self.span_id is not None:
+            value["span_id"] = self.span_id
         if self.run_id is not None:
             value["run_id"] = self.run_id
         if self.started_at_ns is not None:

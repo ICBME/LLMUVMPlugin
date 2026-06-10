@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,17 @@ from .topology import FULL_FUZZ_TOPOLOGY
 _context: ObservationContext | None = None
 _owned_observer: Observer | None = None
 _topology_paths_written: set[str] = set()
+_PATH_SHA256_CACHE: dict[tuple[str, int, int], str] = {}
+_CASE_METADATA_KEYS = {
+    "case_id",
+    "case_sha256",
+    "corpus_sha256",
+    "directive",
+    "directive_id",
+    "directive_name",
+    "origin",
+    "testcase_id",
+}
 
 
 def observation_context_from_env() -> ObservationContext:
@@ -159,9 +171,72 @@ def replay_case_metadata(case: Any, *, index: int | None = None) -> dict[str, An
         "target": str(getattr(case, "target", data.get("target", ""))),
         "line_no": int(getattr(case, "line_no", 0) or 0),
         "origin": str(data.get("origin", "unknown")),
+        "case_id": case_id(case),
+        "case_sha256": case_payload_sha256(case),
     }
+    directive_id = directive_id_from_case(case)
+    if directive_id is not None:
+        value["directive_id"] = directive_id
     if index is not None:
         value["index"] = index
+    return value
+
+
+def case_id(case: Any) -> str:
+    data = getattr(case, "data", {}) or {}
+    for key in ("case_id", "testcase_id"):
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return case_payload_sha256(case)[:16]
+
+
+def case_payload_sha256(case: Any) -> str:
+    data = getattr(case, "data", {}) or {}
+    stimulus_data = {
+        str(key): value
+        for key, value in data.items()
+        if str(key) not in _CASE_METADATA_KEYS
+    }
+    payload = {
+        "target": str(getattr(case, "target", data.get("target", ""))),
+        "data": stimulus_data,
+    }
+    text = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def directive_id_from_case(case: Any) -> str | None:
+    data = getattr(case, "data", {}) or {}
+    for key in ("directive_id", "directive_name", "directive"):
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            return value
+    origin = data.get("origin")
+    if isinstance(origin, str) and origin:
+        return origin
+    return None
+
+
+def path_sha256(path: Path) -> str | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    if not path.is_file():
+        return None
+    cache_key = (str(path), stat.st_size, stat.st_mtime_ns)
+    if cache_key in _PATH_SHA256_CACHE:
+        return _PATH_SHA256_CACHE[cache_key]
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as file:
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    value = digest.hexdigest()
+    _PATH_SHA256_CACHE[cache_key] = value
     return value
 
 

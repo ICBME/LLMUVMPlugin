@@ -23,7 +23,12 @@ from fuzz_bfm.bfm_base import ReplayResult  # noqa: E402
 from fuzz_bfm.corpus import FuzzCase  # noqa: E402
 from fuzz_bfm.target_config import TargetConfig  # noqa: E402
 from fuzz_feedback import cli as feedback_cli  # noqa: E402
-from fuzz_pipeline.harness import _reset_observation_context_for_tests, run_command  # noqa: E402
+from fuzz_pipeline.harness import (  # noqa: E402
+    _reset_observation_context_for_tests,
+    case_id,
+    case_payload_sha256,
+    run_command,
+)
 from fuzz_pipeline.orchestrator import (  # noqa: E402
     PipelineContext,
     PipelineOrchestrator,
@@ -54,6 +59,28 @@ def _write_and_return(path: Path, text: str, result):
 
 
 class TestConnectorObserve(unittest.TestCase):
+    def test_case_hash_uses_stimulus_payload_not_observation_metadata(self):
+        base = FuzzCase(
+            target="demo",
+            data={"id": "dut-id", "mode": "read", "origin": "seed"},
+            line_no=1,
+        )
+        same_stimulus = FuzzCase(
+            target="demo",
+            data={
+                "id": "dut-id",
+                "mode": "read",
+                "origin": "directive_a",
+                "directive_id": "directive_a",
+                "case_id": "explicit-id",
+            },
+            line_no=2,
+        )
+
+        self.assertNotEqual(case_id(base), "dut-id")
+        self.assertEqual(case_id(same_stimulus), "explicit-id")
+        self.assertEqual(case_payload_sha256(base), case_payload_sha256(same_stimulus))
+
     def test_orchestrator_runs_step_and_records_trace_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -277,7 +304,45 @@ class TestConnectorObserve(unittest.TestCase):
         self.assertIn("case_to_dut", finished_connectors)
         self.assertIn("driver_to_scoreboard", finished_connectors)
         self.assertIn("functional_coverage_to_summary", finished_connectors)
+        dut_event = next(
+            event
+            for event in events
+            if event["event_type"] == "connector.finished"
+            and event["connector"] == "case_to_dut"
+        )
+        self.assertIn("case_id", dut_event["metadata"])
+        self.assertEqual(dut_event["metadata"]["directive_id"], "seed")
+        self.assertIn("corpus_sha256", dut_event["metadata"])
         self.assertTrue(coverage_exists)
+
+    def test_replay_pipeline_skips_corpus_hash_without_observer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "corpus.jsonl"
+            corpus.write_text('{"target":"demo","origin":"seed"}\n')
+
+            pipeline = ReplayPipelineOrchestrator(
+                observation_context=ObservationContext(),
+                pipeline_context=PipelineContext(artifacts={"corpus": corpus}),
+            )
+
+        self.assertEqual(pipeline.context.metadata["corpus_path"], str(corpus))
+        self.assertNotIn("corpus_sha256", pipeline.context.metadata)
+
+    def test_replay_pipeline_accepts_string_corpus_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "corpus.jsonl"
+            corpus.write_text('{"target":"demo","origin":"seed"}\n')
+
+            pipeline = ReplayPipelineOrchestrator(
+                observation_context=ObservationContext(),
+                pipeline_context=PipelineContext(artifacts={"corpus": str(corpus)}),
+            )
+
+        self.assertEqual(pipeline.context.artifacts["corpus"], corpus)
+        self.assertEqual(pipeline.context.metadata["corpus_path"], str(corpus))
+        self.assertNotIn("corpus_sha256", pipeline.context.metadata)
 
     def test_fuzz_run_orchestrator_generates_and_validates_corpus(self):
         with tempfile.TemporaryDirectory() as tmp:

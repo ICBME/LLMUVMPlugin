@@ -6,6 +6,7 @@ from typing import Any
 import inspect
 import os
 import time
+import uuid
 
 from .observers import NullObserver, Observer
 from .schema import (
@@ -110,6 +111,7 @@ class Connector:
 
         input_refs = normalize_artifact_refs(inputs)
         metadata = self._metadata(metadata)
+        span_id = str(uuid.uuid4())
         started_at_ns = time.time_ns()
         perf_start_ns = time.perf_counter_ns()
         self._emit(
@@ -119,6 +121,7 @@ class Connector:
                 from_layer=self.from_layer,
                 to_layer=self.to_layer,
                 run_id=self.run_id,
+                span_id=span_id,
                 started_at_ns=started_at_ns,
                 inputs=input_refs,
                 metadata=metadata,
@@ -136,6 +139,7 @@ class Connector:
                     from_layer=self.from_layer,
                     to_layer=self.to_layer,
                     run_id=self.run_id,
+                    span_id=span_id,
                     started_at_ns=started_at_ns,
                     duration_ms=duration_ms,
                     inputs=input_refs,
@@ -156,6 +160,7 @@ class Connector:
                 from_layer=self.from_layer,
                 to_layer=self.to_layer,
                 run_id=self.run_id,
+                span_id=span_id,
                 started_at_ns=started_at_ns,
                 duration_ms=duration_ms,
                 inputs=input_refs,
@@ -182,6 +187,7 @@ class Connector:
 
         input_refs = normalize_artifact_refs(inputs)
         metadata = self._metadata(metadata)
+        span_id = str(uuid.uuid4())
         started_at_ns = time.time_ns()
         perf_start_ns = time.perf_counter_ns()
         self._emit(
@@ -191,6 +197,7 @@ class Connector:
                 from_layer=self.from_layer,
                 to_layer=self.to_layer,
                 run_id=self.run_id,
+                span_id=span_id,
                 started_at_ns=started_at_ns,
                 inputs=input_refs,
                 metadata=metadata,
@@ -208,6 +215,7 @@ class Connector:
                     from_layer=self.from_layer,
                     to_layer=self.to_layer,
                     run_id=self.run_id,
+                    span_id=span_id,
                     started_at_ns=started_at_ns,
                     duration_ms=duration_ms,
                     inputs=input_refs,
@@ -228,6 +236,7 @@ class Connector:
                 from_layer=self.from_layer,
                 to_layer=self.to_layer,
                 run_id=self.run_id,
+                span_id=span_id,
                 started_at_ns=started_at_ns,
                 duration_ms=duration_ms,
                 inputs=input_refs,

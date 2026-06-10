@@ -11,6 +11,7 @@ from connector_observe import ObservationContext
 
 from .coverage_feedback import CoverageFeedbackResult
 from .harness_trace import HarnessTraceBuilder, HarnessTraceOutputs
+from .harness_rollup import CampaignTraceRollupBuilder, campaign_trace_rollup_path
 from .run_adapters import RunPathResolver
 
 
@@ -119,6 +120,7 @@ class RunEvaluationAdapter:
                     or self.paths.path_from_cwd(self.config.monitoring_out)
                 ),
                 round_manifest=self._round_manifest_path(),
+                ignored_hanging_connectors=("round_artifacts_to_evaluation",),
             ).write(outputs)
         except Exception as exc:  # noqa: BLE001 - evaluation trace is additive
             payload["harness_trace"] = {
@@ -251,6 +253,8 @@ class CampaignEvaluationAdapter:
         if observation_events is None or not observation_events.exists():
             return
         outputs = HarnessTraceOutputs.from_evaluation_path(self.path)
+        artifacts_payload = outputs.to_json()
+        campaign_rollup: dict[str, Any] | None = None
         try:
             result = HarnessTraceBuilder(
                 observation_events=observation_events,
@@ -262,7 +266,15 @@ class CampaignEvaluationAdapter:
                     artifacts.get("campaign_manifest"),
                     cwd=self.cwd,
                 ),
+                ignored_hanging_connectors=("campaign_to_evaluation_report",),
             ).write(outputs)
+            rollup_path = campaign_trace_rollup_path(self.path)
+            campaign_rollup = CampaignTraceRollupBuilder(
+                records=result.records,
+                evaluation=result.evaluation,
+                campaign_manifest=campaign_manifest,
+            ).write(rollup_path)
+            artifacts_payload["campaign_trace_rollup"] = str(rollup_path)
         except Exception as exc:  # noqa: BLE001 - evaluation trace is additive
             payload["harness_trace"] = {
                 "status": "failed",
@@ -271,10 +283,14 @@ class CampaignEvaluationAdapter:
             return
         payload["harness_trace"] = {
             "status": "ok",
-            "artifacts": outputs.to_json(),
+            "artifacts": artifacts_payload,
             "summary": result.evaluation.get("summary", {}),
             "optimization_hints": result.evaluation.get("optimization_hints", {}),
         }
+        if campaign_rollup is not None:
+            payload["harness_trace"]["campaign_rollup"] = {
+                "summary": campaign_rollup.get("summary", {}),
+            }
 
 
 def _mapping(value: object) -> dict[str, Any]:
