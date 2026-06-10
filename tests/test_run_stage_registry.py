@@ -11,8 +11,10 @@ from connector_observe import ObservationContext
 from fuzz_pipeline import (
     FuzzRunConfig,
     FuzzRunOrchestrator,
+    RunPlanProfile,
     RunStage,
     RunStageRegistry,
+    StepPolicy,
 )
 
 
@@ -97,3 +99,52 @@ def test_run_orchestrator_can_insert_custom_stage_via_registry() -> None:
 
     assert cases == ["case"]
     assert calls == ["generate", "custom:generated", "validate"]
+
+
+def test_run_profile_stage_policy_can_make_inserted_stage_optional() -> None:
+    calls: list[str] = []
+
+    class StubRun(FuzzRunOrchestrator):
+        def generate_corpus(self):
+            calls.append("generate")
+            return "generated"
+
+        def validate_corpus(self):
+            calls.append("validate")
+            return ["case"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run = StubRun(
+            FuzzRunConfig(
+                target="demo",
+                corpus=Path("corpus.jsonl"),
+                libafl_manifest=Path("Cargo.toml"),
+                cwd=Path(tmp),
+            ),
+            ObservationContext(),
+        )
+        run.register_run_stage(
+            "optional_probe",
+            lambda: RunStage(
+                name="optional_probe",
+                handler=lambda _results: (_ for _ in ()).throw(RuntimeError("boom")),
+            ),
+        )
+        run.register_run_plan_profile(
+            RunPlanProfile(
+                name="generate_and_validate",
+                stage_names=(
+                    "corpus_generation",
+                    "optional_probe",
+                    "corpus_validation",
+                ),
+                stage_policies={
+                    "optional_probe": StepPolicy(fail_main_on_step_error=False)
+                },
+            )
+        )
+
+        cases = run.generate_and_validate()
+
+    assert cases == ["case"]
+    assert calls == ["generate", "validate"]

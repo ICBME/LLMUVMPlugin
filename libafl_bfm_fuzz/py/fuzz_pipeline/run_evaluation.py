@@ -13,6 +13,28 @@ from .coverage_feedback import CoverageFeedbackResult
 from .run_adapters import RunPathResolver
 
 
+class RoundEvaluationBackend(Protocol):
+    def run_round(
+        self,
+        stage_results: dict[str, object],
+    ) -> dict[str, Any]:
+        ...
+
+
+class CampaignEvaluationBackend(Protocol):
+    def run(
+        self,
+        campaign_manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        ...
+
+
+@dataclass(frozen=True)
+class EvaluationBackends:
+    round_evaluation: RoundEvaluationBackend | None = None
+    campaign_evaluation: CampaignEvaluationBackend | None = None
+
+
 class EvaluationConfigView(Protocol):
     target: str
     mode: str | None

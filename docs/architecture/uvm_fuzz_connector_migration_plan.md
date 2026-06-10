@@ -41,10 +41,16 @@
   sanitizer、round evaluation 等模块，而不再改写默认 DAG builder。
   第四阶段已完成调度框架升级：`RunPlanProfile` 描述 run/campaign DAG profile，
   `RunBackends` 允许替换 corpus/replay/coverage backend adapter，`round_evaluation`
-  与 `campaign_evaluation` 作为 registry stage 接入；默认 profile 仍保持现有
-  `feedback_fuzz` / `no_feedback` 行为不变。
-- `CampaignOrchestrator` 已负责 mode/round 循环、上一轮 `round_manifest` 状态读取和
-  `campaign_manifest.json` 写出。
+  与 `campaign_evaluation` 作为 registry stage 接入；`EvaluationBackends` 允许替换
+  round/campaign evaluation adapter；默认 profile 仍保持现有 `feedback_fuzz` /
+  `no_feedback` 行为不变。
+  第五阶段已完成 Stage Contract 升级：`RunStage` 声明 `requires_results`、
+  `produces_results`、`input_roles`、`output_roles` 和 `policy`；`RunPlan` 在执行前
+  静态校验 result/artifact 依赖、重复 result key 和 profile policy 引用，执行时再检查
+  runtime result readiness。
+- `CampaignOrchestrator` 已负责 campaign-level plan、manifest 和 connector 包装；
+  mode/round 展开、上一轮 `round_manifest` 状态读取和每轮 `FuzzRunConfig` 构造已抽到
+  `CampaignRoundScheduler`。
 - `CoverageFeedbackPipeline` 已把 coverage summary、Layer 2/3 feedback、Layer 1 plan、
   heuristic directives、LLM response/final directives 放在 connector step 中，并由各
   step 在完成前物化自身 artifact；heuristic 草案和最终 mutation directives 使用不同
@@ -52,6 +58,50 @@
 - `ReplayPipelineOrchestrator` 已在 pyUVM 内部包装 replay context、sequence、driver、
   ref model、scoreboard 和 functional coverage 边界；`ReplayPluginBundle` 与
   `ReplayStageAdapter` 已拆分插件构建和 connector stage 包装。
+
+## 调度框架设计基线
+
+当前主 UVM-fuzz 编排框架由四层组成：
+
+- profile 层：`RunPlanProfile` 用 `stage_names` 描述 run/campaign DAG；`mode` 限制
+  profile 可用于的 run mode；`stage_policies` 允许按 stage 覆盖 timeout、fail-fast 或
+  fail-open 策略。
+- registry 层：`RunStageRegistry` 负责把 stage name 构造成 `RunStage`，并在执行前拒绝
+  unknown stage、重复注册和 factory 返回错误 name。
+- contract 层：`RunStage` 声明 `requires_results`、`produces_results`、`input_roles`、
+  `output_roles` 和 `policy`。`RunPlan.validate()` 在执行前静态检查 result/artifact
+  依赖、重复 result key 和覆盖已有 result key。
+- executor 层：`RunPlanExecutor` 在每个 stage 运行前检查 runtime result readiness，在
+  stage 返回后检查声明的 `produces_results` 是否实际写入；fail-open stage 的异常进入
+  `stage_errors`，后续不依赖失败 result 的 stage 可继续运行。
+
+默认 run profile：
+
+- `generate_and_validate`
+- `coverage_run`
+- `coverage_report`
+- `feedback_fuzz`
+- `feedback_fuzz_with_evaluation`
+- `no_feedback`
+- `no_feedback_with_evaluation`
+
+默认 campaign profile：
+
+- `campaign_manifest`
+- `campaign_with_evaluation`
+
+公开扩展点：
+
+- `FuzzRunOrchestrator.register_run_stage()` / `register_run_plan_profile()`：插入或替换
+  run-level DAG stage。
+- `CampaignOrchestrator.register_campaign_stage()` /
+  `register_campaign_plan_profile()`：插入 campaign-level stage。
+- `RunBackends`：替换 corpus generator、UVM replay、coverage report 后端。
+- `EvaluationBackends`：替换 round/campaign evaluation 后端。
+- CLI/Makefile：`--run-plan-profile`、`--campaign-plan-profile`、`--round-evaluation`、
+  `--evaluation-out`、`--campaign-evaluation-out` 以及对应 Makefile 变量
+  `RUN_PLAN_PROFILE`、`CAMPAIGN_PLAN_PROFILE`、`ROUND_EVALUATION_ENABLE`、
+  `CAMPAIGN_EVALUATION_ENABLE`。
 
 ## 迁移任务
 
@@ -82,13 +132,22 @@
    evaluation 的 profile；`FuzzRunConfig.run_plan_profile` / `CampaignConfig.run_plan_profile`
    可选择每轮 DAG，`CampaignConfig.campaign_plan_profile` 可选择 campaign-level DAG。
    `round_evaluation` 读取 `round_manifest` 作为稳定输入，`campaign_evaluation` 读取
-   `campaign_manifest`，两者均通过 connector step 写出 `evaluation_report`。
+   `campaign_manifest`，两者均通过 connector step 写出 `evaluation_report`。campaign
+   层可通过 `register_campaign_stage()` 和 `register_campaign_plan_profile()` 插入
+   自定义 campaign stage。
+   已完成第五阶段：每个默认 run/campaign stage 声明 result/artifact contract；
+   `RunPlanProfile.stage_policies` 可按 stage 覆盖基础执行策略，例如把非关键 probe 或
+   evaluation stage 设置成 fail-open。plan 构建会在执行前拒绝缺失上游 result、缺失
+   artifact role、重复 result key、profile mode 不匹配、未知 stage 和未知 policy stage；
+   执行时会再次拒绝上游 fail-open 后未实际产出的 runtime result。
 
 4. 后端 adapter 可替换。
    已完成：`RunBackends` 可注入 `CorpusGeneratorBackend`、`ReplayBackend` 和
    `CoverageReportBackend`；默认实现仍为 `CorpusGeneratorAdapter`、`UvmReplayAdapter`
    和 `CoverageReportAdapter`，继续走当前 cargo/make/verilator 行为。测试可注入 fake
    backend，后续 remote backend 或 agentic harness backend 可复用同一接口。
+   `EvaluationBackends` 可注入 round/campaign evaluation backend，让评测逻辑独立于
+   run/campaign 编排。
 
 5. 收紧 artifact materialization。
    已完成：每个 coverage feedback connector step 声明的 output artifact 会在 step
@@ -115,6 +174,20 @@
    当前 Python 环境由 `uv` 管理；每阶段至少运行 `uv run python -m py_compile`、
    Makefile dry-run、`uv run make -C libafl_bfm_fuzz check`；涉及 campaign 的变更需要跑
    小规模 `feedback-campaign` dry-run 并检查 manifest/monitor/topology。
+
+## 当前测试映射
+
+- `tests/test_run_plan.py`：覆盖 ordered execution、mapping merge、initial results、
+  静态 result/artifact contract 校验、重复 result key、runtime readiness、declared output
+  校验、fail-open policy 和 timeout 行为。
+- `tests/test_run_stage_registry.py`：覆盖 registry 插入自定义 run stage、profile policy
+  让插入 stage fail-open，以及 unknown/factory name mismatch 等 registry 约束。
+- `tests/test_run_adapters.py`：覆盖 path/cwd 解析、cargo/make/verilator command adapter
+  和 backend 替换边界。
+- `tests/test_run_profiles_evaluation.py`：覆盖 run/campaign profile 选择、mode mismatch
+  拒绝、round/campaign evaluation stage、`EvaluationBackends` 替换、自定义 campaign
+  stage、非法 campaign DAG 拒绝，以及 `CampaignRoundScheduler` 对上一轮 manifest state
+  的传递。
 
 ## 完成标准
 

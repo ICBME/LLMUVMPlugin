@@ -6,6 +6,7 @@ from .coverage_feedback import (
 from .campaign_orchestrator import (
     CampaignConfig,
     CampaignOrchestrator,
+    CampaignRoundScheduler,
     normalize_campaign_modes,
     run_feedback_campaign_pipeline,
 )
@@ -31,7 +32,13 @@ from .run_adapters import (
     RunPathResolver,
     UvmReplayAdapter,
 )
-from .run_evaluation import CampaignEvaluationAdapter, RunEvaluationAdapter
+from .run_evaluation import (
+    CampaignEvaluationAdapter,
+    CampaignEvaluationBackend,
+    EvaluationBackends,
+    RoundEvaluationBackend,
+    RunEvaluationAdapter,
+)
 from .run_plan import RunPlan, RunPlanExecutor, RunStage
 from .run_profiles import (
     DEFAULT_CAMPAIGN_PLAN_PROFILES,
@@ -66,11 +73,13 @@ __all__ = [
     "ComponentNode",
     "CampaignConfig",
     "CampaignOrchestrator",
+    "CampaignRoundScheduler",
     "ConnectorEdge",
     "COVERAGE_FEEDBACK_TOPOLOGY",
     "CorpusGeneratorAdapter",
     "CorpusGeneratorBackend",
     "CampaignEvaluationAdapter",
+    "CampaignEvaluationBackend",
     "CoverageReportAdapter",
     "CoverageReportBackend",
     "CoverageFeedbackConfig",
@@ -78,6 +87,7 @@ __all__ = [
     "DEFAULT_CAMPAIGN_PLAN_PROFILES",
     "DEFAULT_RUN_PLAN_PROFILES",
     "DEFAULT_RUN_PLAN_STAGE_NAMES",
+    "EvaluationBackends",
     "FULL_FUZZ_TOPOLOGY",
     "FuzzRunConfig",
     "FuzzRunOrchestrator",
@@ -91,6 +101,7 @@ __all__ = [
     "RegisteredRunStage",
     "RunBackends",
     "RunEvaluationAdapter",
+    "RoundEvaluationBackend",
     "RunPathResolver",
     "RunPlan",
     "RunPlanExecutor",

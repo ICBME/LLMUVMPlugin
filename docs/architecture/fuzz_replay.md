@@ -59,9 +59,22 @@
   纯逻辑 handler、外部命令和 artifact role contract 编排成可观测步骤。
 - `replay_orchestrator.py`：`ReplayPipelineOrchestrator`，负责 pyUVM replay 各组件边界的
   StepSpec 编排。
+- `run_plan.py`：`RunStage` / `RunPlan` / `RunPlanExecutor`，负责 run/campaign stage
+  contract、静态依赖校验、runtime result readiness 和 stage policy 执行。
+- `run_profiles.py`：默认 run/campaign profile，使用 stage name 列表描述
+  `feedback_fuzz`、`no_feedback`、round evaluation 和 campaign evaluation DAG。
+- `run_stage_registry.py`：把 profile 中的 stage name 解析为具体 `RunStage`，并提供
+  自定义 stage 注册入口。
+- `run_adapters.py`：corpus generator、UVM replay 和 coverage report 的可替换 backend
+  adapter。
+- `run_evaluation.py`：默认 round/campaign evaluation report adapter，以及可替换的
+  `EvaluationBackends`。
 - `run_orchestrator.py`：`FuzzRunOrchestrator`，负责顶层 corpus generation /
-  validation、coverage replay、Verilator coverage report 和 coverage feedback 等
-  harness 阶段编排。
+  validation、coverage replay、Verilator coverage report、coverage feedback、feedback
+  replay、round manifest 和 round evaluation 的 profile 编排。
+- `campaign_orchestrator.py`：`CampaignOrchestrator` 和 `CampaignRoundScheduler`，负责
+  多 mode/round 展开、上一轮 manifest state 接线、campaign manifest 和 campaign
+  evaluation。
 - `observation.py`：`ObservationRuntime`，统一 CLI observer/context 创建。
 - `harness.py`：Makefile 命令包装和 pyUVM replay 共用的 observation helper。
 - `coverage_feedback.py`：带 connector 的 coverage feedback pipeline。
@@ -150,6 +163,12 @@ Makefile 会把 `CARGO` 作为一个完整 wrapper 字符串传给 pipeline runn
     `round_manifest_to_campaign_manifest` 写出 `campaign_manifest.json`。feedback mode
     的下一轮从上一轮 `round_manifest.artifacts` 读取 canonical summary/directives/state
     路径，不再从 round 目录命名规则反推 previous state。
+12. `feedback-fuzz` 可通过 `--run-plan-profile` 选择 run DAG，通过 `--evaluation-out`
+    追加 `round_evaluation`。`feedback-campaign` 可通过 `--run-plan-profile` 选择每轮
+    DAG，通过 `--campaign-plan-profile` 选择 campaign DAG，通过 `--round-evaluation`
+    和 `--campaign-evaluation-out` 生成 round/campaign evaluation report。
+13. 默认 `feedback_fuzz` 和 `no_feedback` 行为保持与迁移前主流程一致；新增 stage 应通过
+    registry/profile 插入，并由 `RunStage` contract 声明 result/artifact 依赖。
 
 结构化 coverage export 和 `rtl_gap` 的 schema 见
 [Coverage Feedback 设计](coverage_feedback_design.md)。

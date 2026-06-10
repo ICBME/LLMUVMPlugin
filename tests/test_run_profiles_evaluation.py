@@ -9,7 +9,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "libafl_bfm_fuzz" / "py"))
 
 from connector_observe import ObservationContext
-from fuzz_pipeline import CampaignConfig, CampaignOrchestrator, FuzzRunConfig
+from fuzz_pipeline import (
+    CampaignConfig,
+    CampaignOrchestrator,
+    EvaluationBackends,
+    FuzzRunConfig,
+    RunPlanProfile,
+    RunStage,
+)
 from fuzz_pipeline.coverage_feedback import CoverageFeedbackResult
 from fuzz_pipeline.run_adapters import RunBackends
 from fuzz_pipeline.run_orchestrator import FuzzRunOrchestrator
@@ -141,6 +148,48 @@ def test_round_evaluation_appends_to_explicit_base_profile() -> None:
         assert (root / "round_evaluation.json").exists()
 
 
+class FakeRoundEvaluationBackend:
+    def __init__(self) -> None:
+        self.stage_names: list[str] = []
+
+    def run_round(self, stage_results: dict[str, object]) -> dict:
+        self.stage_names = list(stage_results)
+        return {
+            "kind": "fake.round_evaluation",
+            "stage_names": self.stage_names,
+        }
+
+
+def test_run_orchestrator_accepts_replacement_round_evaluation_backend() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        backend = FakeRoundEvaluationBackend()
+        config = FuzzRunConfig(
+            target="demo",
+            corpus=root / "corpus.jsonl",
+            libafl_manifest=root / "Cargo.toml",
+            coverage_dir=root / "coverage",
+            coverage_dat=root / "coverage" / "coverage.dat",
+            coverage_info=root / "coverage" / "coverage.info",
+            coverage_annotated=root / "coverage" / "annotated",
+            summary_out=root / "summary.json",
+            directives_out=root / "directives.json",
+            prompt_out=root / "prompt.json",
+            feedback_corpus=root / "feedback_corpus.jsonl",
+            round_manifest_out=root / "round_manifest.json",
+            evaluation_out=root / "round_evaluation.json",
+        )
+
+        result = StubFeedbackRun(
+            config,
+            ObservationContext(),
+            evaluation_backends=EvaluationBackends(round_evaluation=backend),
+        ).feedback_fuzz()
+
+        assert result["round_evaluation"]["kind"] == "fake.round_evaluation"
+        assert backend.stage_names[-1] == "round_manifest"
+
+
 def test_run_profile_mode_mismatch_is_rejected() -> None:
     config = FuzzRunConfig(
         target="demo",
@@ -262,3 +311,193 @@ def test_campaign_profile_can_insert_campaign_evaluation_stage() -> None:
         evaluation_path = root / "campaign" / "evaluation.json"
         assert manifest["artifacts"]["evaluation_report"] == str(evaluation_path)
         assert evaluation_path.exists()
+
+
+class FakeCampaignEvaluationBackend:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.manifest: dict | None = None
+
+    def run(self, campaign_manifest: dict) -> dict:
+        self.manifest = campaign_manifest
+        payload = {
+            "kind": "fake.campaign_evaluation",
+            "summary": {
+                "mode_count": len(campaign_manifest.get("modes", [])),
+                "round_count": sum(
+                    len(mode.get("rounds", []))
+                    for mode in campaign_manifest.get("modes", [])
+                ),
+            },
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text("fake evaluation\n", encoding="utf-8")
+        return payload
+
+
+def test_campaign_orchestrator_accepts_replacement_campaign_evaluation_backend() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        evaluation_path = root / "campaign" / "evaluation.json"
+        backend = FakeCampaignEvaluationBackend(evaluation_path)
+        campaign = StubCampaign(
+            CampaignConfig(
+                target="demo",
+                out_dir=root / "campaign",
+                libafl_manifest=root / "Cargo.toml",
+                modes=("heuristic_feedback",),
+                campaign_evaluation_out=evaluation_path,
+            ),
+            ObservationContext(),
+            evaluation_backends=EvaluationBackends(campaign_evaluation=backend),
+        )
+
+        manifest = campaign.run()
+
+        assert backend.manifest is not None
+        assert backend.manifest["target"] == "demo"
+        assert manifest["artifacts"]["evaluation_report"] == str(evaluation_path)
+        assert evaluation_path.read_text(encoding="utf-8") == "fake evaluation\n"
+
+
+def test_campaign_orchestrator_can_insert_custom_campaign_stage() -> None:
+    calls: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        campaign = StubCampaign(
+            CampaignConfig(
+                target="demo",
+                out_dir=root / "campaign",
+                libafl_manifest=root / "Cargo.toml",
+                modes=("heuristic_feedback",),
+                campaign_plan_profile="manifest_with_custom_stage",
+            ),
+            ObservationContext(),
+        )
+        campaign.register_campaign_stage(
+            "custom_campaign_stage",
+            lambda: RunStage(
+                name="custom_campaign_stage",
+                handler=lambda results: calls.append(
+                    results["campaign_manifest"]["target"]
+                )
+                or {"ok": True},
+            ),
+        )
+        campaign.register_campaign_plan_profile(
+            RunPlanProfile(
+                name="manifest_with_custom_stage",
+                stage_names=("campaign_manifest", "custom_campaign_stage"),
+            )
+        )
+
+        manifest = campaign.run()
+
+        assert manifest["target"] == "demo"
+        assert calls == ["demo"]
+
+
+def test_campaign_profile_rejects_missing_campaign_manifest_dependency() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        campaign = StubCampaign(
+            CampaignConfig(
+                target="demo",
+                out_dir=root / "campaign",
+                libafl_manifest=root / "Cargo.toml",
+                modes=("heuristic_feedback",),
+                campaign_plan_profile="evaluation_without_manifest",
+                campaign_evaluation_out=root / "campaign" / "evaluation.json",
+            ),
+            ObservationContext(),
+            campaign_plan_profiles={
+                "evaluation_without_manifest": RunPlanProfile(
+                    name="evaluation_without_manifest",
+                    stage_names=("campaign_evaluation",),
+                )
+            },
+        )
+
+        try:
+            campaign.run()
+        except ValueError as exc:
+            assert "missing required result key" in str(exc)
+            assert "campaign_manifest" in str(exc)
+        else:
+            raise AssertionError("campaign profile should require campaign_manifest")
+
+
+class RecordingCampaignRun:
+    instances: list["RecordingCampaignRun"] = []
+
+    def __init__(
+        self,
+        config: FuzzRunConfig,
+        observation_context: ObservationContext,
+        **_kwargs,
+    ) -> None:
+        self.config = config
+        self.observation_context = observation_context
+        RecordingCampaignRun.instances.append(self)
+
+    def feedback_fuzz(self) -> dict:
+        return self._result("feedback_fuzz")
+
+    def no_feedback_round(self) -> dict:
+        return self._result("no_feedback")
+
+    def _result(self, stage_name: str) -> dict:
+        artifacts = {
+            "round_manifest": str(self.config.round_manifest_out),
+            "corpus": str(self.config.corpus),
+        }
+        if self.config.summary_out is not None:
+            artifacts["coverage_summary"] = str(self.config.summary_out)
+        if self.config.directives_out is not None:
+            artifacts["mutation_directives"] = str(self.config.directives_out)
+        if self.config.gap_feedback_out is not None:
+            artifacts["gap_feedback"] = str(self.config.gap_feedback_out)
+        if self.config.mutation_feedback_out is not None:
+            artifacts["mutation_feedback"] = str(self.config.mutation_feedback_out)
+        return {
+            "round_manifest": {
+                "kind": "libafl_bfm_fuzz.round_manifest",
+                "round_id": self.config.round_id,
+                "cwd": str(self.config.cwd) if self.config.cwd is not None else None,
+                "artifacts": artifacts,
+                "coverage": {"uncovered_line_count": 1},
+                "feedback": {"directive_count": 1},
+                "stages": {stage_name: {"returncode": 0}},
+            }
+        }
+
+
+def test_campaign_round_scheduler_carries_previous_manifest_state() -> None:
+    RecordingCampaignRun.instances = []
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        campaign = CampaignOrchestrator(
+            CampaignConfig(
+                target="demo",
+                out_dir=root / "campaign",
+                libafl_manifest=root / "Cargo.toml",
+                modes=("heuristic_feedback",),
+                rounds=2,
+            ),
+            ObservationContext(),
+            run_orchestrator_factory=RecordingCampaignRun,
+        )
+
+        manifest = campaign.run()
+
+        assert len(RecordingCampaignRun.instances) == 2
+        first = RecordingCampaignRun.instances[0].config
+        second = RecordingCampaignRun.instances[1].config
+        assert first.directives is None
+        assert second.directives == first.directives_out
+        assert second.previous_directives == first.directives_out
+        assert second.previous_summary == first.summary_out
+        rounds = manifest["modes"][0]["rounds"]
+        assert rounds[0]["previous_round_manifest"] is None
+        assert rounds[1]["applied_directives"] == str(first.directives_out)
+        assert rounds[1]["previous_summary"] == str(first.summary_out)

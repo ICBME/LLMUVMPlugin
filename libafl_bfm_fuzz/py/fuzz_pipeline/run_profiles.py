@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping
+
+from .orchestrator import StepPolicy
 
 
 @dataclass(frozen=True)
@@ -12,6 +14,7 @@ class RunPlanProfile:
     stage_names: tuple[str, ...]
     description: str = ""
     mode: str | None = None
+    stage_policies: Mapping[str, StepPolicy] = field(default_factory=dict)
 
 
 DEFAULT_RUN_PLAN_PROFILES: Mapping[str, RunPlanProfile] = {

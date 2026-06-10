@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -30,7 +31,7 @@ from .run_adapters import (
     RunPathResolver,
     UvmReplayAdapter,
 )
-from .run_evaluation import RunEvaluationAdapter
+from .run_evaluation import EvaluationBackends, RunEvaluationAdapter
 from .run_plan import RunPlan, RunPlanExecutor, RunResults, RunStage
 from .run_profiles import (
     DEFAULT_RUN_PLAN_PROFILES,
@@ -102,6 +103,7 @@ class FuzzRunOrchestrator:
         plan_stage_names: Mapping[str, Sequence[str]] | None = None,
         plan_profiles: Mapping[str, RunPlanProfile] | None = None,
         backends: RunBackends | None = None,
+        evaluation_backends: EvaluationBackends | None = None,
     ):
         self.config = config
         self.observation_context = observation_context or observation_context_from_env()
@@ -127,11 +129,14 @@ class FuzzRunOrchestrator:
             config,
             self.paths,
         )
-        self.evaluation = RunEvaluationAdapter(
-            config,
-            self.paths,
-            self.observation_context,
-            round_id=self._round_id,
+        evaluation_backends = evaluation_backends or EvaluationBackends()
+        self.evaluation = evaluation_backends.round_evaluation or (
+            RunEvaluationAdapter(
+                config,
+                self.paths,
+                self.observation_context,
+                round_id=self._round_id,
+            )
         )
         self.orchestrator = PipelineOrchestrator(
             topology,
@@ -326,9 +331,39 @@ class FuzzRunOrchestrator:
             if stage_names is not None
             else self._stage_names(name, expected_mode=expected_mode)
         )
-        return RunPlan(
+        stages = self._apply_profile_policies(
+            name,
+            self.run_stage_registry.build_many(names),
+        )
+        plan = RunPlan(
             name=name,
-            stages=self.run_stage_registry.build_many(names),
+            stages=stages,
+            initial_artifact_roles=tuple(self.context.artifacts),
+        )
+        plan.validate()
+        return plan
+
+    def _apply_profile_policies(
+        self,
+        name: str,
+        stages: tuple[RunStage, ...],
+    ) -> tuple[RunStage, ...]:
+        profile = self.plan_profiles.get(name)
+        if profile is None or not profile.stage_policies:
+            return stages
+        names = {stage.name for stage in stages}
+        unknown = sorted(set(profile.stage_policies) - names)
+        if unknown:
+            raise ValueError(
+                f"run plan profile {name!r} declares policy for unknown "
+                f"stage(s): {unknown}"
+            )
+        return tuple(
+            replace(
+                stage,
+                policy=profile.stage_policies.get(stage.name, stage.policy),
+            )
+            for stage in stages
         )
 
     def register_run_stage(
@@ -409,42 +444,71 @@ class FuzzRunOrchestrator:
                 "corpus_generation": lambda: self._stage(
                     "corpus_generation",
                     self.generate_corpus,
+                    input_roles=self._generator_input_roles(),
+                    output_roles=("corpus",),
                 ),
                 "corpus_validation": lambda: self._stage(
                     "corpus_validation",
                     self.validate_corpus,
+                    input_roles=("corpus",),
+                    output_roles=("corpus",),
                 ),
                 "coverage_run": lambda: self._stage(
                     "coverage_run",
                     self.coverage_run,
+                    requires_results=("corpus_validation",),
+                    input_roles=("corpus",),
+                    output_roles=("rtl_coverage_dat", "replay_artifacts"),
                 ),
                 "coverage_report": lambda: self._merge_stage(
                     "coverage_report",
                     self.generate_coverage_report,
+                    requires_results=("coverage_run",),
+                    produces_results=("annotate", "write_info"),
+                    input_roles=("rtl_coverage_dat",),
+                    output_roles=("coverage_info", "coverage_annotated"),
                 ),
                 "coverage_feedback": lambda: self._stage(
                     "coverage_feedback",
                     self.coverage_feedback,
+                    requires_results=("annotate", "write_info"),
+                    input_roles=("coverage_info", "corpus"),
+                    output_roles=self._coverage_feedback_output_roles(),
                 ),
                 "feedback_corpus_generation": lambda: self._stage(
                     "feedback_corpus_generation",
                     self.generate_feedback_corpus,
+                    requires_results=("coverage_feedback",),
+                    input_roles=self._feedback_generator_input_roles(),
+                    output_roles=("corpus",),
                 ),
                 "feedback_corpus_validation": lambda: self._stage(
                     "feedback_corpus_validation",
                     self.validate_feedback_corpus,
+                    requires_results=("feedback_corpus_generation",),
+                    input_roles=("corpus",),
+                    output_roles=("corpus",),
                 ),
                 "feedback_replay": lambda: self._stage(
                     "feedback_replay",
                     self.feedback_replay,
+                    requires_results=("feedback_corpus_validation",),
+                    input_roles=("directives", "corpus"),
+                    output_roles=("replay_artifacts",),
                 ),
                 "round_manifest": lambda: self._result_stage(
                     "round_manifest",
                     self.write_round_manifest,
+                    requires_results=("annotate", "write_info"),
+                    input_roles=("corpus",),
+                    output_roles=("round_manifest",),
                 ),
                 "round_evaluation": lambda: self._result_stage(
                     "round_evaluation",
                     self.write_round_evaluation,
+                    requires_results=("round_manifest",),
+                    input_roles=("round_manifest",),
+                    output_roles=("evaluation_report",),
                 ),
             }
         )
@@ -453,32 +517,66 @@ class FuzzRunOrchestrator:
         self,
         name: str,
         handler,
+        *,
+        requires_results: tuple[str, ...] = (),
+        produces_results: tuple[str, ...] | None = None,
+        input_roles: tuple[str, ...] = (),
+        output_roles: tuple[str, ...] = (),
     ) -> RunStage:
         return RunStage(
             name=name,
             handler=lambda _results: handler(),
+            requires_results=requires_results,
+            produces_results=produces_results or (name,),
+            input_roles=input_roles,
+            output_roles=output_roles,
         )
 
     def _merge_stage(
         self,
         name: str,
         handler,
+        *,
+        requires_results: tuple[str, ...] = (),
+        produces_results: tuple[str, ...] = (),
+        input_roles: tuple[str, ...] = (),
+        output_roles: tuple[str, ...] = (),
     ) -> RunStage:
         return RunStage(
             name=name,
             handler=lambda _results: handler(),
             merge_mapping=True,
+            requires_results=requires_results,
+            produces_results=produces_results,
+            input_roles=input_roles,
+            output_roles=output_roles,
         )
 
     def _result_stage(
         self,
         name: str,
         handler,
+        *,
+        requires_results: tuple[str, ...] = (),
+        produces_results: tuple[str, ...] | None = None,
+        input_roles: tuple[str, ...] = (),
+        output_roles: tuple[str, ...] = (),
     ) -> RunStage:
         return RunStage(
             name=name,
             handler=handler,
+            requires_results=requires_results,
+            produces_results=produces_results or (name,),
+            input_roles=input_roles,
+            output_roles=output_roles,
         )
+
+    def _coverage_feedback_output_roles(self) -> tuple[str, ...]:
+        roles = ["summary", "directives", "heuristic_directives", "prompt"]
+        for role in ("gap_feedback", "mutation_feedback", "llm_response"):
+            if role in self.context.artifacts:
+                roles.append(role)
+        return tuple(roles)
 
     def write_round_manifest(
         self,
