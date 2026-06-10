@@ -157,6 +157,8 @@ def add_feedback_fuzz_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", default=None)
     parser.add_argument("--feedback-corpus", type=Path, required=True)
     parser.add_argument("--round-manifest-out", type=Path)
+    parser.add_argument("--run-plan-profile")
+    parser.add_argument("--evaluation-out", type=Path)
     parser.add_argument("--mode", default="feedback_fuzz")
     parser.add_argument("--round-id")
     parser.add_argument("--ignore-functional-coverage", action="store_true")
@@ -171,6 +173,10 @@ def add_feedback_campaign_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--libafl-manifest", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--campaign-manifest-out", type=Path)
+    parser.add_argument("--run-plan-profile")
+    parser.add_argument("--campaign-plan-profile")
+    parser.add_argument("--round-evaluation", action="store_true")
+    parser.add_argument("--campaign-evaluation-out", type=Path)
     parser.add_argument("--modes", default="heuristic_feedback")
     parser.add_argument("--rounds", type=int, default=2)
     parser.add_argument("--iters", type=int, default=256)
@@ -283,20 +289,32 @@ def feedback_fuzz(args: argparse.Namespace) -> int:
         runtime.close()
     if args.mode == "no_feedback":
         replay = result["coverage_run"]
+        evaluation = result.get("round_evaluation")
         print(
             f"feedback fuzz: target={args.target} mode=no_feedback "
             f"coverage_returncode={replay.returncode} "
             f"round_manifest={args.round_manifest_out}"
+            + (
+                f" evaluation={args.evaluation_out}"
+                if evaluation is not None
+                else ""
+            )
         )
     else:
         feedback = result["coverage_feedback"]
         replay = result["feedback_replay"]
+        evaluation = result.get("round_evaluation")
         print(
             f"feedback fuzz: target={args.target} "
             f"feedback_corpus={args.feedback_corpus} "
             f"directives={len(feedback.final_directives['directives'])} "
             f"replay_returncode={replay.returncode} "
             f"round_manifest={args.round_manifest_out}"
+            + (
+                f" evaluation={args.evaluation_out}"
+                if evaluation is not None
+                else ""
+            )
         )
     return 0
 
@@ -321,6 +339,11 @@ def feedback_campaign(args: argparse.Namespace) -> int:
         f"modes={','.join(manifest.get('mode_names', []))} "
         f"rounds={round_count} "
         f"campaign_manifest={manifest['artifacts']['campaign_manifest']}"
+        + (
+            f" evaluation={args.campaign_evaluation_out}"
+            if args.campaign_evaluation_out is not None
+            else ""
+        )
     )
     return 0
 
@@ -429,6 +452,8 @@ def feedback_fuzz_config(
         mode=args.mode,
         round_id=args.round_id,
         round_manifest_out=args.round_manifest_out,
+        run_plan_profile=args.run_plan_profile,
+        evaluation_out=args.evaluation_out,
         observation_out=path_from_cwd(args.observation_out, args.cwd),
         monitoring_out=path_from_cwd(args.monitoring_out, args.cwd),
     )
@@ -464,6 +489,10 @@ def feedback_campaign_config(
         observation_out=path_from_cwd(args.observation_out, args.cwd),
         monitoring_out=path_from_cwd(args.monitoring_out, args.cwd),
         campaign_manifest_out=args.campaign_manifest_out,
+        run_plan_profile=args.run_plan_profile,
+        campaign_plan_profile=args.campaign_plan_profile,
+        round_evaluation=args.round_evaluation,
+        campaign_evaluation_out=args.campaign_evaluation_out,
         ignore_functional_coverage=args.ignore_functional_coverage,
         llm_model=args.model,
         require_real_llm=args.require_real_llm,

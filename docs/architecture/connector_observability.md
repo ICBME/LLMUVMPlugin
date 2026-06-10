@@ -250,7 +250,7 @@ coverage_artifacts -> coverage_summary
 mutation_directives -> feedback_replay
 round_artifacts -> round_manifest
 round_manifest -> campaign_manifest
-round_artifacts -> round_evaluation
+round_manifest -> round_evaluation
 campaign_manifest -> evaluation_report
 ```
 

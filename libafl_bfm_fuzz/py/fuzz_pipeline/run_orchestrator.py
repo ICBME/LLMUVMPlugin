@@ -4,10 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-import shlex
-import shutil
 import subprocess
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from connector_observe import ObservationContext
 from fuzz_bfm.corpus import load_cases
@@ -25,7 +23,21 @@ from .orchestrator import (
     StepSpec,
     external_command_step,
 )
+from .run_adapters import (
+    CorpusGeneratorAdapter,
+    CoverageReportAdapter,
+    RunBackends,
+    RunPathResolver,
+    UvmReplayAdapter,
+)
+from .run_evaluation import RunEvaluationAdapter
 from .run_plan import RunPlan, RunPlanExecutor, RunResults, RunStage
+from .run_profiles import (
+    DEFAULT_RUN_PLAN_PROFILES,
+    DEFAULT_RUN_PLAN_STAGE_NAMES,
+    RunPlanProfile,
+)
+from .run_stage_registry import RunStageFactory, RunStageRegistry
 from .topology import FULL_FUZZ_TOPOLOGY, PipelineTopology
 
 
@@ -72,6 +84,8 @@ class FuzzRunConfig:
     mode: str | None = None
     round_id: str | None = None
     round_manifest_out: Path | None = None
+    run_plan_profile: str | None = None
+    evaluation_out: Path | None = None
     observation_out: Path | None = None
     monitoring_out: Path | None = None
 
@@ -85,19 +99,64 @@ class FuzzRunOrchestrator:
         observation_context: ObservationContext | None = None,
         *,
         topology: PipelineTopology = FULL_FUZZ_TOPOLOGY,
+        plan_stage_names: Mapping[str, Sequence[str]] | None = None,
+        plan_profiles: Mapping[str, RunPlanProfile] | None = None,
+        backends: RunBackends | None = None,
     ):
         self.config = config
         self.observation_context = observation_context or observation_context_from_env()
+        self.paths = RunPathResolver(config)
         self.context = PipelineContext(
             run_id=self.observation_context.run_id,
             artifacts=self._artifacts(),
             metadata=self._context_metadata(),
+        )
+        self.paths.artifacts = self.context.artifacts
+        backends = backends or RunBackends()
+        self.corpus_generator = backends.corpus_generator or CorpusGeneratorAdapter(
+            config,
+            self.paths,
+        )
+        self.uvm_replay = backends.uvm_replay or UvmReplayAdapter(
+            config,
+            self.paths,
+            self.observation_context,
+            round_id=self._round_id,
+        )
+        self.coverage_report = backends.coverage_report or CoverageReportAdapter(
+            config,
+            self.paths,
+        )
+        self.evaluation = RunEvaluationAdapter(
+            config,
+            self.paths,
+            self.observation_context,
+            round_id=self._round_id,
         )
         self.orchestrator = PipelineOrchestrator(
             topology,
             self.observation_context,
             topology_out=config.topology_out,
         )
+        self.run_stage_registry = self._default_run_stage_registry()
+        self.plan_profiles = {
+            name: profile for name, profile in DEFAULT_RUN_PLAN_PROFILES.items()
+        }
+        if plan_profiles is not None:
+            self.plan_profiles.update(plan_profiles)
+        self.plan_stage_names: dict[str, tuple[str, ...]] = {
+            name: tuple(stages)
+            for name, stages in DEFAULT_RUN_PLAN_STAGE_NAMES.items()
+        }
+        self.plan_stage_names.update(
+            {
+                name: profile.stage_names
+                for name, profile in self.plan_profiles.items()
+            }
+        )
+        if plan_stage_names is not None:
+            for name, stages in plan_stage_names.items():
+                self.set_run_plan_stage_names(name, stages)
 
     def generate_corpus(self) -> subprocess.CompletedProcess:
         command = list(self.config.generator_command or self._default_generator_command())
@@ -235,58 +294,159 @@ class FuzzRunOrchestrator:
         return RunPlanExecutor(write_topology=self.orchestrator.write_topology).run(plan)
 
     def _generate_and_validate_plan(self) -> RunPlan:
-        return RunPlan(
-            name="generate_and_validate",
-            stages=(
-                self._stage("corpus_generation", self.generate_corpus),
-                self._stage("corpus_validation", self.validate_corpus),
-            ),
-        )
+        return self.build_run_plan("generate_and_validate")
 
     def _coverage_run_plan(self) -> RunPlan:
-        return RunPlan(
-            name="coverage_run",
-            stages=(
-                *self._generate_and_validate_plan().stages,
-                self._stage("coverage_run", self.coverage_run),
-            ),
-        )
+        return self.build_run_plan("coverage_run")
 
     def _coverage_report_plan(self) -> RunPlan:
-        return RunPlan(
-            name="coverage_report",
-            stages=(
-                *self._coverage_run_plan().stages,
-                self._merge_stage("coverage_report", self.generate_coverage_report),
-            ),
-        )
+        return self.build_run_plan("coverage_report")
 
     def _feedback_fuzz_plan(self) -> RunPlan:
-        return RunPlan(
-            name="feedback_fuzz",
-            stages=(
-                *self._coverage_report_plan().stages,
-                self._stage("coverage_feedback", self.coverage_feedback),
-                self._stage(
-                    "feedback_corpus_generation",
-                    self.generate_feedback_corpus,
-                ),
-                self._stage(
-                    "feedback_corpus_validation",
-                    self.validate_feedback_corpus,
-                ),
-                self._stage("feedback_replay", self.feedback_replay),
-                self._result_stage("round_manifest", self.write_round_manifest),
-            ),
+        return self.build_run_plan(
+            self._selected_plan_name("feedback_fuzz"),
+            expected_mode="feedback_fuzz",
         )
 
     def _no_feedback_plan(self) -> RunPlan:
+        return self.build_run_plan(
+            self._selected_plan_name("no_feedback"),
+            expected_mode="no_feedback",
+        )
+
+    def build_run_plan(
+        self,
+        name: str,
+        *,
+        stage_names: Sequence[str] | None = None,
+        expected_mode: str | None = None,
+    ) -> RunPlan:
+        names = (
+            tuple(stage_names)
+            if stage_names is not None
+            else self._stage_names(name, expected_mode=expected_mode)
+        )
         return RunPlan(
-            name="no_feedback",
-            stages=(
-                *self._coverage_report_plan().stages,
-                self._result_stage("round_manifest", self.write_round_manifest),
-            ),
+            name=name,
+            stages=self.run_stage_registry.build_many(names),
+        )
+
+    def register_run_stage(
+        self,
+        name: str,
+        factory: RunStageFactory,
+        *,
+        overwrite: bool = False,
+    ) -> None:
+        self.run_stage_registry.register(name, factory, overwrite=overwrite)
+
+    def set_run_plan_stage_names(
+        self,
+        name: str,
+        stage_names: Sequence[str],
+    ) -> None:
+        self.plan_stage_names[name] = tuple(stage_names)
+
+    def register_run_plan_profile(self, profile: RunPlanProfile) -> None:
+        self.plan_profiles[profile.name] = profile
+        self.set_run_plan_stage_names(profile.name, profile.stage_names)
+
+    def _stage_names(
+        self,
+        name: str,
+        *,
+        expected_mode: str | None = None,
+    ) -> tuple[str, ...]:
+        try:
+            names = self.plan_stage_names[name]
+        except KeyError as exc:
+            raise ValueError(f"unknown run plan: {name}") from exc
+        self._validate_profile_mode(name, expected_mode)
+        return self._with_requested_round_evaluation(name, names)
+
+    def _validate_profile_mode(
+        self,
+        name: str,
+        expected_mode: str | None,
+    ) -> None:
+        if expected_mode is None:
+            return
+        profile = self.plan_profiles.get(name)
+        if profile is None or profile.mode is None:
+            return
+        if profile.mode != expected_mode:
+            raise ValueError(
+                f"run plan profile {name!r} is for mode {profile.mode!r}, "
+                f"but this run requires {expected_mode!r}"
+            )
+
+    def _with_requested_round_evaluation(
+        self,
+        name: str,
+        stage_names: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        if self.config.evaluation_out is None or "round_evaluation" in stage_names:
+            return stage_names
+        if "round_manifest" not in stage_names:
+            raise ValueError(
+                f"run plan profile {name!r} cannot enable round_evaluation "
+                "without a round_manifest stage"
+            )
+        return (*stage_names, "round_evaluation")
+
+    def _selected_plan_name(self, default: str) -> str:
+        if self.config.run_plan_profile is not None:
+            return self.config.run_plan_profile
+        if self.config.evaluation_out is not None:
+            evaluation_profile = f"{default}_with_evaluation"
+            if evaluation_profile in self.plan_stage_names:
+                return evaluation_profile
+        return default
+
+    def _default_run_stage_registry(self) -> RunStageRegistry:
+        return RunStageRegistry(
+            {
+                "corpus_generation": lambda: self._stage(
+                    "corpus_generation",
+                    self.generate_corpus,
+                ),
+                "corpus_validation": lambda: self._stage(
+                    "corpus_validation",
+                    self.validate_corpus,
+                ),
+                "coverage_run": lambda: self._stage(
+                    "coverage_run",
+                    self.coverage_run,
+                ),
+                "coverage_report": lambda: self._merge_stage(
+                    "coverage_report",
+                    self.generate_coverage_report,
+                ),
+                "coverage_feedback": lambda: self._stage(
+                    "coverage_feedback",
+                    self.coverage_feedback,
+                ),
+                "feedback_corpus_generation": lambda: self._stage(
+                    "feedback_corpus_generation",
+                    self.generate_feedback_corpus,
+                ),
+                "feedback_corpus_validation": lambda: self._stage(
+                    "feedback_corpus_validation",
+                    self.validate_feedback_corpus,
+                ),
+                "feedback_replay": lambda: self._stage(
+                    "feedback_replay",
+                    self.feedback_replay,
+                ),
+                "round_manifest": lambda: self._result_stage(
+                    "round_manifest",
+                    self.write_round_manifest,
+                ),
+                "round_evaluation": lambda: self._result_stage(
+                    "round_evaluation",
+                    self.write_round_evaluation,
+                ),
+            }
         )
 
     def _stage(
@@ -343,6 +503,29 @@ class FuzzRunOrchestrator:
         )
         return self.orchestrator.run_step(step, self.context)
 
+    def write_round_evaluation(
+        self,
+        stage_results: dict[str, object],
+    ) -> dict[str, Any]:
+        if self.config.evaluation_out is None:
+            raise ValueError("missing evaluation_out for round_evaluation stage")
+        self.context.artifacts["evaluation_report"] = self._path_from_cwd(
+            self.config.evaluation_out
+        )
+        step = StepSpec(
+            name="round_evaluation",
+            connector="round_artifacts_to_evaluation",
+            handler=lambda _context: self.evaluation.run_round(stage_results),
+            input_roles=self._round_evaluation_input_roles(stage_results),
+            output_roles=("evaluation_report",),
+            metrics=lambda value: {
+                "stage_count": len(value.get("stage_names", [])),
+                "case_count": sum(value.get("case_counts", {}).values()),
+            },
+            metadata=self._round_manifest_metadata(),
+        )
+        return self.orchestrator.run_step(step, self.context)
+
     def _artifacts(self) -> dict[str, Path]:
         artifacts = {"corpus": self._path_from_cwd(self.config.corpus)}
         if self.config.target_config is not None:
@@ -393,6 +576,10 @@ class FuzzRunOrchestrator:
             artifacts["round_manifest"] = self._path_from_cwd(
                 self.config.round_manifest_out
             )
+        if self.config.evaluation_out is not None:
+            artifacts["evaluation_report"] = self._path_from_cwd(
+                self.config.evaluation_out
+            )
         return artifacts
 
     def _generator_input_roles(self) -> tuple[str, ...]:
@@ -411,16 +598,10 @@ class FuzzRunOrchestrator:
         return tuple(roles)
 
     def _default_generator_command(self) -> tuple[str, ...]:
-        return self._generator_command(
-            corpus=self.config.corpus,
-            directives=self.config.directives,
-        )
+        return self.corpus_generator.default_command()
 
     def _feedback_generator_command(self) -> tuple[str, ...]:
-        return self._generator_command(
-            corpus=self._feedback_corpus(),
-            directives=self._feedback_directives(),
-        )
+        return self.corpus_generator.feedback_command()
 
     def _generator_command(
         self,
@@ -428,165 +609,37 @@ class FuzzRunOrchestrator:
         corpus: Path,
         directives: Path | None,
     ) -> tuple[str, ...]:
-        command: list[str] = [
-            *self._cargo_command(),
-            "run",
-            "--quiet",
-            "--manifest-path",
-            str(self._path_from_cwd(self.config.libafl_manifest)),
-            "--",
-            "--target",
-            self.config.target,
-        ]
-        if self.config.target_config is not None:
-            command.extend(
-                ["--target-config", str(self._path_from_cwd(self.config.target_config))]
-            )
-        command.extend(
-            [
-                "--corpus-out",
-                str(self._path_from_cwd(corpus)),
-                "--iters",
-                str(self.config.iters),
-                "--max-seeds",
-                str(self.config.max_seeds),
-                "--seed",
-                str(self.config.seed),
-            ]
-        )
-        if directives is not None:
-            command.extend(["--directives", str(self._path_from_cwd(directives))])
-        return tuple(command)
+        return self.corpus_generator.command(corpus=corpus, directives=directives)
 
     def _path_from_cwd(self, path: Path | None) -> Path | None:
-        if path is None:
-            return None
-        path = Path(path)
-        if path.is_absolute() or self.config.cwd is None:
-            return path
-        cwd = self.config.cwd
-        base = cwd if cwd.is_absolute() else Path.cwd() / cwd
-        return base / path
+        return self.paths.path_from_cwd(path)
 
     def _cargo_command(self) -> list[str]:
-        return shlex.split(self.config.cargo) or ["cargo"]
+        return self.corpus_generator.cargo_command()
 
     def _make_command(self) -> list[str]:
-        return shlex.split(self.config.make) or ["make"]
+        return self.uvm_replay.make_command()
 
     def _run_cwd(self) -> Path:
-        if self.config.cwd is None:
-            return Path.cwd()
-        cwd = Path(self.config.cwd)
-        return cwd if cwd.is_absolute() else Path.cwd() / cwd
+        return self.paths.run_cwd()
 
     def _run_coverage_replay(self) -> subprocess.CompletedProcess:
-        coverage_dir = self._required_artifact("replay_artifacts")
-        coverage_dir.mkdir(parents=True, exist_ok=True)
-        self._run_make_clean()
-        self._remove_sim_build()
-        return subprocess.run(
-            self._coverage_replay_command(),
-            cwd=str(self._run_cwd()),
-            check=True,
-        )
+        return self.uvm_replay.run_coverage_replay()
 
     def _run_make_clean(self) -> None:
-        subprocess.run(
-            [*self._make_command(), "-C", str(self._run_cwd()), "clean"],
-            check=True,
-        )
+        self.uvm_replay.run_make_clean()
 
     def _remove_sim_build(self) -> None:
-        shutil.rmtree(self._run_cwd() / "sim_build", ignore_errors=True)
+        self.uvm_replay.remove_sim_build()
 
     def _coverage_replay_command(self) -> list[str]:
-        command = [
-            *self._make_command(),
-            "-C",
-            str(self._run_cwd()),
-            f"TARGET={self.config.target}",
-            f"TARGET_CONFIG={self._make_value(self.config.target_config)}",
-            "RTL_COVERAGE=1",
-            f"COVERAGE_DIR={self._required_artifact('replay_artifacts')}",
-            f"COVERAGE_DAT={self._required_artifact('rtl_coverage_dat')}",
-            f"FUZZ_CORPUS={self._required_artifact('corpus')}",
-            f"LIBAFL_MANIFEST={self._make_value(self.config.libafl_manifest)}",
-            f"LIBAFL_ITERS={self.config.iters}",
-            f"LIBAFL_MAX_SEEDS={self.config.max_seeds}",
-            f"LIBAFL_SEED={self.config.seed}",
-            f"CARGO={self.config.cargo}",
-        ]
-        if self.config.verilog_sources is not None:
-            command.append(f"VERILOG_SOURCES={self.config.verilog_sources}")
-        if self.config.toplevel is not None:
-            command.append(f"TOPLEVEL={self.config.toplevel}")
-        if self.config.directives is not None:
-            command.append(f"FUZZ_DIRECTIVES={self._required_artifact('directives')}")
-        if self.config.functional_coverage is not None:
-            command.append(
-                f"UVM_FUNCTIONAL_COVERAGE_OUT={self._required_artifact('functional_coverage')}"
-            )
-        command.extend(self._observation_make_vars(stage_id="coverage_run"))
-        command.extend(self.config.extra_make_vars)
-        command.append("sim")
-        return command
+        return self.uvm_replay.coverage_command()
 
     def _feedback_replay_command(self) -> list[str]:
-        command = [
-            *self._make_command(),
-            "-C",
-            str(self._run_cwd()),
-            f"TARGET={self.config.target}",
-            f"TARGET_CONFIG={self._make_value(self.config.target_config)}",
-            f"COVERAGE_DIR={self._required_artifact('replay_artifacts')}",
-            f"FUZZ_DIRECTIVES={self._feedback_directives()}",
-            f"FUZZ_CORPUS={self._feedback_corpus()}",
-            f"LIBAFL_MANIFEST={self._make_value(self.config.libafl_manifest)}",
-            f"LIBAFL_ITERS={self.config.iters}",
-            f"LIBAFL_MAX_SEEDS={self.config.max_seeds}",
-            f"LIBAFL_SEED={self.config.seed}",
-            f"CARGO={self.config.cargo}",
-        ]
-        if self.config.verilog_sources is not None:
-            command.append(f"VERILOG_SOURCES={self.config.verilog_sources}")
-        if self.config.toplevel is not None:
-            command.append(f"TOPLEVEL={self.config.toplevel}")
-        feedback_functional_coverage = self._feedback_functional_coverage()
-        if feedback_functional_coverage is not None:
-            command.append(
-                "UVM_FUNCTIONAL_COVERAGE_OUT="
-                f"{self._required_artifact('feedback_functional_coverage')}"
-            )
-        command.extend(self._observation_make_vars(stage_id="feedback_replay"))
-        command.extend(self.config.extra_make_vars)
-        command.append("sim")
-        return command
+        return self.uvm_replay.feedback_command()
 
     def _run_verilator_coverage_report(self) -> dict[str, subprocess.CompletedProcess]:
-        coverage_annotated = self._required_artifact("coverage_annotated")
-        coverage_annotated.mkdir(parents=True, exist_ok=True)
-        coverage_dat = self._required_artifact("rtl_coverage_dat")
-        coverage_info = self._required_artifact("coverage_info")
-        annotate = subprocess.run(
-            [
-                self.config.verilator_coverage,
-                "--annotate",
-                str(coverage_annotated),
-                str(coverage_dat),
-            ],
-            check=True,
-        )
-        write_info = subprocess.run(
-            [
-                self.config.verilator_coverage,
-                "--write-info",
-                str(coverage_info),
-                str(coverage_dat),
-            ],
-            check=True,
-        )
-        return {"annotate": annotate, "write_info": write_info}
+        return self.coverage_report.run()
 
     def _coverage_metadata(self) -> dict[str, str]:
         value = {
@@ -608,17 +661,10 @@ class FuzzRunOrchestrator:
             self._required_artifact(role)
 
     def _required_artifact(self, role: str) -> Path:
-        try:
-            path = self.context.artifacts[role]
-        except KeyError as exc:
-            raise ValueError(f"missing required artifact role: {role}") from exc
-        if path is None:
-            raise ValueError(f"missing required artifact role: {role}")
-        return path
+        return self.paths.required_artifact(role)
 
     def _make_value(self, path: Path | None) -> str:
-        resolved = self._path_from_cwd(path)
-        return str(resolved) if resolved is not None else ""
+        return self.paths.make_value(path)
 
     def _coverage_feedback_config(self) -> CoverageFeedbackConfig:
         self._require_feedback_paths()
@@ -665,7 +711,7 @@ class FuzzRunOrchestrator:
             )
 
     def _optional_artifact(self, role: str) -> Path | None:
-        return self.context.artifacts.get(role)
+        return self.paths.optional_artifact(role)
 
     def _require_feedback_replay_paths(self) -> None:
         required = {
@@ -682,20 +728,10 @@ class FuzzRunOrchestrator:
         self._required_artifact("replay_artifacts")
 
     def _feedback_corpus(self) -> Path:
-        path = self._path_from_cwd(self.config.feedback_corpus)
-        if path is None:
-            raise ValueError(
-                "missing required artifact path for feedback replay: feedback_corpus"
-            )
-        return path
+        return self.paths.feedback_corpus()
 
     def _feedback_directives(self) -> Path:
-        path = self._path_from_cwd(self.config.directives_out)
-        if path is None:
-            raise ValueError(
-                "missing required artifact path for feedback replay: directives_out"
-            )
-        return path
+        return self.paths.feedback_directives()
 
     def _feedback_replay_metadata(self) -> dict[str, str]:
         value = {
@@ -731,6 +767,8 @@ class FuzzRunOrchestrator:
         round_id = self._round_id()
         if round_id is not None:
             value["round_id"] = round_id
+        if self.config.run_plan_profile is not None:
+            value["run_plan_profile"] = self.config.run_plan_profile
         return value
 
     def _mode(self) -> str:
@@ -740,32 +778,7 @@ class FuzzRunOrchestrator:
         return self.config.round_id or self.observation_context.round_id
 
     def _observation_make_vars(self, *, stage_id: str) -> list[str]:
-        values: list[str] = []
-        if self.config.observation_out is not None:
-            values.append(
-                f"CONNECTOR_OBSERVE_OUT={self._path_from_cwd(self.config.observation_out)}"
-            )
-        if self.config.monitoring_out is not None:
-            values.append(
-                f"CONNECTOR_MONITOR_OUT={self._path_from_cwd(self.config.monitoring_out)}"
-            )
-        if self.config.topology_out is not None:
-            values.append(
-                f"CONNECTOR_TOPOLOGY_OUT={self._path_from_cwd(self.config.topology_out)}"
-            )
-        if self.observation_context.run_id is not None:
-            values.append(f"CONNECTOR_OBSERVE_RUN_ID={self.observation_context.run_id}")
-        round_id = self._round_id()
-        if round_id is not None:
-            values.append(f"CONNECTOR_OBSERVE_ROUND_ID={round_id}")
-        values.append(
-            f"CONNECTOR_OBSERVE_STAGE_ID={self.observation_context.stage_id or stage_id}"
-        )
-        if self.observation_context.parent_event_id is not None:
-            values.append(
-                f"CONNECTOR_OBSERVE_PARENT_EVENT_ID={self.observation_context.parent_event_id}"
-            )
-        return values
+        return self.uvm_replay.observation_make_vars(stage_id=stage_id)
 
     def _round_manifest_metadata(self) -> dict[str, str]:
         value = {"target": self.config.target, "mode": self._mode()}
@@ -781,6 +794,15 @@ class FuzzRunOrchestrator:
         roles = ["corpus"]
         if "coverage_feedback" in stage_results:
             roles.extend(["summary", "directives"])
+        return tuple(role for role in roles if role in self.context.artifacts)
+
+    def _round_evaluation_input_roles(
+        self,
+        stage_results: dict[str, object],
+    ) -> tuple[str, ...]:
+        roles = []
+        if "round_manifest" in stage_results:
+            roles.append("round_manifest")
         return tuple(role for role in roles if role in self.context.artifacts)
 
     def _write_round_manifest(self, stage_results: dict[str, object]) -> dict[str, Any]:
@@ -856,6 +878,8 @@ class FuzzRunOrchestrator:
             "llm": self.config.llm,
             "llm_model": self.config.llm_model,
             "ignore_functional_coverage": self.config.ignore_functional_coverage,
+            "run_plan_profile": self.config.run_plan_profile,
+            "evaluation_out": self._manifest_path(self.config.evaluation_out),
         }
 
     def _round_manifest_artifacts(
@@ -913,34 +937,16 @@ class FuzzRunOrchestrator:
         return artifacts
 
     def _feedback_functional_coverage(self) -> Path | None:
-        if self.config.feedback_functional_coverage is not None:
-            return self._path_from_cwd(self.config.feedback_functional_coverage)
-        if self.config.functional_coverage is None or self.config.feedback_corpus is None:
-            return None
-        functional_coverage = self._path_from_cwd(self.config.functional_coverage)
-        if functional_coverage is None:
-            return None
-        return functional_coverage.with_name(
-            f"{functional_coverage.stem}_feedback{functional_coverage.suffix}"
-        )
+        return self.paths.feedback_functional_coverage()
 
     def _heuristic_directives(self) -> Path | None:
-        if self.config.heuristic_directives_out is not None:
-            return self._path_from_cwd(self.config.heuristic_directives_out)
-        if self.config.directives_out is None:
-            return None
-        directives = self._path_from_cwd(self.config.directives_out)
-        if directives is None:
-            return None
-        return directives.with_name(f"{directives.stem}_heuristic{directives.suffix}")
+        return self.paths.heuristic_directives()
 
     def _manifest_path(self, path: Path | None) -> str | None:
-        resolved = self._path_from_cwd(path)
-        return str(resolved) if resolved is not None else None
+        return self.paths.manifest_path(path)
 
     def _artifact_exists(self, path: Path | None) -> bool:
-        resolved = self._path_from_cwd(path)
-        return resolved.exists() if resolved is not None else False
+        return self.paths.artifact_exists(path)
 
     def _completed_process_json(self, result: object) -> dict[str, Any] | None:
         if not isinstance(result, subprocess.CompletedProcess):

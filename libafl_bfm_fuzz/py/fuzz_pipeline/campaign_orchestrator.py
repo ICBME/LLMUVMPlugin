@@ -4,13 +4,22 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from connector_observe import ObservationContext
 
 from .harness import observation_context_from_env
 from .orchestrator import PipelineContext, PipelineOrchestrator, StepSpec
+from .run_adapters import RunBackends
+from .run_evaluation import CampaignEvaluationAdapter
 from .run_orchestrator import FuzzRunConfig, FuzzRunOrchestrator
+from .run_plan import RunPlan, RunPlanExecutor, RunResults, RunStage
+from .run_profiles import (
+    DEFAULT_CAMPAIGN_PLAN_PROFILES,
+    DEFAULT_RUN_PLAN_PROFILES,
+    RunPlanProfile,
+)
+from .run_stage_registry import RunStageRegistry
 from .topology import FULL_FUZZ_TOPOLOGY, PipelineTopology
 
 
@@ -40,6 +49,10 @@ class CampaignConfig:
     observation_out: Path | None = None
     monitoring_out: Path | None = None
     campaign_manifest_out: Path | None = None
+    run_plan_profile: str | None = None
+    campaign_plan_profile: str | None = None
+    round_evaluation: bool = False
+    campaign_evaluation_out: Path | None = None
     ignore_functional_coverage: bool = False
     llm_model: str | None = None
     require_real_llm: bool = False
@@ -116,6 +129,10 @@ class CampaignRoundArtifacts:
     def round_manifest(self) -> Path:
         return self.run_dir / f"{self.target}_round_manifest.json"
 
+    @property
+    def evaluation(self) -> Path:
+        return self.run_dir / f"{self.target}_round_evaluation.json"
+
 
 @dataclass(frozen=True)
 class RoundManifestState:
@@ -162,15 +179,27 @@ class CampaignOrchestrator:
         observation_context: ObservationContext | None = None,
         *,
         topology: PipelineTopology = FULL_FUZZ_TOPOLOGY,
+        run_backends: RunBackends | None = None,
+        run_plan_profiles: Mapping[str, RunPlanProfile] | None = None,
+        campaign_plan_profiles: Mapping[str, RunPlanProfile] | None = None,
     ):
         self.config = config
         self.observation_context = observation_context or observation_context_from_env()
         self.topology = topology
+        self.run_backends = run_backends
+        self.run_plan_profiles = run_plan_profiles
+        self.campaign_plan_profiles = {
+            name: profile
+            for name, profile in DEFAULT_CAMPAIGN_PLAN_PROFILES.items()
+        }
+        if campaign_plan_profiles is not None:
+            self.campaign_plan_profiles.update(campaign_plan_profiles)
         self.context = PipelineContext(
             run_id=self.observation_context.run_id,
             artifacts={
                 "round_manifest": self._out_dir(),
                 "campaign_manifest": self._campaign_manifest_out(),
+                **self._campaign_evaluation_context_artifact(),
             },
             metadata={"target": config.target, "stage": "feedback_campaign"},
         )
@@ -179,6 +208,7 @@ class CampaignOrchestrator:
             self.observation_context,
             topology_out=config.topology_out,
         )
+        self.campaign_stage_registry = self._default_campaign_stage_registry()
 
     def run(self) -> dict[str, Any]:
         self._validate()
@@ -189,7 +219,11 @@ class CampaignOrchestrator:
         for mode in self.config.modes:
             mode_runs.append(self._run_mode(mode))
 
-        return self._write_campaign_manifest(mode_runs)
+        results = self._run_campaign_plan(mode_runs)
+        value = results.get("campaign_manifest")
+        if not isinstance(value, dict):
+            raise ValueError("campaign_manifest stage did not return a manifest")
+        return value
 
     def _run_mode(self, mode: str) -> dict[str, Any]:
         rounds = []
@@ -203,6 +237,8 @@ class CampaignOrchestrator:
                 round_config,
                 self._round_context(artifacts.round_id),
                 topology=self.topology,
+                plan_profiles=self.run_plan_profiles,
+                backends=self.run_backends,
             )
             if mode == "no_feedback":
                 round_result = result.no_feedback_round()
@@ -211,7 +247,14 @@ class CampaignOrchestrator:
             manifest = self._round_manifest(round_result, artifacts.round_manifest)
             if mode == "llm_feedback" and self.config.require_real_llm:
                 self._require_real_llm_source(manifest, artifacts.round_id)
-            rounds.append(self._round_summary(artifacts, manifest, previous=use_previous))
+            rounds.append(
+                self._round_summary(
+                    artifacts,
+                    manifest,
+                    round_result=round_result,
+                    previous=use_previous,
+                )
+            )
             previous = (
                 self._round_manifest_state(artifacts.round_manifest, manifest)
                 if mode in FEEDBACK_MODES
@@ -227,6 +270,8 @@ class CampaignOrchestrator:
         previous: RoundManifestState | None,
     ) -> FuzzRunConfig:
         feedback_mode = mode in FEEDBACK_MODES
+        round_plan_profile = self._round_run_plan_profile(mode)
+        round_evaluation = self._round_evaluation_enabled(round_plan_profile)
         return FuzzRunConfig(
             target=self.config.target,
             target_config=self.config.target_config,
@@ -294,6 +339,8 @@ class CampaignOrchestrator:
             mode=mode,
             round_id=artifacts.round_id,
             round_manifest_out=artifacts.round_manifest,
+            run_plan_profile=round_plan_profile,
+            evaluation_out=artifacts.evaluation if round_evaluation else None,
             observation_out=self.config.observation_out,
             monitoring_out=self.config.monitoring_out,
         )
@@ -303,6 +350,7 @@ class CampaignOrchestrator:
         artifacts: CampaignRoundArtifacts,
         manifest: dict[str, Any],
         *,
+        round_result: dict[str, object],
         previous: RoundManifestState | None,
     ) -> dict[str, Any]:
         return {
@@ -327,10 +375,85 @@ class CampaignOrchestrator:
             if previous is not None and previous.mutation_feedback is not None
             else None,
             "artifacts": manifest.get("artifacts", {}),
+            "evaluation": round_result.get("round_evaluation"),
             "coverage": manifest.get("coverage", {}),
             "feedback": manifest.get("feedback", {}),
             "stages": manifest.get("stages", {}),
         }
+
+    def _run_campaign_plan(self, mode_runs: list[dict[str, Any]]) -> RunResults:
+        plan = self._campaign_plan()
+        return RunPlanExecutor().run(plan, initial_results={"mode_runs": mode_runs})
+
+    def _campaign_plan(self) -> RunPlan:
+        profile_name = self._selected_campaign_plan_profile()
+        return RunPlan(
+            name=profile_name,
+            stages=self.campaign_stage_registry.build_many(
+                self._campaign_profile(profile_name).stage_names
+            ),
+            write_topology=False,
+        )
+
+    def _selected_campaign_plan_profile(self) -> str:
+        if self.config.campaign_plan_profile is not None:
+            return self.config.campaign_plan_profile
+        if self.config.campaign_evaluation_out is not None:
+            return "campaign_with_evaluation"
+        return "campaign_manifest"
+
+    def _campaign_profile(self, name: str) -> RunPlanProfile:
+        try:
+            return self.campaign_plan_profiles[name]
+        except KeyError as exc:
+            raise ValueError(f"unknown campaign plan profile: {name}") from exc
+
+    def _default_campaign_stage_registry(self) -> RunStageRegistry:
+        return RunStageRegistry(
+            {
+                "campaign_manifest": lambda: RunStage(
+                    name="campaign_manifest",
+                    handler=lambda results: self._write_campaign_manifest(
+                        self._mode_runs_from_results(results)
+                    ),
+                ),
+                "campaign_evaluation": lambda: RunStage(
+                    name="campaign_evaluation",
+                    handler=lambda results: self._write_campaign_evaluation(
+                        results,
+                    ),
+                ),
+            }
+        )
+
+    def _mode_runs_from_results(self, results: RunResults) -> list[dict[str, Any]]:
+        value = results.get("mode_runs")
+        if not isinstance(value, list):
+            raise ValueError("campaign plan missing mode_runs")
+        return [item for item in value if isinstance(item, dict)]
+
+    def _round_run_plan_profile(self, mode: str) -> str | None:
+        if self.config.run_plan_profile is not None:
+            return self.config.run_plan_profile
+        if not self.config.round_evaluation:
+            return None
+        return "no_feedback_with_evaluation" if mode == "no_feedback" else (
+            "feedback_fuzz_with_evaluation"
+        )
+
+    def _round_evaluation_enabled(self, profile_name: str | None) -> bool:
+        if self.config.round_evaluation:
+            return True
+        if profile_name is None:
+            return False
+        if self.run_plan_profiles is not None and profile_name in self.run_plan_profiles:
+            stages = self.run_plan_profiles[profile_name].stage_names
+        else:
+            stages = DEFAULT_RUN_PLAN_PROFILES.get(
+                profile_name,
+                RunPlanProfile(profile_name, ()),
+            ).stage_names
+        return "round_evaluation" in stages
 
     def _write_campaign_manifest(
         self,
@@ -369,6 +492,38 @@ class CampaignOrchestrator:
         )
         return manifest
 
+    def _write_campaign_evaluation(
+        self,
+        stage_results: RunResults,
+    ) -> dict[str, Any]:
+        path = self._campaign_evaluation_out()
+        self.context.artifacts["evaluation_report"] = path
+        manifest = stage_results.get("campaign_manifest")
+        if not isinstance(manifest, dict):
+            raise ValueError("campaign_evaluation requires campaign_manifest result")
+        step = StepSpec(
+            name="campaign_evaluation",
+            connector="campaign_to_evaluation_report",
+            handler=lambda _context: CampaignEvaluationAdapter(
+                target=self.config.target,
+                path=path,
+                observation_context=self.observation_context,
+                cwd=self._run_cwd(),
+            ).run(manifest),
+            input_roles=("campaign_manifest",),
+            output_roles=("evaluation_report",),
+            metrics=lambda value: {
+                "mode_count": value.get("summary", {}).get("mode_count", 0),
+                "round_count": value.get("summary", {}).get("round_count", 0),
+            },
+            metadata={
+                "target": self.config.target,
+                "modes": ",".join(self.config.modes),
+                "rounds": self.config.rounds,
+            },
+        )
+        return self.orchestrator.run_step(step, self.context)
+
     def _campaign_manifest_payload(
         self,
         mode_runs: list[dict[str, Any]],
@@ -395,14 +550,26 @@ class CampaignOrchestrator:
                 "ignore_functional_coverage": self.config.ignore_functional_coverage,
                 "llm_model": self.config.llm_model,
                 "require_real_llm": self.config.require_real_llm,
+                "run_plan_profile": self.config.run_plan_profile,
+                "campaign_plan_profile": self.config.campaign_plan_profile,
+                "round_evaluation": self.config.round_evaluation,
             },
             "artifacts": {
                 "out_dir": str(self._out_dir()),
                 "campaign_manifest": str(self._campaign_manifest_out()),
+                **self._campaign_evaluation_manifest_artifact(),
                 **self._optional_artifacts(),
             },
             "modes": mode_runs,
         }
+
+    def _campaign_evaluation_context_artifact(self) -> dict[str, Path]:
+        path = self._path_from_cwd(self.config.campaign_evaluation_out)
+        return {"evaluation_report": path} if path is not None else {}
+
+    def _campaign_evaluation_manifest_artifact(self) -> dict[str, str]:
+        path = self._path_from_cwd(self.config.campaign_evaluation_out)
+        return {"evaluation_report": str(path)} if path is not None else {}
 
     def _optional_artifacts(self) -> dict[str, str]:
         paths = {
@@ -503,6 +670,12 @@ class CampaignOrchestrator:
         resolved = self._path_from_cwd(path)
         if resolved is None:
             raise ValueError("missing campaign manifest path")
+        return resolved
+
+    def _campaign_evaluation_out(self) -> Path:
+        resolved = self._path_from_cwd(self.config.campaign_evaluation_out)
+        if resolved is None:
+            raise ValueError("missing campaign evaluation output path")
         return resolved
 
     def _out_dir(self) -> Path:

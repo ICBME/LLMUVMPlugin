@@ -57,3 +57,20 @@ def test_run_plan_can_skip_topology_write() -> None:
 
     assert calls == []
     assert results == {"stage": "ok"}
+
+
+def test_run_plan_accepts_initial_results() -> None:
+    plan = RunPlan(
+        name="seeded",
+        stages=(
+            RunStage(
+                name="derived",
+                handler=lambda results: f"{results['seed']}-derived",
+            ),
+        ),
+        write_topology=False,
+    )
+
+    results = RunPlanExecutor().run(plan, initial_results={"seed": "value"})
+
+    assert results == {"seed": "value", "derived": "value-derived"}

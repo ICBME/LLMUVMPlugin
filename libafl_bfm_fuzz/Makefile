@@ -18,11 +18,17 @@ MUTATION_DIRECTIVES ?= $(COVERAGE_DIR)/$(TARGET)_mutation_directives.json
 GAP_FEEDBACK ?= $(COVERAGE_DIR)/$(TARGET)_gap_feedback.json
 MUTATION_FEEDBACK ?= $(COVERAGE_DIR)/$(TARGET)_mutation_feedback.json
 ROUND_MANIFEST ?= $(COVERAGE_DIR)/$(TARGET)_round_manifest.json
+ROUND_EVALUATION ?= $(COVERAGE_DIR)/$(TARGET)_round_evaluation.json
+ROUND_EVALUATION_ENABLE ?=
 FEEDBACK_MODE ?= feedback_fuzz
+RUN_PLAN_PROFILE ?=
 ROUND_ID ?=
 CAMPAIGN_DIR ?= $(COVERAGE_DIR)/$(TARGET)_campaign
 CAMPAIGN_MANIFEST ?= $(CAMPAIGN_DIR)/campaign_manifest.json
+CAMPAIGN_EVALUATION ?= $(CAMPAIGN_DIR)/campaign_evaluation.json
+CAMPAIGN_EVALUATION_ENABLE ?=
 CAMPAIGN_MODES ?= heuristic_feedback
+CAMPAIGN_PLAN_PROFILE ?=
 CAMPAIGN_ROUNDS ?= 2
 CONNECTOR_OBSERVE_OUT ?=
 CONNECTOR_OBSERVE_RUN_ID ?=
@@ -135,6 +141,7 @@ generate-corpus: require-target-config
 check:
 	$(CARGO) test --manifest-path $(LIBAFL_MANIFEST)
 	$(PYTHON) -m py_compile coverage_feedback.py validate_corpus.py py/fuzz_bfm/*.py py/fuzz_feedback/*.py py/fuzz_pipeline/*.py py/fuzz_uvm/*.py py/fuzz_examples/*.py scripts/*.py
+	$(PYTHON) -m pytest ../tests/test_run_plan.py ../tests/test_run_stage_registry.py ../tests/test_run_adapters.py ../tests/test_run_profiles_evaluation.py -q
 
 check-corpus: generate-corpus
 
@@ -250,6 +257,8 @@ feedback-fuzz: require-rtl
 		--llm-response-out $(LLM_RESPONSE) \
 		--feedback-corpus $(FEEDBACK_CORPUS) \
 		--round-manifest-out $(ROUND_MANIFEST) \
+		$(if $(RUN_PLAN_PROFILE),--run-plan-profile $(RUN_PLAN_PROFILE),) \
+		$(if $(filter 1,$(ROUND_EVALUATION_ENABLE)),--evaluation-out $(ROUND_EVALUATION),) \
 		--mode $(FEEDBACK_MODE) \
 		$(if $(CONNECTOR_OBSERVE_ROUND_ID),--round-id $(CONNECTOR_OBSERVE_ROUND_ID),) \
 		$(if $(CONNECTOR_OBSERVE_OUT),--observation-out $(CONNECTOR_OBSERVE_OUT),) \
@@ -270,6 +279,10 @@ feedback-campaign: require-rtl
 		--libafl-manifest $(LIBAFL_MANIFEST) \
 		--out-dir $(CAMPAIGN_DIR) \
 		--campaign-manifest-out $(CAMPAIGN_MANIFEST) \
+		$(if $(RUN_PLAN_PROFILE),--run-plan-profile $(RUN_PLAN_PROFILE),) \
+		$(if $(CAMPAIGN_PLAN_PROFILE),--campaign-plan-profile $(CAMPAIGN_PLAN_PROFILE),) \
+		$(if $(filter 1,$(ROUND_EVALUATION_ENABLE)),--round-evaluation,) \
+		$(if $(filter 1,$(CAMPAIGN_EVALUATION_ENABLE)),--campaign-evaluation-out $(CAMPAIGN_EVALUATION),) \
 		--modes $(CAMPAIGN_MODES) \
 		--rounds $(CAMPAIGN_ROUNDS) \
 		--iters $(LIBAFL_ITERS) \

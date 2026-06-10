@@ -263,9 +263,9 @@ RUN_ORCHESTRATION_TOPOLOGY = PipelineTopology(
         ),
         ConnectorEdge(
             "round_artifacts_to_evaluation",
-            "coverage_artifacts",
+            "round_manifest",
             "evaluation_report",
-            input_roles=("summary",),
+            input_roles=("round_manifest",),
             output_roles=("evaluation_report",),
         ),
         ConnectorEdge(

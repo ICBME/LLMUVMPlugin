@@ -32,10 +32,15 @@ class RunPlanExecutor:
     def __init__(self, *, write_topology: Callable[[], None] | None = None):
         self.write_topology = write_topology
 
-    def run(self, plan: RunPlan) -> RunResults:
+    def run(
+        self,
+        plan: RunPlan,
+        *,
+        initial_results: RunResults | None = None,
+    ) -> RunResults:
         if plan.write_topology and self.write_topology is not None:
             self.write_topology()
-        results: RunResults = {}
+        results: RunResults = dict(initial_results or {})
         for stage in plan.stages:
             value = stage.handler(results)
             self._record_stage_result(results, stage, value)
