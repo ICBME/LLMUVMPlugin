@@ -21,6 +21,7 @@ from .replay_orchestrator import (
     ReplayPipelineOrchestrator,
     replay_corpus_from_env,
 )
+from .run_plan import RunPlan, RunPlanExecutor, RunStage
 from .run_orchestrator import (
     FuzzRunConfig,
     FuzzRunOrchestrator,
@@ -56,6 +57,9 @@ __all__ = [
     "PipelineOrchestrator",
     "PipelineTopology",
     "ReplayPipelineOrchestrator",
+    "RunPlan",
+    "RunPlanExecutor",
+    "RunStage",
     "RUN_ORCHESTRATION_TOPOLOGY",
     "StepPolicy",
     "StepSpec",

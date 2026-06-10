@@ -25,6 +25,7 @@ from .orchestrator import (
     StepSpec,
     external_command_step,
 )
+from .run_plan import RunPlan, RunPlanExecutor, RunResults, RunStage
 from .topology import FULL_FUZZ_TOPOLOGY, PipelineTopology
 
 
@@ -150,20 +151,11 @@ class FuzzRunOrchestrator:
         return self.orchestrator.run_step(step, self.context)
 
     def generate_and_validate(self):
-        self.orchestrator.write_topology()
-        self.generate_corpus()
-        return self.validate_corpus()
+        results = self._run_plan(self._generate_and_validate_plan())
+        return results["corpus_validation"]
 
     def coverage_run_pipeline(self) -> dict[str, object]:
-        self.orchestrator.write_topology()
-        corpus_generation = self.generate_corpus()
-        corpus_validation = self.validate_corpus()
-        replay = self.coverage_run()
-        return {
-            "corpus_generation": corpus_generation,
-            "corpus_validation": corpus_validation,
-            "coverage_run": replay,
-        }
+        return self._run_plan(self._coverage_run_plan())
 
     def coverage_run(self) -> subprocess.CompletedProcess:
         self._require_coverage_paths()
@@ -195,17 +187,7 @@ class FuzzRunOrchestrator:
         return self.orchestrator.run_step(step, self.context)
 
     def coverage_run_and_report(self) -> dict[str, object]:
-        self.orchestrator.write_topology()
-        corpus_generation = self.generate_corpus()
-        corpus_validation = self.validate_corpus()
-        replay = self.coverage_run()
-        report = self.generate_coverage_report()
-        return {
-            "corpus_generation": corpus_generation,
-            "corpus_validation": corpus_validation,
-            "coverage_run": replay,
-            **report,
-        }
+        return self._run_plan(self._coverage_report_plan())
 
     def coverage_feedback(self) -> CoverageFeedbackResult:
         return run_coverage_feedback_pipeline(
@@ -244,46 +226,99 @@ class FuzzRunOrchestrator:
         return self.orchestrator.run_step(step, self.context)
 
     def feedback_fuzz(self) -> dict[str, object]:
-        self.orchestrator.write_topology()
-        corpus_generation = self.generate_corpus()
-        corpus_validation = self.validate_corpus()
-        coverage_replay = self.coverage_run()
-        coverage_report = self.generate_coverage_report()
-        feedback = self.coverage_feedback()
-        feedback_corpus_generation = self.generate_feedback_corpus()
-        feedback_corpus_validation = self.validate_feedback_corpus()
-        feedback_replay = self.feedback_replay()
-        results = {
-            "corpus_generation": corpus_generation,
-            "corpus_validation": corpus_validation,
-            "coverage_run": coverage_replay,
-            **coverage_report,
-            "coverage_feedback": feedback,
-            "feedback_corpus_generation": feedback_corpus_generation,
-            "feedback_corpus_validation": feedback_corpus_validation,
-            "feedback_replay": feedback_replay,
-        }
-        round_manifest = self.write_round_manifest(results)
-        if round_manifest is not None:
-            results["round_manifest"] = round_manifest
-        return results
+        return self._run_plan(self._feedback_fuzz_plan())
 
     def no_feedback_round(self) -> dict[str, object]:
-        self.orchestrator.write_topology()
-        corpus_generation = self.generate_corpus()
-        corpus_validation = self.validate_corpus()
-        coverage_replay = self.coverage_run()
-        coverage_report = self.generate_coverage_report()
-        results = {
-            "corpus_generation": corpus_generation,
-            "corpus_validation": corpus_validation,
-            "coverage_run": coverage_replay,
-            **coverage_report,
-        }
-        round_manifest = self.write_round_manifest(results)
-        if round_manifest is not None:
-            results["round_manifest"] = round_manifest
-        return results
+        return self._run_plan(self._no_feedback_plan())
+
+    def _run_plan(self, plan: RunPlan) -> RunResults:
+        return RunPlanExecutor(write_topology=self.orchestrator.write_topology).run(plan)
+
+    def _generate_and_validate_plan(self) -> RunPlan:
+        return RunPlan(
+            name="generate_and_validate",
+            stages=(
+                self._stage("corpus_generation", self.generate_corpus),
+                self._stage("corpus_validation", self.validate_corpus),
+            ),
+        )
+
+    def _coverage_run_plan(self) -> RunPlan:
+        return RunPlan(
+            name="coverage_run",
+            stages=(
+                *self._generate_and_validate_plan().stages,
+                self._stage("coverage_run", self.coverage_run),
+            ),
+        )
+
+    def _coverage_report_plan(self) -> RunPlan:
+        return RunPlan(
+            name="coverage_report",
+            stages=(
+                *self._coverage_run_plan().stages,
+                self._merge_stage("coverage_report", self.generate_coverage_report),
+            ),
+        )
+
+    def _feedback_fuzz_plan(self) -> RunPlan:
+        return RunPlan(
+            name="feedback_fuzz",
+            stages=(
+                *self._coverage_report_plan().stages,
+                self._stage("coverage_feedback", self.coverage_feedback),
+                self._stage(
+                    "feedback_corpus_generation",
+                    self.generate_feedback_corpus,
+                ),
+                self._stage(
+                    "feedback_corpus_validation",
+                    self.validate_feedback_corpus,
+                ),
+                self._stage("feedback_replay", self.feedback_replay),
+                self._result_stage("round_manifest", self.write_round_manifest),
+            ),
+        )
+
+    def _no_feedback_plan(self) -> RunPlan:
+        return RunPlan(
+            name="no_feedback",
+            stages=(
+                *self._coverage_report_plan().stages,
+                self._result_stage("round_manifest", self.write_round_manifest),
+            ),
+        )
+
+    def _stage(
+        self,
+        name: str,
+        handler,
+    ) -> RunStage:
+        return RunStage(
+            name=name,
+            handler=lambda _results: handler(),
+        )
+
+    def _merge_stage(
+        self,
+        name: str,
+        handler,
+    ) -> RunStage:
+        return RunStage(
+            name=name,
+            handler=lambda _results: handler(),
+            merge_mapping=True,
+        )
+
+    def _result_stage(
+        self,
+        name: str,
+        handler,
+    ) -> RunStage:
+        return RunStage(
+            name=name,
+            handler=handler,
+        )
 
     def write_round_manifest(
         self,

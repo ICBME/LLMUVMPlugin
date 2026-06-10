@@ -29,6 +29,8 @@
 
 - `FuzzRunOrchestrator` 已负责 corpus generation、validation、coverage replay、
   Verilator coverage report、coverage feedback、feedback replay 和 round manifest 写出。
+  第一阶段 `RunPlan` / `RunStage` 已落地，`feedback_fuzz` 与 `no_feedback` 不再直接
+  在方法体里手写完整顺序，而是由有序 stage plan 执行，后续可以在 plan 中插入新模块。
 - `CampaignOrchestrator` 已负责 mode/round 循环、上一轮 `round_manifest` 状态读取和
   `campaign_manifest.json` 写出。
 - `CoverageFeedbackPipeline` 已把 coverage summary、Layer 2/3 feedback、Layer 1 plan、
@@ -57,6 +59,9 @@
    `no_feedback` campaign round 使用较短 DAG：
    `generate_corpus -> validate_corpus -> coverage_replay -> coverage_report ->
    round_manifest`，不生成 feedback corpus、summary、directives 或 feedback replay。
+   已完成第一阶段：这些 DAG 现在通过 `RunPlan` stage 列表表达，stage handler 仍复用
+   `FuzzRunOrchestrator` 现有 connector-wrapped 方法。下一阶段再把 command adapter、
+   backend 选择和 evaluation stage 注册到同一个 plan/registry。
 
 4. 收紧 artifact materialization。
    已完成：每个 coverage feedback connector step 声明的 output artifact 会在 step
