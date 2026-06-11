@@ -74,6 +74,13 @@
   metrics 按 `action_id` / `action_type` 聚合为 `candidate_action_effect_report`，并可通过
   `CandidateRegressionSettings.max_variant_regressions` 启用 top-K variant 独立 sandbox
   回归；默认值为 1，保持只执行 combined candidate 的现有行为。
+  第十二阶段已完成 Harness LLM Optimization 第七阶段：新增真实 LLM optimizer backend
+  接入。`LlmHarnessOptimizerBackend` 会基于 harness evaluation、LLM dataset、
+  campaign rollup 和 action effect report 构造 optimizer prompt artifact，调用
+  OpenAI-compatible chat transport，解析并校验 schema-valid proposal；若 proposal 不满足
+  safe action DSL/schema，会把校验错误加入 repair prompt 并按配置 retry。最终 proposal
+  会携带 prompt/response artifact、model、attempt count 和 repair 状态等 LLM provenance。
+  默认 campaign profile 和 no-op optimizer 行为不变，不会自动修改源码主线。
 - `CampaignOrchestrator` 已负责 campaign-level plan、manifest 和 connector 包装；
   mode/round 展开、上一轮 `round_manifest` 状态读取和每轮 `FuzzRunConfig` 构造已抽到
   `CampaignRoundScheduler`。
@@ -127,7 +134,9 @@
 - `RunBackends`：替换 corpus generator、UVM replay、coverage report 后端。
 - `EvaluationBackends`：替换 round/campaign evaluation 后端。
 - `EvaluationBackends(harness_optimizer=...)`：替换 phase-one harness optimizer proposal
-  backend；默认 `NoopHarnessOptimizerBackend` 不应用变更。
+  backend；默认 `NoopHarnessOptimizerBackend` 不应用变更。需要真实 LLM 生成 proposal
+  时可注入 `LlmHarnessOptimizerBackend`，它会写出 optimizer prompt/response provenance
+  artifact，并在失败时执行 schema repair/retry。
 - `EvaluationBackends(harness_candidate_evaluation=...)`：替换第二阶段 candidate
   validation backend；默认 `NoopHarnessCandidateEvaluationBackend` 生成 `not_run`
   validation report，不运行真实回归。
@@ -224,6 +233,13 @@
    `max_variant_regressions > 1` 时为 selected variants 分别物化 sandbox config、执行
    candidate campaign、生成 variant evaluation，再由 ranking/final decision 选择 top
    variant。默认主流程与默认 candidate regression 行为不变。
+   Harness optimization 第七阶段已完成：真实 LLM optimizer backend 会把 campaign
+   evaluation、harness evaluation、LLM dataset、campaign rollup 和
+   `candidate_action_effect_report` 汇总成结构化 prompt；LLM response 必须转成
+   schema-valid proposal，否则会通过 repair prompt 重试。safe action DSL 扩展到
+   `scoreboard_check.field_equals/field_range`、`replay_probe` 采样约束和
+   `coverage_feedback_tuning` 的权重 clamp/过滤字段；runtime consumer 与 candidate
+   evaluation 保持只在显式 sandbox candidate 流程中消费这些配置。
 
 5. 收紧 artifact materialization。
    已完成：每个 coverage feedback connector step 声明的 output artifact 会在 step
@@ -270,7 +286,9 @@
   unsafe action skip、candidate metric delta、final decision、真实 candidate regression
   backend 的 sandbox run config 物化、safe action adapter config 输出、内部 campaign
   编排调用、adapter metrics、runtime action schema/消费/指标聚合、action effect report、
-  top-K variant 独立回归、multi-candidate ranking、promotion package 和阈值 reject。
+  top-K variant 独立回归、multi-candidate ranking、promotion package、阈值 reject、真实
+  LLM optimizer prompt/response provenance、proposal repair/retry，以及扩展 safe action
+  DSL 的 schema reject。
 - `tests/test_harness_trace.py`：覆盖 connector events 到 harness execution records 的转换、
   connector/module/failure/case/directive 聚合、hanging span 检测、trace quality report、
   LLM optimization dataset 写出、通用 trace core 独立使用、可注入 metadata extractor、

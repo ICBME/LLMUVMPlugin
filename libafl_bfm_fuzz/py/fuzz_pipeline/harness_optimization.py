@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
+from urllib import request
 
 from connector_observe.trace import read_json_object
 
@@ -55,6 +57,19 @@ HIGHER_IS_BETTER_METRICS = {
     "directive_count",
 }
 
+SCOREBOARD_CHECK_MODES = {
+    "actual_equals_expected",
+    "record_seen",
+    "require_no_error",
+    "field_equals",
+    "field_range",
+}
+DSL_PAYLOAD_ACTION_TYPES = {
+    "replay_probe",
+    "scoreboard_check",
+    "coverage_feedback_tuning",
+}
+
 
 class HarnessOptimizerBackend(Protocol):
     def run(self, task: dict[str, Any]) -> dict[str, Any]:
@@ -72,11 +87,25 @@ class HarnessCandidateEvaluationBackend(Protocol):
         ...
 
 
+class HarnessLlmTransport(Protocol):
+    def complete(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        model: str,
+        temperature: float,
+        response_format: dict[str, Any] | None = None,
+    ) -> Any:
+        ...
+
+
 @dataclass(frozen=True)
 class HarnessOptimizationPaths:
     task: Path
     proposal: Path
     decision: Path
+    optimizer_prompt: Path
+    optimizer_response: Path
     patch: Path
     candidate_manifest: Path
     candidate_evaluation: Path
@@ -89,6 +118,12 @@ class HarnessOptimizationPaths:
             "harness_optimization_task": str(self.task),
             "harness_optimization_proposal": str(self.proposal),
             "harness_optimization_decision": str(self.decision),
+        }
+
+    def optimizer_io_json(self) -> dict[str, str]:
+        return {
+            "harness_optimization_optimizer_prompt": str(self.optimizer_prompt),
+            "harness_optimization_optimizer_response": str(self.optimizer_response),
         }
 
     def validation_json(self) -> dict[str, str]:
@@ -109,6 +144,12 @@ def harness_optimization_paths(evaluation_path: Path) -> HarnessOptimizationPath
     sandbox_dir = evaluation_path.with_name(f"{stem}_harness_optimization_sandbox")
     return HarnessOptimizationPaths(
         task=evaluation_path.with_name(f"{stem}_harness_optimization_task.json"),
+        optimizer_prompt=evaluation_path.with_name(
+            f"{stem}_harness_optimization_optimizer_prompt.json"
+        ),
+        optimizer_response=evaluation_path.with_name(
+            f"{stem}_harness_optimization_optimizer_response.json"
+        ),
         proposal=evaluation_path.with_name(
             f"{stem}_harness_optimization_proposal.json"
         ),
@@ -133,6 +174,61 @@ def harness_optimization_paths(evaluation_path: Path) -> HarnessOptimizationPath
 
 
 @dataclass(frozen=True)
+class HarnessOptimizerContext:
+    paths: HarnessOptimizationPaths
+    cwd: Path
+
+
+@dataclass(frozen=True)
+class OpenAICompatibleChatTransport:
+    endpoint: str
+    api_key: str | None = None
+    timeout: float = 60.0
+    extra_headers: Mapping[str, str] | None = None
+
+    @classmethod
+    def from_env(cls) -> "OpenAICompatibleChatTransport":
+        endpoint = os.getenv(
+            "HARNESS_OPTIMIZER_LLM_ENDPOINT",
+            "https://api.openai.com/v1/chat/completions",
+        )
+        api_key = os.getenv("HARNESS_OPTIMIZER_LLM_API_KEY") or os.getenv(
+            "OPENAI_API_KEY"
+        )
+        return cls(endpoint=endpoint, api_key=api_key)
+
+    def complete(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        model: str,
+        temperature: float,
+        response_format: dict[str, Any] | None = None,
+    ) -> Any:
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        if response_format is not None:
+            payload["response_format"] = response_format
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.extra_headers:
+            headers.update(dict(self.extra_headers))
+        req = request.Request(
+            self.endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with request.urlopen(req, timeout=self.timeout) as response:  # noqa: S310
+            body = response.read().decode("utf-8")
+        return json.loads(body)
+
+
+@dataclass(frozen=True)
 class NoopHarnessOptimizerBackend:
     source: str = "noop"
 
@@ -151,6 +247,116 @@ class NoopHarnessOptimizerBackend:
                 "a valid no-op placeholder for downstream validation."
             ),
         }
+
+
+@dataclass(frozen=True)
+class LlmHarnessOptimizerBackend:
+    model: str
+    transport: HarnessLlmTransport | None = None
+    source: str = "llm"
+    temperature: float = 0.0
+    max_repair_attempts: int = 1
+    sample_limit: int = 5
+
+    @classmethod
+    def from_env(cls) -> "LlmHarnessOptimizerBackend":
+        model = os.getenv("HARNESS_OPTIMIZER_LLM_MODEL", "gpt-4.1-mini")
+        repairs = int(os.getenv("HARNESS_OPTIMIZER_REPAIR_ATTEMPTS", "1"))
+        return cls(
+            model=model,
+            transport=OpenAICompatibleChatTransport.from_env(),
+            max_repair_attempts=repairs,
+        )
+
+    def run(self, task: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError(
+            "LlmHarnessOptimizerBackend requires run_with_context() so prompt "
+            "and response artifacts can be materialized."
+        )
+
+    def run_with_context(
+        self,
+        task: dict[str, Any],
+        context: HarnessOptimizerContext,
+    ) -> dict[str, Any]:
+        transport = self.transport or OpenAICompatibleChatTransport.from_env()
+        prompt = build_harness_optimizer_prompt(
+            task,
+            sample_limit=self.sample_limit,
+        )
+        write_json(context.paths.optimizer_prompt, prompt)
+        attempts: list[dict[str, Any]] = []
+        messages = list(prompt["messages"])
+        final_proposal: dict[str, Any] | None = None
+        final_validation: dict[str, Any] | None = None
+        for attempt_index in range(self.max_repair_attempts + 1):
+            raw_response = transport.complete(
+                messages=messages,
+                model=self.model,
+                temperature=self.temperature,
+                response_format={"type": "json_object"},
+            )
+            proposal = proposal_from_llm_response(
+                raw_response,
+                task=task,
+                source=self.source,
+                attempt_index=attempt_index,
+            )
+            validation = validate_harness_optimization_proposal(proposal, task=task)
+            attempts.append(
+                {
+                    "attempt_index": attempt_index,
+                    "valid": validation["valid"],
+                    "validation": validation,
+                    "response": compact_llm_response(raw_response),
+                    "proposal": proposal,
+                }
+            )
+            final_proposal = proposal
+            final_validation = validation
+            if validation["valid"]:
+                break
+            if attempt_index < self.max_repair_attempts:
+                messages = build_repair_messages(prompt, proposal, validation)
+        response_artifact = {
+            "schema_version": 1,
+            "kind": "libafl_bfm_fuzz.harness_optimizer_llm_response",
+            "created_at": utc_timestamp(),
+            "model": self.model,
+            "source": self.source,
+            "attempt_count": len(attempts),
+            "repaired": any(not item["valid"] for item in attempts[:-1]),
+            "attempts": attempts,
+        }
+        write_json(context.paths.optimizer_response, response_artifact)
+        proposal = final_proposal or invalid_optimizer_proposal(
+            task,
+            source=self.source,
+            reason="optimizer produced no response",
+        )
+        if final_validation is not None and not final_validation["valid"]:
+            proposal["status"] = "invalid"
+            proposal["schema_errors"] = final_validation["errors"]
+        proposal.setdefault("llm_provenance", {})
+        proposal["llm_provenance"].update(
+            {
+                "source": self.source,
+                "model": self.model,
+                "prompt_artifact": str(context.paths.optimizer_prompt),
+                "response_artifact": str(context.paths.optimizer_response),
+                "attempt_count": len(attempts),
+                "repaired": any(not item["valid"] for item in attempts[:-1]),
+                "final_valid": bool(final_validation and final_validation["valid"]),
+            }
+        )
+        proposal.setdefault("artifacts", {})
+        proposal["artifacts"].update(
+            {
+                "optimizer_prompt": str(context.paths.optimizer_prompt),
+                "optimizer_response": str(context.paths.optimizer_response),
+            }
+        )
+        return proposal
 
 
 @dataclass(frozen=True)
@@ -221,7 +427,14 @@ class HarnessOptimizationAdapter:
 
     def run_proposal(self, task: dict[str, Any]) -> dict[str, Any]:
         try:
-            proposal = self.optimizer_backend.run(task)
+            runner = getattr(self.optimizer_backend, "run_with_context", None)
+            if callable(runner):
+                proposal = runner(
+                    task,
+                    HarnessOptimizerContext(paths=self.paths, cwd=self.cwd),
+                )
+            else:
+                proposal = self.optimizer_backend.run(task)
         except Exception as exc:  # noqa: BLE001 - decision stage rejects invalid proposal
             proposal = {
                 "schema_version": 1,
@@ -370,8 +583,16 @@ def build_harness_optimization_task(
         trace_artifacts.get("campaign_trace_rollup"),
         cwd,
     )
+    action_effect_report_path = _resolved_path(
+        trace_artifacts.get("candidate_action_effect_report")
+        or mapping(campaign_manifest.get("artifacts")).get(
+            "candidate_action_effect_report"
+        ),
+        cwd,
+    )
     harness_evaluation = read_json_object(harness_evaluation_path)
     campaign_rollup = read_json_object(campaign_rollup_path)
+    action_effect_report = read_json_object(action_effect_report_path)
     evidence_index = evidence_index_for(harness_evaluation)
     return {
         "schema_version": 1,
@@ -391,6 +612,7 @@ def build_harness_optimization_task(
             **_optional_path("harness_evaluation", harness_evaluation_path),
             **_optional_path("llm_optimization_dataset", llm_dataset_path),
             **_optional_path("campaign_trace_rollup", campaign_rollup_path),
+            **_optional_path("candidate_action_effect_report", action_effect_report_path),
         },
         "summary": {
             "campaign": mapping(campaign_evaluation.get("summary")),
@@ -399,6 +621,7 @@ def build_harness_optimization_task(
             "campaign_rollup": mapping(campaign_rollup.get("summary"))
             or mapping(harness_trace.get("campaign_rollup", {})).get("summary", {}),
             "llm_sample_count": count_jsonl_items(llm_dataset_path),
+            "action_effect": mapping(action_effect_report.get("summary")),
         },
         "optimization_hints": mapping(
             harness_evaluation.get("optimization_hints")
@@ -409,6 +632,7 @@ def build_harness_optimization_task(
         "slowest_records": list_value(harness_evaluation.get("slowest_records"))[:5],
         "coverage_trends": list_value(campaign_rollup.get("coverage_trends"))[:10],
         "failure_trends": list_value(campaign_rollup.get("failure_trends"))[:10],
+        "action_effect_report": action_effect_report if action_effect_report else {},
         "evidence_index": evidence_index,
         "constraints": {
             "allowed_action_types": list(ALLOWED_ACTION_TYPES),
@@ -426,6 +650,271 @@ def build_harness_optimization_task(
             "are automatically applied."
         ),
     }
+
+
+def build_harness_optimizer_prompt(
+    task: dict[str, Any],
+    *,
+    sample_limit: int,
+) -> dict[str, Any]:
+    artifacts = mapping(task.get("artifacts"))
+    dataset_path = _path_or_none(artifacts.get("llm_optimization_dataset"))
+    dataset_samples = read_jsonl_samples(dataset_path, limit=sample_limit)
+    context = {
+        "task_kind": task.get("kind"),
+        "target": task.get("target"),
+        "run_id": task.get("run_id"),
+        "summary": mapping(task.get("summary")),
+        "optimization_hints": mapping(task.get("optimization_hints")),
+        "trace_quality": mapping(task.get("trace_quality")),
+        "failure_clusters": list_value(task.get("failure_clusters"))[:5],
+        "slowest_records": list_value(task.get("slowest_records"))[:5],
+        "coverage_trends": list_value(task.get("coverage_trends"))[:10],
+        "failure_trends": list_value(task.get("failure_trends"))[:10],
+        "action_effect_report": mapping(task.get("action_effect_report")),
+        "llm_dataset_samples": dataset_samples,
+        "evidence_index": mapping(task.get("evidence_index")),
+    }
+    schema = optimizer_proposal_schema_hint(task)
+    system = (
+        "You are a hardware verification harness optimizer. Return only JSON. "
+        "Generate safe, sandbox-only harness optimization proposals grounded in "
+        "the provided evidence. Do not propose source-code mainline edits."
+    )
+    user = json.dumps(
+        {
+            "objective": task.get("objective"),
+            "proposal_schema": schema,
+            "context": context,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    return {
+        "schema_version": 1,
+        "kind": "libafl_bfm_fuzz.harness_optimizer_prompt",
+        "created_at": utc_timestamp(),
+        "target": task.get("target"),
+        "run_id": task.get("run_id"),
+        "schema_hint": schema,
+        "context": context,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    }
+
+
+def optimizer_proposal_schema_hint(task: dict[str, Any]) -> dict[str, Any]:
+    constraints = mapping(task.get("constraints"))
+    return {
+        "schema_version": 1,
+        "kind": PROPOSAL_KIND,
+        "required_top_level_fields": [
+            "schema_version",
+            "kind",
+            "proposal_id",
+            "status",
+            "actions",
+            "evidence_refs",
+        ],
+        "status_values": ["no_op", "proposed"],
+        "allowed_action_types": list_value(constraints.get("allowed_action_types"))
+        or list(ALLOWED_ACTION_TYPES),
+        "safe_sandbox_action_types": list_value(
+            constraints.get("safe_sandbox_action_types")
+        )
+        or list(SAFE_SANDBOX_ACTION_TYPES),
+        "safe_action_dsl": safe_action_dsl_schema(),
+        "evidence_ref_fields": ["span_id", "case_id", "directive_id", "connector"],
+    }
+
+
+def safe_action_dsl_schema() -> dict[str, Any]:
+    return {
+        "replay_probe": {
+            "payload_fields": {
+                "fields": "string or list of case./result. field names",
+                "signals": "string or list of DUT signal names",
+                "probe": "single case/result field alias",
+                "sample_on": "optional sampling point string",
+                "max_samples": "optional non-negative integer",
+                "case_filter": "optional object for future filtering",
+            },
+            "requires_any": ["fields", "signals", "probe"],
+        },
+        "scoreboard_check": {
+            "modes": sorted(SCOREBOARD_CHECK_MODES),
+            "payload_fields": {
+                "mode": "check mode",
+                "check": "human readable check description",
+                "field": "record/result/case field for field modes",
+                "expected": "expected value for field_equals",
+                "min": "minimum numeric value for field_range",
+                "max": "maximum numeric value for field_range",
+                "enforce": "bool, fail candidate when check fails",
+            },
+        },
+        "coverage_feedback_tuning": {
+            "payload_fields": {
+                "max_gap_count": "optional non-negative integer",
+                "directive_weight_multiplier": "optional positive number",
+                "prioritize": "optional priority label",
+                "gap_type": "optional gap category",
+                "directive_source": "optional directive source filter",
+                "min_weight": "optional directive weight floor",
+                "max_weight": "optional directive weight ceiling",
+            },
+        },
+    }
+
+
+def read_jsonl_samples(path: Path | None, *, limit: int) -> list[dict[str, Any]]:
+    if path is None or not path.exists() or limit <= 0:
+        return []
+    samples = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if len(samples) >= limit:
+            break
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            samples.append(value)
+    return samples
+
+
+def proposal_from_llm_response(
+    response: Any,
+    *,
+    task: dict[str, Any],
+    source: str,
+    attempt_index: int,
+) -> dict[str, Any]:
+    value = llm_response_json(response)
+    if isinstance(value, dict) and isinstance(value.get("proposal"), dict):
+        value = value["proposal"]
+    if not isinstance(value, dict):
+        return invalid_optimizer_proposal(
+            task,
+            source=source,
+            reason="LLM response did not contain a JSON object proposal",
+            attempt_index=attempt_index,
+        )
+    proposal = dict(value)
+    proposal.setdefault("schema_version", 1)
+    proposal.setdefault("kind", PROPOSAL_KIND)
+    proposal.setdefault(
+        "proposal_id",
+        f"{task.get('run_id') or 'unknown'}:llm:{attempt_index}",
+    )
+    proposal.setdefault("created_at", utc_timestamp())
+    proposal.setdefault("source", source)
+    proposal.setdefault("status", "proposed" if proposal.get("actions") else "no_op")
+    proposal.setdefault("actions", [])
+    proposal.setdefault("evidence_refs", [])
+    proposal.setdefault("rationale", "LLM-generated harness optimization proposal")
+    return proposal
+
+
+def llm_response_json(response: Any) -> Any:
+    if isinstance(response, str):
+        return parse_json_text(response)
+    if not isinstance(response, dict):
+        return response
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            content = mapping(first.get("message")).get("content")
+            return parse_json_text(content) if isinstance(content, str) else content
+    content = response.get("content")
+    if isinstance(content, str):
+        return parse_json_text(content)
+    return response
+
+
+def parse_json_text(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start : end + 1])
+            except json.JSONDecodeError:
+                return text
+        return text
+
+
+def invalid_optimizer_proposal(
+    task: dict[str, Any],
+    *,
+    source: str,
+    reason: str,
+    attempt_index: int | None = None,
+) -> dict[str, Any]:
+    suffix = "invalid" if attempt_index is None else f"invalid:{attempt_index}"
+    return {
+        "schema_version": 1,
+        "kind": PROPOSAL_KIND,
+        "proposal_id": f"{task.get('run_id') or 'unknown'}:{suffix}",
+        "created_at": utc_timestamp(),
+        "source": source,
+        "status": "invalid",
+        "actions": [],
+        "evidence_refs": [],
+        "rationale": reason,
+    }
+
+
+def compact_llm_response(response: Any) -> Any:
+    if isinstance(response, dict):
+        compact = {
+            key: response.get(key)
+            for key in ("id", "model", "object", "created", "usage")
+            if key in response
+        }
+        if "choices" in response:
+            compact["choices"] = response["choices"]
+        return compact or response
+    return response
+
+
+def build_repair_messages(
+    prompt: dict[str, Any],
+    proposal: dict[str, Any],
+    validation: dict[str, Any],
+) -> list[dict[str, str]]:
+    messages = list(prompt["messages"])
+    messages.append(
+        {
+            "role": "assistant",
+            "content": json.dumps(proposal, indent=2, sort_keys=True),
+        }
+    )
+    messages.append(
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "repair_request": (
+                        "The proposal failed schema validation. Return a repaired "
+                        "proposal JSON object only."
+                    ),
+                    "validation_errors": validation.get("errors", []),
+                    "proposal_schema": prompt.get("schema_hint"),
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+        }
+    )
+    return messages
 
 
 def build_harness_optimization_decision(
@@ -778,6 +1267,29 @@ def validate_harness_optimization_proposal(
                     "message": f"unsupported action type {action_type!r}",
                 }
             )
+        payload = action.get("payload")
+        if action_type in DSL_PAYLOAD_ACTION_TYPES and not isinstance(payload, dict):
+            errors.append(
+                {
+                    "path": f"actions[{index}].payload",
+                    "message": f"{action_type} payload is required",
+                }
+            )
+        elif payload is not None and not isinstance(payload, dict):
+            errors.append(
+                {
+                    "path": f"actions[{index}].payload",
+                    "message": "expected payload object",
+                }
+            )
+        elif isinstance(payload, dict):
+            errors.extend(
+                action_payload_errors(
+                    str(action_type),
+                    payload,
+                    path=f"actions[{index}].payload",
+                )
+            )
         action_refs = list_value(action.get("evidence_refs")) or proposal_refs
         if status == "proposed" and not action_refs:
             errors.append(
@@ -802,6 +1314,164 @@ def validate_harness_optimization_proposal(
         "errors": errors,
         "allowed_action_types": sorted(allowed),
     }
+
+
+def action_payload_errors(
+    action_type: str,
+    payload: dict[str, Any],
+    *,
+    path: str,
+) -> list[dict[str, str]]:
+    if action_type == "replay_probe":
+        return replay_probe_payload_errors(payload, path=path)
+    if action_type == "scoreboard_check":
+        return scoreboard_check_payload_errors(payload, path=path)
+    if action_type == "coverage_feedback_tuning":
+        return coverage_feedback_tuning_payload_errors(payload, path=path)
+    return []
+
+
+def replay_probe_payload_errors(
+    payload: dict[str, Any],
+    *,
+    path: str,
+) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    fields = payload.get("fields")
+    signals = payload.get("signals")
+    probe = payload.get("probe")
+    if fields is None and signals is None and probe is None:
+        errors.append(
+            {
+                "path": path,
+                "message": "replay_probe payload requires fields, signals, or probe",
+            }
+        )
+    if fields is not None and not is_string_or_string_list(fields):
+        errors.append({"path": f"{path}.fields", "message": "expected string or list"})
+    if signals is not None and not is_string_or_string_list(signals):
+        errors.append({"path": f"{path}.signals", "message": "expected string or list"})
+    if probe is not None and not isinstance(probe, str):
+        errors.append({"path": f"{path}.probe", "message": "expected string"})
+    if "sample_on" in payload and not isinstance(payload["sample_on"], str):
+        errors.append({"path": f"{path}.sample_on", "message": "expected string"})
+    if "max_samples" in payload and not non_negative_int(payload["max_samples"]):
+        errors.append(
+            {"path": f"{path}.max_samples", "message": "expected non-negative integer"}
+        )
+    if "case_filter" in payload and not isinstance(payload["case_filter"], dict):
+        errors.append({"path": f"{path}.case_filter", "message": "expected object"})
+    return errors
+
+
+def scoreboard_check_payload_errors(
+    payload: dict[str, Any],
+    *,
+    path: str,
+) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    mode = str(payload.get("mode") or "actual_equals_expected")
+    if "mode" in payload and mode not in SCOREBOARD_CHECK_MODES:
+        errors.append(
+            {
+                "path": f"{path}.mode",
+                "message": f"expected one of {sorted(SCOREBOARD_CHECK_MODES)}",
+            }
+        )
+    if "mode" not in payload and "check" not in payload:
+        errors.append({"path": path, "message": "requires check or mode"})
+    if "check" in payload and not isinstance(payload["check"], str):
+        errors.append({"path": f"{path}.check", "message": "expected string"})
+    if "enforce" in payload and not isinstance(payload["enforce"], bool):
+        errors.append({"path": f"{path}.enforce", "message": "expected bool"})
+    if mode in {"field_equals", "field_range"}:
+        if not isinstance(payload.get("field"), str):
+            errors.append({"path": f"{path}.field", "message": "expected string"})
+    if mode == "field_equals" and "expected" not in payload:
+        errors.append({"path": f"{path}.expected", "message": "required"})
+    if mode == "field_range":
+        if "min" not in payload and "max" not in payload:
+            errors.append({"path": path, "message": "field_range requires min or max"})
+        for key in ("min", "max"):
+            if key in payload and number_value(payload[key]) is None:
+                errors.append({"path": f"{path}.{key}", "message": "expected number"})
+    return errors
+
+
+def coverage_feedback_tuning_payload_errors(
+    payload: dict[str, Any],
+    *,
+    path: str,
+) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    known_keys = {
+        "max_gap_count",
+        "directive_weight_multiplier",
+        "prioritize",
+        "gap_type",
+        "directive_source",
+        "min_weight",
+        "max_weight",
+    }
+    if not any(key in payload for key in known_keys):
+        errors.append({"path": path, "message": "requires at least one tuning field"})
+    if "max_gap_count" in payload and not non_negative_int(payload["max_gap_count"]):
+        errors.append(
+            {
+                "path": f"{path}.max_gap_count",
+                "message": "expected non-negative integer",
+            }
+        )
+    if "directive_weight_multiplier" in payload and not positive_number(
+        payload["directive_weight_multiplier"]
+    ):
+        errors.append(
+            {
+                "path": f"{path}.directive_weight_multiplier",
+                "message": "expected positive number",
+            }
+        )
+    for key in ("prioritize", "gap_type", "directive_source"):
+        if key in payload and not isinstance(payload[key], str):
+            errors.append({"path": f"{path}.{key}", "message": "expected string"})
+    for key in ("min_weight", "max_weight"):
+        if key in payload and number_value(payload[key]) is None:
+            errors.append({"path": f"{path}.{key}", "message": "expected number"})
+    if (
+        "min_weight" in payload
+        and "max_weight" in payload
+        and number_value(payload["min_weight"]) is not None
+        and number_value(payload["max_weight"]) is not None
+        and number_value(payload["min_weight"]) > number_value(payload["max_weight"])
+    ):
+        errors.append(
+            {
+                "path": path,
+                "message": "min_weight must be <= max_weight",
+            }
+        )
+    return errors
+
+
+def is_string_or_string_list(value: Any) -> bool:
+    return isinstance(value, str) or (
+        isinstance(value, list) and all(isinstance(item, str) for item in value)
+    )
+
+
+def non_negative_int(value: Any) -> bool:
+    number = number_value(value)
+    return (
+        number is not None
+        and int(number) == number
+        and number >= 0
+        and not isinstance(value, bool)
+    )
+
+
+def positive_number(value: Any) -> bool:
+    number = number_value(value)
+    return number is not None and number > 0
 
 
 def evidence_index_for(harness_evaluation: dict[str, Any]) -> dict[str, list[str]]:
@@ -1151,6 +1821,12 @@ def _resolved_path(value: object, cwd: Path) -> Path | None:
     if path.is_absolute():
         return path
     return cwd / path
+
+
+def _path_or_none(value: object) -> Path | None:
+    if not isinstance(value, str | Path) or not str(value):
+        return None
+    return Path(value)
 
 
 def _optional_path(name: str, path: Path | None) -> dict[str, str]:

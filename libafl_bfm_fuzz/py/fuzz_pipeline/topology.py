@@ -195,6 +195,8 @@ RUN_ORCHESTRATION_TOPOLOGY = PipelineTopology(
         ComponentNode("campaign_manifest", "artifact", "Multi-round campaign manifest"),
         ComponentNode("evaluation_report", "artifact", "Run or campaign evaluation report"),
         ComponentNode("harness_optimization_task", "artifact", "Structured harness optimization task"),
+        ComponentNode("harness_optimization_optimizer_prompt", "artifact", "Optional LLM optimizer prompt artifact"),
+        ComponentNode("harness_optimization_optimizer_response", "artifact", "Optional LLM optimizer response provenance"),
         ComponentNode("harness_optimization_proposal", "artifact", "Optimizer proposal before application"),
         ComponentNode("harness_optimization_decision", "artifact", "Schema-level accept/reject decision"),
         ComponentNode("harness_optimization_patch", "artifact", "Sandbox-only candidate artifact application manifest"),

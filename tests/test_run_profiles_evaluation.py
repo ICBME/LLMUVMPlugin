@@ -449,6 +449,7 @@ class FakeHarnessOptimizerBackend:
                     "action_id": "action-1",
                     "action_type": "scoreboard_check",
                     "target": "demo",
+                    "payload": {"mode": "record_seen"},
                     "rationale": "tighten failing case scoreboard checks",
                     "evidence_refs": [{"span_id": "span-dut"}],
                 }

@@ -71,8 +71,10 @@
   adapter。
 - `run_evaluation.py`：默认 round/campaign evaluation report adapter，以及可替换的
   `EvaluationBackends`。
-- `harness_optimization.py`：从 campaign evaluation、harness evaluation、LLM dataset 和
-  campaign rollup 生成 optimization task/proposal/schema decision，并支持显式 profile 下的
+- `harness_optimization.py`：从 campaign evaluation、harness evaluation、LLM dataset、
+  campaign rollup 和 action effect report 生成 optimization task/proposal/schema
+  decision；可显式注入真实 LLM optimizer backend 写出 prompt/response provenance，并在
+  proposal schema/safe action DSL 校验失败时 repair/retry；同时支持显式 profile 下的
   sandbox apply、candidate evaluation、metric delta 和 final decision artifacts。
 - `harness_candidate_regression.py`：真实 candidate validation backend，将安全 proposal
   action 子集物化成 sandbox run config；candidate action adapter 会把 `replay_probe`、
@@ -190,7 +192,9 @@ Makefile 会把 `CARGO` 作为一个完整 wrapper 字符串传给 pipeline runn
     review-only promotion package，并在 candidate run 内通过 `HARNESS_RUNTIME_METRICS_OUT`
     汇总 runtime action execution metrics；第六阶段还会按 `action_id` / `action_type`
     生成 action effect report，并可通过 `max_variant_regressions` 启用 top-K variant
-    独立回归；默认主流程和源码主线不受影响。
+    独立回归。第七阶段可显式注入 `LlmHarnessOptimizerBackend`，由 LLM 基于 evaluation、
+    dataset、rollup 和 action effect report 生成 schema-valid safe action proposal，并保留
+    prompt/response provenance；默认主流程和源码主线不受影响。
 
 结构化 coverage export 和 `rtl_gap` 的 schema 见
 [Coverage Feedback 设计](coverage_feedback_design.md)。

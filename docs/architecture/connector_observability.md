@@ -50,6 +50,9 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 - `FULL_FUZZ_TOPOLOGY` 合并为完整 `libafl_bfm_fuzz` 拓扑。
 - `ConnectorEdge` 可声明 `input_roles`、`output_roles` 和 `required`，作为
   orchestration 层的最小 artifact contract。
+- Harness optimization 拓扑中包含可选的 `harness_optimization_optimizer_prompt` 和
+  `harness_optimization_optimizer_response` artifact 节点；它们只在真实 LLM optimizer
+  backend 下落盘，不是默认 no-op 流程的必产物。
 
 `py/fuzz_pipeline/orchestrator.py`
 
@@ -145,6 +148,10 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 - 默认 `NoopHarnessOptimizerBackend` 生成 schema-valid no-op proposal；
   decision stage 只做 schema-level accept/reject，并将 `application_status` 标为
   `not_applied`。
+- `LlmHarnessOptimizerBackend` 是显式注入的真实 LLM optimizer backend。它会把 harness
+  evaluation、LLM dataset、campaign rollup 和 action effect report 组装成 optimizer
+  prompt artifact，调用 OpenAI-compatible chat transport，记录 response provenance，并在
+  proposal schema/safe action DSL 校验失败时生成 repair prompt 重试。
 - 第二阶段 profile 使用 sandbox-only apply：安全 action 子集会被转换为
   `harness_optimization_sandbox` 下的候选 artifact；`ref_model_patch` 等潜在源码修改
   先标为 unsafe/skipped。默认 `NoopHarnessCandidateEvaluationBackend` 只写
@@ -172,8 +179,9 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 - 定义 safe action runtime config schema、loader 和 metrics writer。
 - `replay_probe` 由 pyUVM replay driver adapter 消费，记录 case/result 字段采样和
   Python runtime 无法直接采样的 signal request；`scoreboard_check` 由 scoreboard adapter
-  消费，记录额外 check 的 pass/fail/enforced failure；`coverage_feedback_tuning` 由
-  `CoverageFeedbackPipeline` 消费，用于限制 gap 选择、调整 directive weight，并写出
+  消费，记录额外 check 的 pass/fail/enforced failure，并支持 result/case/record 字段
+  equality/range check；`coverage_feedback_tuning` 由 `CoverageFeedbackPipeline` 消费，
+  用于限制 gap 选择、调整 directive weight、按 min/max clamp 权重，并写出
   `harness_runtime_metrics`。
 - 默认没有 `HARNESS_*_CONFIG` / `HARNESS_RUNTIME_METRICS_OUT` 时不加载 runtime action，
   因此主 `feedback_fuzz` / `no_feedback` 流程行为不变。

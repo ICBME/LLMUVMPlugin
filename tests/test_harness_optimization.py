@@ -27,6 +27,7 @@ from fuzz_pipeline import (  # noqa: E402
     EvaluationBackends,
     FINAL_DECISION_KIND,
     HarnessCandidateRegressionBackend,
+    LlmHarnessOptimizerBackend,
     METRIC_DELTA_KIND,
     PATCH_KIND,
     PROPOSAL_KIND,
@@ -45,6 +46,8 @@ from fuzz_pipeline.harness_runtime_actions import (  # noqa: E402
     REPLAY_PROBE_CONFIG_ENV,
     RUNTIME_METRICS_OUT_ENV,
     SCOREBOARD_CHECK_CONFIG_ENV,
+    CoverageFeedbackTuningRuntime,
+    ReplayProbeRuntime,
     extra_make_var_value,
     load_runtime_action_config,
     merge_runtime_metrics,
@@ -136,6 +139,71 @@ class RaisingOptimizerBackend:
         raise RuntimeError("llm unavailable")
 
 
+class RepairingLlmTransport:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def complete(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        model: str,
+        temperature: float,
+        response_format: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "messages": messages,
+                "model": model,
+                "temperature": temperature,
+                "response_format": response_format,
+            }
+        )
+        if len(self.calls) == 1:
+            content = {
+                "schema_version": 1,
+                "kind": PROPOSAL_KIND,
+                "proposal_id": "proposal-needs-repair",
+                "status": "proposed",
+                "actions": [
+                    {
+                        "action_id": "scoreboard-bad",
+                        "action_type": "scoreboard_check",
+                        "payload": {"mode": "field_equals"},
+                        "evidence_refs": [{"span_id": "span-dut"}],
+                    }
+                ],
+                "evidence_refs": [{"span_id": "span-dut"}],
+            }
+        else:
+            content = {
+                "schema_version": 1,
+                "kind": PROPOSAL_KIND,
+                "proposal_id": "proposal-repaired",
+                "status": "proposed",
+                "source": "fake-llm",
+                "actions": [
+                    {
+                        "action_id": "scoreboard-1",
+                        "action_type": "scoreboard_check",
+                        "payload": {
+                            "mode": "field_equals",
+                            "field": "result.actual",
+                            "expected": "ok",
+                        },
+                        "evidence_refs": [{"span_id": "span-dut"}],
+                    }
+                ],
+                "evidence_refs": [{"span_id": "span-dut"}],
+                "rationale": "repair scoreboard field check",
+            }
+        return {
+            "id": f"resp-{len(self.calls)}",
+            "model": model,
+            "choices": [{"message": {"content": json.dumps(content)}}],
+        }
+
+
 def test_harness_optimization_backend_error_becomes_rejected_decision() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -159,6 +227,129 @@ def test_harness_optimization_backend_error_becomes_rejected_decision() -> None:
     assert proposal["error"]["type"] == "RuntimeError"
     assert decision["decision"] == "rejected"
     assert decision["validation"]["errors"][0]["path"] == "status"
+
+
+def test_llm_optimizer_backend_writes_prompt_response_and_repairs() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        campaign_evaluation, campaign_manifest, manifest_path = _source_payloads(root)
+        action_effect = root / "candidate_action_effect_report.json"
+        action_effect.write_text(
+            json.dumps(
+                {
+                    "summary": {
+                        "variant_count": 1,
+                        "runtime_action_count": 1,
+                        "consumed_action_count": 1,
+                    },
+                    "variants": [
+                        {
+                            "variant_id": "combined",
+                            "actions": [
+                                {
+                                    "action_id": "scoreboard-old",
+                                    "action_type": "scoreboard_check",
+                                    "consumed": True,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        campaign_manifest["artifacts"][
+            "candidate_action_effect_report"
+        ] = str(action_effect)
+        manifest_path.write_text(json.dumps(campaign_manifest) + "\n", encoding="utf-8")
+        evaluation_path = root / "campaign_evaluation.json"
+        paths = harness_optimization_paths(evaluation_path)
+        transport = RepairingLlmTransport()
+        adapter = HarnessOptimizationAdapter(
+            target="demo",
+            paths=paths,
+            campaign_evaluation_path=evaluation_path,
+            campaign_manifest_path=manifest_path,
+            cwd=root,
+            optimizer_backend=LlmHarnessOptimizerBackend(
+                model="fake-model",
+                transport=transport,
+                source="fake-llm",
+                max_repair_attempts=1,
+            ),
+        )
+
+        task = adapter.run_task(campaign_evaluation, campaign_manifest)
+        proposal = adapter.run_proposal(task)
+        decision = adapter.run_decision(task, proposal)
+        prompt = json.loads(paths.optimizer_prompt.read_text(encoding="utf-8"))
+        response = json.loads(paths.optimizer_response.read_text(encoding="utf-8"))
+
+    assert len(transport.calls) == 2
+    assert task["summary"]["action_effect"]["consumed_action_count"] == 1
+    assert prompt["context"]["action_effect_report"]["summary"][
+        "consumed_action_count"
+    ] == 1
+    assert response["attempt_count"] == 2
+    assert response["attempts"][0]["valid"] is False
+    assert response["attempts"][1]["valid"] is True
+    assert proposal["proposal_id"] == "proposal-repaired"
+    assert proposal["llm_provenance"]["prompt_artifact"] == str(paths.optimizer_prompt)
+    assert proposal["llm_provenance"]["response_artifact"] == str(
+        paths.optimizer_response
+    )
+    assert proposal["llm_provenance"]["repaired"] is True
+    assert decision["decision"] == "accepted"
+
+
+def test_harness_optimization_decision_rejects_invalid_safe_action_dsl() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        campaign_evaluation, campaign_manifest, manifest_path = _source_payloads(root)
+        evaluation_path = root / "campaign_evaluation.json"
+        paths = harness_optimization_paths(evaluation_path)
+        task = HarnessOptimizationAdapter(
+            target="demo",
+            paths=paths,
+            campaign_evaluation_path=evaluation_path,
+            campaign_manifest_path=manifest_path,
+            cwd=root,
+        ).run_task(campaign_evaluation, campaign_manifest)
+        proposal = {
+            "schema_version": 1,
+            "kind": PROPOSAL_KIND,
+            "proposal_id": "proposal-invalid-dsl",
+            "status": "proposed",
+            "actions": [
+                {
+                    "action_id": "scoreboard-1",
+                    "action_type": "scoreboard_check",
+                    "payload": {"mode": "field_range", "field": "result.latency"},
+                    "evidence_refs": [{"span_id": "span-dut"}],
+                },
+                {
+                    "action_id": "tuning-1",
+                    "action_type": "coverage_feedback_tuning",
+                    "payload": {"min_weight": 3, "max_weight": 1},
+                    "evidence_refs": [{"span_id": "span-dut"}],
+                },
+                {
+                    "action_id": "probe-1",
+                    "action_type": "replay_probe",
+                    "evidence_refs": [{"span_id": "span-dut"}],
+                },
+            ],
+            "evidence_refs": [{"span_id": "span-dut"}],
+        }
+
+        decision = build_harness_optimization_decision(task=task, proposal=proposal)
+
+    assert decision["decision"] == "rejected"
+    messages = [item["message"] for item in decision["validation"]["errors"]]
+    assert "field_range requires min or max" in messages
+    assert "min_weight must be <= max_weight" in messages
+    assert "replay_probe payload is required" in messages
 
 
 class PassingCandidateEvaluationBackend:
@@ -437,7 +628,32 @@ def test_runtime_action_schema_validation() -> None:
                         {
                             "action_id": "probe-1",
                             "action_type": "replay_probe",
-                            "payload": {"fields": ["case.mode"]},
+                            "payload": {
+                                "fields": ["case.mode"],
+                                "max_samples": 1,
+                                "case_filter": {"case.mode": "read"},
+                            },
+                        }
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        valid_scoreboard = root / "scoreboard_field_range.json"
+        valid_scoreboard.write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "action_id": "scoreboard-1",
+                            "action_type": "scoreboard_check",
+                            "payload": {
+                                "mode": "field_range",
+                                "field": "result.latency",
+                                "min": 0,
+                                "max": 10,
+                            },
                         }
                     ]
                 }
@@ -493,8 +709,28 @@ def test_runtime_action_schema_validation() -> None:
             + "\n",
             encoding="utf-8",
         )
+        invalid_weight_bounds = root / "invalid_weight_bounds.json"
+        invalid_weight_bounds.write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "action_id": "tuning-3",
+                            "action_type": "coverage_feedback_tuning",
+                            "payload": {"min_weight": 3, "max_weight": 1},
+                        }
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
         config = load_runtime_action_config(valid, action_type="replay_probe")
+        scoreboard_config = load_runtime_action_config(
+            valid_scoreboard,
+            action_type="scoreboard_check",
+        )
         try:
             load_runtime_action_config(invalid, action_type="replay_probe")
         except ValueError as exc:
@@ -519,11 +755,129 @@ def test_runtime_action_schema_validation() -> None:
             fractional_message = str(exc)
         else:
             raise AssertionError("fractional max_gap_count should fail schema")
+        try:
+            load_runtime_action_config(
+                invalid_weight_bounds,
+                action_type="coverage_feedback_tuning",
+            )
+        except ValueError as exc:
+            weight_bounds_message = str(exc)
+        else:
+            raise AssertionError("invalid tuning weight bounds should fail schema")
 
     assert config.entries[0].payload["fields"] == ["case.mode"]
+    assert scoreboard_config.entries[0].payload["mode"] == "field_range"
     assert "requires fields, signals, or probe" in message
     assert "max_gap_count must be a non-negative integer" in tuning_message
     assert "max_gap_count must be a non-negative integer" in fractional_message
+    assert "min_weight must be <= max_weight" in weight_bounds_message
+
+
+def test_replay_probe_runtime_consumes_filter_and_sample_limit() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        replay_config = root / "replay_probe.json"
+        metrics = root / "runtime_metrics.json"
+        replay_config.write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "action_id": "probe-1",
+                            "action_type": "replay_probe",
+                            "payload": {
+                                "fields": ["case.mode", "result.actual"],
+                                "max_samples": 1,
+                                "case_filter": {"case.mode": "read"},
+                            },
+                        }
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        runtime = ReplayProbeRuntime(
+            load_runtime_action_config(replay_config, action_type="replay_probe"),
+            metrics_out=metrics,
+        )
+        runtime.sample(
+            index=0,
+            case=FuzzCase("demo", {"mode": "read"}, line_no=1),
+            result=ReplayResult(actual="ok"),
+        )
+        runtime.sample(
+            index=1,
+            case=FuzzCase("demo", {"mode": "read"}, line_no=2),
+            result=ReplayResult(actual="ok"),
+        )
+        runtime.sample(
+            index=2,
+            case=FuzzCase("demo", {"mode": "write"}, line_no=3),
+            result=ReplayResult(actual="ok"),
+        )
+        payload = json.loads(metrics.read_text(encoding="utf-8"))
+
+    assert payload["summary"]["replay_probe_sample_count"] == 1
+    assert payload["summary"]["replay_probe_skipped_count"] == 2
+
+
+def test_coverage_feedback_tuning_runtime_consumes_filters() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        tuning = root / "coverage_tuning.json"
+        metrics = root / "runtime_metrics.json"
+        tuning.write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "action_id": "tuning-1",
+                            "action_type": "coverage_feedback_tuning",
+                            "payload": {
+                                "gap_type": "branch",
+                                "directive_source": "selected",
+                                "max_gap_count": 1,
+                                "directive_weight_multiplier": 2,
+                            },
+                        }
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        runtime = CoverageFeedbackTuningRuntime.from_path(
+            tuning,
+            metrics_out=metrics,
+        )
+        summary = runtime.apply_summary(
+            {
+                "rtl_gap_summary": {
+                    "top_gaps": [
+                        {"gap_id": "gap-1", "gap_type": "branch"},
+                        {"gap_id": "gap-2", "gap_type": "line"},
+                    ]
+                }
+            }
+        )
+        directives = runtime.apply_directives(
+            {
+                "directives": [
+                    {"source": "selected", "gap_type": "branch", "weight": 1},
+                    {"source": "other", "gap_type": "branch", "weight": 1},
+                    {"source": "selected", "gap_type": "line", "weight": 1},
+                ]
+            }
+        )
+        payload = json.loads(metrics.read_text(encoding="utf-8"))
+
+    assert summary["rtl_gap_summary"]["top_gaps"] == [
+        {"gap_id": "gap-1", "gap_type": "branch"}
+    ]
+    assert [item["weight"] for item in directives["directives"]] == [2, 1, 1]
+    assert payload["summary"]["coverage_feedback_tuning_filtered_gap_count"] == 1
+    assert payload["summary"]["coverage_feedback_tuning_weighted_directive_count"] == 1
 
 
 def test_replay_and_scoreboard_runtime_actions_are_consumed() -> None:
@@ -544,6 +898,8 @@ def test_replay_and_scoreboard_runtime_actions_are_consumed() -> None:
                             "payload": {
                                 "fields": ["case.mode", "result.actual"],
                                 "signals": ["dut.state"],
+                                "max_samples": 1,
+                                "case_filter": {"case.mode": "read"},
                             },
                         }
                     ]
@@ -559,7 +915,11 @@ def test_replay_and_scoreboard_runtime_actions_are_consumed() -> None:
                         {
                             "action_id": "scoreboard-1",
                             "action_type": "scoreboard_check",
-                            "payload": {"check": "case result must match reference"},
+                            "payload": {
+                                "mode": "field_equals",
+                                "field": "result.actual",
+                                "expected": "ok",
+                            },
                         }
                     ]
                 }
@@ -623,6 +983,7 @@ def test_coverage_feedback_tuning_runtime_action_is_consumed() -> None:
                             "payload": {
                                 "max_gap_count": 1,
                                 "directive_weight_multiplier": 2,
+                                "max_weight": 1.5,
                                 "prioritize": "uncovered",
                             },
                         }
@@ -654,7 +1015,7 @@ def test_coverage_feedback_tuning_runtime_action_is_consumed() -> None:
     assert result.summary["harness_runtime_actions"][
         "coverage_feedback_tuning"
     ]["applied_count"] == 1
-    assert result.heuristic_directives["directives"][0]["weight"] == 2
+    assert result.heuristic_directives["directives"][0]["weight"] == 1.5
     assert runtime_metrics["summary"][
         "coverage_feedback_tuning_weighted_directive_count"
     ] == 1
@@ -794,6 +1155,7 @@ def test_harness_optimization_invalid_candidate_evaluation_is_rejected() -> None
                 {
                     "action_id": "scoreboard-1",
                     "action_type": "scoreboard_check",
+                    "payload": {"mode": "record_seen"},
                     "evidence_refs": [{"span_id": "span-dut"}],
                 }
             ],

@@ -1298,6 +1298,13 @@ class CampaignOrchestrator:
             return {}
         paths = self._campaign_optimization_paths()
         artifacts = paths.to_json()
+        artifacts.update(
+            {
+                role: path
+                for role, path in paths.optimizer_io_json().items()
+                if Path(path).exists()
+            }
+        )
         if self._campaign_plan_includes("harness_optimization_apply"):
             artifacts.update(paths.validation_json())
         return artifacts

@@ -139,6 +139,7 @@ class ReplayProbeRuntime:
         self.sample_count = 0
         self.field_sample_count = 0
         self.signal_request_count = 0
+        self.skipped_count = 0
         self.samples: list[dict[str, Any]] = []
         self.action_metrics = _initial_action_metrics(
             config,
@@ -147,6 +148,7 @@ class ReplayProbeRuntime:
                 "field_sample_count": 0,
                 "signal_request_count": 0,
                 "unavailable_signal_count": 0,
+                "skipped_count": 0,
             },
         )
 
@@ -165,6 +167,19 @@ class ReplayProbeRuntime:
             return
         for entry in self.config.entries:
             payload = entry.payload
+            action_metrics = self._action_metrics(entry)
+            if not _probe_filter_matches(payload, case=case, result=result):
+                self.skipped_count += 1
+                action_metrics["skipped_count"] += 1
+                continue
+            max_samples = _int_value(payload.get("max_samples"))
+            if (
+                max_samples is not None
+                and action_metrics["sample_count"] >= max_samples
+            ):
+                self.skipped_count += 1
+                action_metrics["skipped_count"] += 1
+                continue
             fields = _probe_fields(payload)
             signals = _string_list(payload.get("signals"), field="signals")
             values = {
@@ -174,7 +189,6 @@ class ReplayProbeRuntime:
             self.sample_count += 1
             self.field_sample_count += len(values)
             self.signal_request_count += len(signals)
-            action_metrics = self._action_metrics(entry)
             action_metrics["sample_count"] += 1
             action_metrics["field_sample_count"] += len(values)
             action_metrics["signal_request_count"] += len(signals)
@@ -201,6 +215,7 @@ class ReplayProbeRuntime:
             "field_sample_count": self.field_sample_count,
             "signal_request_count": self.signal_request_count,
             "unavailable_signal_count": self.signal_request_count,
+            "skipped_count": self.skipped_count,
             "sample_preview_count": len(self.samples),
             "actions": _sorted_action_metrics(self.action_metrics),
         }
@@ -215,6 +230,7 @@ class ReplayProbeRuntime:
                     "field_sample_count": 0,
                     "signal_request_count": 0,
                     "unavailable_signal_count": 0,
+                    "skipped_count": 0,
                 },
             ),
         )
@@ -350,12 +366,14 @@ class CoverageFeedbackTuningRuntime:
         self.metrics_out = metrics_out
         self.applied_count = 0
         self.trimmed_gap_count = 0
+        self.filtered_gap_count = 0
         self.weighted_directive_count = 0
         self.action_metrics = _initial_action_metrics(
             config,
             {
                 "applied_count": 0,
                 "trimmed_gap_count": 0,
+                "filtered_gap_count": 0,
                 "directive_application_count": 0,
                 "weighted_directive_count": 0,
             },
@@ -386,6 +404,16 @@ class CoverageFeedbackTuningRuntime:
             for entry in self.config.entries:
                 action_metrics = self._action_metrics(entry)
                 action_metrics["applied_count"] += 1
+                if "gap_type" in entry.payload:
+                    before = len(current_gaps)
+                    current_gaps = [
+                        gap
+                        for gap in current_gaps
+                        if _gap_matches_filter(gap, entry.payload)
+                    ]
+                    filtered = before - len(current_gaps)
+                    self.filtered_gap_count += filtered
+                    action_metrics["filtered_gap_count"] += filtered
                 if "max_gap_count" not in entry.payload:
                     continue
                 limit = int(entry.payload["max_gap_count"])
@@ -420,6 +448,8 @@ class CoverageFeedbackTuningRuntime:
                     action_metrics["directive_application_count"] += 1
                     if not isinstance(updated, dict):
                         continue
+                    if not _directive_matches_filter(updated, entry.payload):
+                        continue
                     multiplier = _number(entry.payload.get("directive_weight_multiplier"))
                     if multiplier is None:
                         continue
@@ -427,6 +457,10 @@ class CoverageFeedbackTuningRuntime:
                     if weight is None:
                         continue
                     updated["weight"] = weight * multiplier
+                    if (min_weight := _number(entry.payload.get("min_weight"))) is not None:
+                        updated["weight"] = max(updated["weight"], min_weight)
+                    if (max_weight := _number(entry.payload.get("max_weight"))) is not None:
+                        updated["weight"] = min(updated["weight"], max_weight)
                     action_metrics["weighted_directive_count"] += 1
                     directive_weighted = True
                 if directive_weighted:
@@ -445,6 +479,7 @@ class CoverageFeedbackTuningRuntime:
             "configured_count": configured,
             "applied_count": self.applied_count,
             "trimmed_gap_count": self.trimmed_gap_count,
+            "filtered_gap_count": self.filtered_gap_count,
             "weighted_directive_count": self.weighted_directive_count,
             "actions": _sorted_action_metrics(self.action_metrics),
         }
@@ -488,6 +523,7 @@ class CoverageFeedbackTuningRuntime:
                 {
                     "applied_count": 0,
                     "trimmed_gap_count": 0,
+                    "filtered_gap_count": 0,
                     "directive_application_count": 0,
                     "weighted_directive_count": 0,
                 },
@@ -569,6 +605,17 @@ def _validate_payload(entry: RuntimeActionEntry, *, path: Path, index: int) -> N
                 f"{path}: entries[{index}].payload requires fields, signals, or probe"
             )
         _optional_string(payload, "sample_on", path=path, index=index)
+        if "max_samples" in payload:
+            max_samples = _int_value(payload["max_samples"])
+            if max_samples is None or max_samples < 0:
+                raise ValueError(
+                    f"{path}: entries[{index}].payload.max_samples "
+                    "must be a non-negative integer"
+                )
+        if "case_filter" in payload and not isinstance(payload["case_filter"], dict):
+            raise ValueError(
+                f"{path}: entries[{index}].payload.case_filter must be an object"
+            )
         return
     if entry.action_type == "scoreboard_check":
         _optional_string(payload, "mode", path=path, index=index)
@@ -577,6 +624,29 @@ def _validate_payload(entry: RuntimeActionEntry, *, path: Path, index: int) -> N
             raise ValueError(
                 f"{path}: entries[{index}].payload requires check or mode"
             )
+        mode = str(payload.get("mode") or "actual_equals_expected")
+        if mode not in {
+            "actual_equals_expected",
+            "record_seen",
+            "require_no_error",
+            "field_equals",
+            "field_range",
+        }:
+            raise ValueError(f"{path}: entries[{index}].payload.mode is unsupported")
+        if mode in {"field_equals", "field_range"}:
+            _required_string(payload, "field", path=path, index=index)
+        if mode == "field_equals" and "expected" not in payload:
+            raise ValueError(f"{path}: entries[{index}].payload.expected is required")
+        if mode == "field_range":
+            if "min" not in payload and "max" not in payload:
+                raise ValueError(
+                    f"{path}: entries[{index}].payload requires min or max"
+                )
+            for field in ("min", "max"):
+                if field in payload and _number(payload[field]) is None:
+                    raise ValueError(
+                        f"{path}: entries[{index}].payload.{field} must be a number"
+                    )
         if "enforce" in payload and not isinstance(payload["enforce"], bool):
             raise ValueError(f"{path}: entries[{index}].payload.enforce must be bool")
         return
@@ -588,15 +658,29 @@ def _validate_payload(entry: RuntimeActionEntry, *, path: Path, index: int) -> N
                     f"{path}: entries[{index}].payload.max_gap_count "
                     "must be a non-negative integer"
                 )
+        if "directive_weight_multiplier" in payload:
+            multiplier = _number(payload["directive_weight_multiplier"])
+            if multiplier is None or multiplier <= 0:
+                raise ValueError(
+                    f"{path}: entries[{index}].payload.directive_weight_multiplier "
+                    "must be > 0"
+                )
+        _optional_string(payload, "prioritize", path=path, index=index)
+        _optional_string(payload, "gap_type", path=path, index=index)
+        _optional_string(payload, "directive_source", path=path, index=index)
+        for field in ("min_weight", "max_weight"):
+            if field in payload and _number(payload[field]) is None:
+                raise ValueError(
+                    f"{path}: entries[{index}].payload.{field} must be a number"
+                )
         if (
-            "directive_weight_multiplier" in payload
-            and float(payload["directive_weight_multiplier"]) <= 0
+            "min_weight" in payload
+            and "max_weight" in payload
+            and _number(payload["min_weight"]) > _number(payload["max_weight"])
         ):
             raise ValueError(
-                f"{path}: entries[{index}].payload.directive_weight_multiplier "
-                "must be > 0"
+                f"{path}: entries[{index}].payload.min_weight must be <= max_weight"
             )
-        _optional_string(payload, "prioritize", path=path, index=index)
 
 
 def _optional_string(
@@ -607,6 +691,17 @@ def _optional_string(
     index: int,
 ) -> None:
     if field in payload and not isinstance(payload[field], str):
+        raise ValueError(f"{path}: entries[{index}].payload.{field} must be a string")
+
+
+def _required_string(
+    payload: Mapping[str, Any],
+    field: str,
+    *,
+    path: Path,
+    index: int,
+) -> None:
+    if not isinstance(payload.get(field), str):
         raise ValueError(f"{path}: entries[{index}].payload.{field} must be a string")
 
 
@@ -639,8 +734,46 @@ def _probe_value(field: str, *, case: Any, result: Any) -> Any:
     return getattr(result, field, None)
 
 
+def _probe_filter_matches(payload: Mapping[str, Any], *, case: Any, result: Any) -> bool:
+    filters = payload.get("case_filter")
+    if not isinstance(filters, dict) or not filters:
+        return True
+    for field, expected in filters.items():
+        if _probe_value(str(field), case=case, result=result) != expected:
+            return False
+    return True
+
+
 def _mapping_value(values: Any, key: str) -> Any:
     return values.get(key) if isinstance(values, dict) else None
+
+
+def _gap_matches_filter(gap: Any, payload: Mapping[str, Any]) -> bool:
+    if not isinstance(gap, dict):
+        return False
+    if "gap_type" not in payload:
+        return True
+    expected = payload.get("gap_type")
+    actual = gap.get("gap_type", gap.get("type", gap.get("category")))
+    return actual == expected
+
+
+def _directive_matches_filter(
+    directive: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> bool:
+    if "directive_source" in payload and directive.get("source") != payload.get(
+        "directive_source"
+    ):
+        return False
+    if "gap_type" in payload:
+        actual = directive.get(
+            "gap_type",
+            directive.get("type", directive.get("category")),
+        )
+        if actual != payload.get("gap_type"):
+            return False
+    return True
 
 
 def _evaluate_scoreboard_entry(
@@ -653,6 +786,23 @@ def _evaluate_scoreboard_entry(
     if mode == "require_no_error":
         error = getattr(record, "error", None)
         return error is None, str(error or "ok")
+    if mode == "field_equals":
+        field = str(entry.payload.get("field") or "")
+        actual = _record_field_value(record, field)
+        expected = entry.payload.get("expected")
+        return actual == expected, f"{field}: actual={actual} expected={expected}"
+    if mode == "field_range":
+        field = str(entry.payload.get("field") or "")
+        value = _number(_record_field_value(record, field))
+        if value is None:
+            return False, f"{field}: non-numeric value"
+        min_value = _number(entry.payload.get("min"))
+        max_value = _number(entry.payload.get("max"))
+        if min_value is not None and value < min_value:
+            return False, f"{field}: {value} < {min_value}"
+        if max_value is not None and value > max_value:
+            return False, f"{field}: {value} > {max_value}"
+        return True, f"{field}: {value} in range"
     result = getattr(record, "result", None)
     if getattr(record, "error", None) is not None:
         return False, str(getattr(record, "error"))
@@ -663,6 +813,20 @@ def _evaluate_scoreboard_entry(
     if expected is None:
         return False, "missing expected result"
     return actual == expected, f"actual={actual} expected={expected}"
+
+
+def _record_field_value(record: Any, field: str) -> Any:
+    if field.startswith("result."):
+        return getattr(getattr(record, "result", None), field[7:], None)
+    if field.startswith("case."):
+        case = getattr(record, "case", None)
+        return _mapping_value(getattr(case, "data", {}), field[5:])
+    if field.startswith("record."):
+        return getattr(record, field[7:], None)
+    result = getattr(record, "result", None)
+    if result is not None and hasattr(result, field):
+        return getattr(result, field)
+    return getattr(record, field, None)
 
 
 def _number(value: Any) -> int | float | None:
