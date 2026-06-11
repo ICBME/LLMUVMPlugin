@@ -30,6 +30,21 @@ CAMPAIGN_EVALUATION_ENABLE ?=
 CAMPAIGN_MODES ?= heuristic_feedback
 CAMPAIGN_PLAN_PROFILE ?=
 CAMPAIGN_ROUNDS ?= 2
+HARNESS_OPTIMIZER_BACKEND ?=
+HARNESS_CANDIDATE_BACKEND ?=
+CANDIDATE_MODES ?=
+CANDIDATE_ROUNDS ?=
+CANDIDATE_ITERS ?=
+CANDIDATE_MAX_SEEDS ?=
+CANDIDATE_SEED ?=
+CANDIDATE_MAX_VARIANT_REGRESSIONS ?=
+CANDIDATE_RUN_PLAN_PROFILE ?=
+CANDIDATE_CAMPAIGN_PLAN_PROFILE ?=
+CANDIDATE_ROUND_EVALUATION ?=
+CANDIDATE_MATCHED_BASELINE ?=
+CANDIDATE_MAX_REGRESSED_METRICS ?=
+CANDIDATE_MIN_IMPROVED_METRICS ?=
+CANDIDATE_ACCEPTED_STATUSES ?=
 CONNECTOR_OBSERVE_OUT ?=
 CONNECTOR_OBSERVE_RUN_ID ?=
 CONNECTOR_OBSERVE_ROUND_ID ?= $(ROUND_ID)
@@ -98,7 +113,7 @@ GHDL_ARGS := --ieee=synopsys
 COCOTB_HDL_TIMEUNIT = 1ns
 COCOTB_HDL_TIMEPRECISION = 1ps
 
-.PHONY: generate-corpus check check-corpus check-uvm check-all coverage-run coverage-report coverage-feedback llm-coverage-feedback feedback-fuzz llm-feedback-fuzz feedback-campaign llm-feedback-campaign require-target-config require-rtl
+.PHONY: generate-corpus check check-corpus check-uvm check-all coverage-run coverage-report coverage-feedback llm-coverage-feedback feedback-fuzz llm-feedback-fuzz feedback-campaign real-candidate-feedback-campaign llm-feedback-campaign require-target-config require-rtl
 
 COCOTB_MAKEFILES := $(shell cocotb-config --makefiles 2>/dev/null)
 ifneq ($(COCOTB_MAKEFILES),)
@@ -285,6 +300,23 @@ feedback-campaign: require-rtl
 		$(if $(filter 1,$(CAMPAIGN_EVALUATION_ENABLE)),--campaign-evaluation-out $(CAMPAIGN_EVALUATION),) \
 		--modes $(CAMPAIGN_MODES) \
 		--rounds $(CAMPAIGN_ROUNDS) \
+		$(if $(HARNESS_OPTIMIZER_BACKEND),--harness-optimizer-backend $(HARNESS_OPTIMIZER_BACKEND),) \
+		$(if $(HARNESS_CANDIDATE_BACKEND),--harness-candidate-backend $(HARNESS_CANDIDATE_BACKEND),) \
+		$(if $(CANDIDATE_MODES),--candidate-modes $(CANDIDATE_MODES),) \
+		$(if $(CANDIDATE_ROUNDS),--candidate-rounds $(CANDIDATE_ROUNDS),) \
+		$(if $(CANDIDATE_ITERS),--candidate-iters $(CANDIDATE_ITERS),) \
+		$(if $(CANDIDATE_MAX_SEEDS),--candidate-max-seeds $(CANDIDATE_MAX_SEEDS),) \
+		$(if $(CANDIDATE_SEED),--candidate-seed $(CANDIDATE_SEED),) \
+		$(if $(CANDIDATE_MAX_VARIANT_REGRESSIONS),--candidate-max-variant-regressions $(CANDIDATE_MAX_VARIANT_REGRESSIONS),) \
+		$(if $(CANDIDATE_RUN_PLAN_PROFILE),--candidate-run-plan-profile $(CANDIDATE_RUN_PLAN_PROFILE),) \
+		$(if $(CANDIDATE_CAMPAIGN_PLAN_PROFILE),--candidate-campaign-plan-profile $(CANDIDATE_CAMPAIGN_PLAN_PROFILE),) \
+		$(if $(filter 1,$(CANDIDATE_ROUND_EVALUATION)),--candidate-round-evaluation,) \
+		$(if $(filter 0,$(CANDIDATE_ROUND_EVALUATION)),--no-candidate-round-evaluation,) \
+		$(if $(filter 1,$(CANDIDATE_MATCHED_BASELINE)),--candidate-matched-baseline,) \
+		$(if $(filter 0,$(CANDIDATE_MATCHED_BASELINE)),--no-candidate-matched-baseline,) \
+		$(if $(CANDIDATE_MAX_REGRESSED_METRICS),--candidate-max-regressed-metrics $(CANDIDATE_MAX_REGRESSED_METRICS),) \
+		$(if $(CANDIDATE_MIN_IMPROVED_METRICS),--candidate-min-improved-metrics $(CANDIDATE_MIN_IMPROVED_METRICS),) \
+		$(if $(CANDIDATE_ACCEPTED_STATUSES),--candidate-accepted-statuses $(CANDIDATE_ACCEPTED_STATUSES),) \
 		--iters $(LIBAFL_ITERS) \
 		--max-seeds $(LIBAFL_MAX_SEEDS) \
 		--seed $(LIBAFL_SEED) \
@@ -300,6 +332,13 @@ feedback-campaign: require-rtl
 		--cwd $(CWD) \
 		$(if $(filter 1,$(IGNORE_FUNCTIONAL_COVERAGE)),--ignore-functional-coverage,) \
 		$(if $(LLM_MODEL),--model $(LLM_MODEL),)
+
+real-candidate-feedback-campaign: CAMPAIGN_PLAN_PROFILE=campaign_with_evaluation_and_optimization_real_validation
+real-candidate-feedback-campaign: CAMPAIGN_EVALUATION_ENABLE=1
+real-candidate-feedback-campaign: HARNESS_CANDIDATE_BACKEND=real
+real-candidate-feedback-campaign: CANDIDATE_MATCHED_BASELINE=1
+real-candidate-feedback-campaign: CANDIDATE_MIN_IMPROVED_METRICS=0
+real-candidate-feedback-campaign: feedback-campaign
 
 llm-feedback-campaign: CAMPAIGN_MODES=llm_feedback
 llm-feedback-campaign: feedback-campaign

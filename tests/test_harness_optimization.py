@@ -525,6 +525,39 @@ class RegressionCampaignEvaluationBackend:
         return payload
 
 
+class SequenceRegressionCampaignEvaluationBackend:
+    def __init__(self, failed_record_counts: tuple[int, ...]) -> None:
+        self.failed_record_counts = failed_record_counts
+        self.calls: list[tuple[dict, int]] = []
+
+    def run(self, campaign_manifest: dict) -> dict:
+        index = min(len(self.calls), len(self.failed_record_counts) - 1)
+        failed_record_count = self.failed_record_counts[index]
+        self.calls.append((campaign_manifest, failed_record_count))
+        path = Path(campaign_manifest["artifacts"]["evaluation_report"])
+        payload = {
+            "kind": "fake.candidate_campaign_evaluation",
+            "target": campaign_manifest.get("target"),
+            "run_id": campaign_manifest.get("run_id"),
+            "summary": {
+                "round_count": 1,
+                "failed_record_count": failed_record_count,
+            },
+            "harness_trace": {
+                "status": "ok",
+                "summary": {
+                    "record_count": 1,
+                    "failed_record_count": failed_record_count,
+                    "hanging_span_count": 0,
+                },
+                "artifacts": {},
+            },
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        return payload
+
+
 class CustomReplayProbeAdapter:
     action_type = "replay_probe"
 
@@ -1480,6 +1513,128 @@ def test_harness_candidate_regression_backend_runs_sandbox_campaign() -> None:
     assert final_decision["summary"]["acceptance_thresholds"][
         "min_improved_metric_count"
     ] == 1
+
+
+def test_harness_candidate_regression_uses_matched_noop_baseline() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        seen_configs: list[CampaignConfig] = []
+
+        def factory(config, observation_context, **kwargs):
+            seen_configs.append(config)
+            return StubRegressionCampaign(config, observation_context, **kwargs)
+
+        campaign_evaluation, campaign_manifest, manifest_path = _source_payloads(root)
+        evaluation_path = root / "campaign_evaluation.json"
+        paths = harness_optimization_paths(evaluation_path)
+        sequence_backend = SequenceRegressionCampaignEvaluationBackend((2, 0))
+        backend = HarnessCandidateRegressionBackend(
+            settings=CandidateRegressionSettings(
+                modes=("heuristic_feedback",),
+                rounds=1,
+                matched_baseline=True,
+                thresholds=CandidateAcceptanceThresholds(
+                    min_improved_metric_count=1,
+                ),
+            ),
+            evaluation_backends=EvaluationBackends(
+                campaign_evaluation=sequence_backend,
+            ),
+            campaign_orchestrator_factory=factory,
+        )
+        adapter = HarnessOptimizationAdapter(
+            target="demo",
+            paths=paths,
+            campaign_evaluation_path=evaluation_path,
+            campaign_manifest_path=manifest_path,
+            cwd=root,
+            candidate_evaluation_backend=backend,
+        )
+        task = adapter.run_task(campaign_evaluation, campaign_manifest)
+        proposal = {
+            "schema_version": 1,
+            "kind": PROPOSAL_KIND,
+            "proposal_id": "proposal-matched-baseline",
+            "status": "proposed",
+            "actions": [
+                {
+                    "action_id": "probe-1",
+                    "action_type": "replay_probe",
+                    "payload": {"signals": ["dut.state"], "sample_on": "posedge"},
+                    "evidence_refs": [{"span_id": "span-dut"}],
+                }
+            ],
+            "evidence_refs": [{"span_id": "span-dut"}],
+        }
+        decision = adapter.run_decision(task, proposal)
+        apply_result = adapter.run_apply(task, proposal, decision)
+        patch = apply_result["harness_optimization_patch"]
+        candidate_manifest = apply_result["harness_optimization_candidate_manifest"]
+
+        candidate_evaluation = adapter.run_candidate_evaluation(
+            task,
+            proposal,
+            patch,
+            candidate_manifest,
+        )
+        metric_delta = adapter.run_metric_delta(task, candidate_evaluation)
+        final_decision = adapter.run_final_decision(
+            task,
+            proposal,
+            decision,
+            patch,
+            candidate_evaluation,
+            metric_delta,
+        )
+        artifacts = candidate_evaluation["artifacts"]
+        matched_config = json.loads(
+            Path(artifacts["matched_baseline_regression_config"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        matched_overlay = json.loads(
+            Path(artifacts["matched_baseline_action_overlay"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        failed_comparison = next(
+            item
+            for item in metric_delta["comparisons"]
+            if item["metric"] == "failed_record_count"
+        )
+
+    assert len(seen_configs) == 2
+    assert len(sequence_backend.calls) == 2
+    assert "matched_noop_baseline" in str(seen_configs[0].out_dir)
+    assert seen_configs[0].initial_directives is None
+    assert not any(
+        item.startswith("HARNESS_REPLAY_PROBE_CONFIG=")
+        for item in seen_configs[0].extra_make_vars
+    )
+    assert any(
+        item.startswith("HARNESS_REPLAY_PROBE_CONFIG=")
+        for item in seen_configs[1].extra_make_vars
+    )
+    assert candidate_evaluation["baseline_source"] == "matched_noop_rerun"
+    assert candidate_evaluation["source_baseline_metrics"][
+        "failed_record_count"
+    ] == 1
+    assert candidate_evaluation["baseline_metrics"]["failed_record_count"] == 2
+    assert candidate_evaluation["matched_baseline_metrics"][
+        "failed_record_count"
+    ] == 2
+    assert candidate_evaluation["candidate_metrics"]["failed_record_count"] == 0
+    assert candidate_evaluation["summary"]["matched_baseline"]["status"] == "passed"
+    assert matched_config["run_role"] == "matched_noop_baseline"
+    assert matched_config["initial_directives"] is None
+    assert matched_config["adapter_metrics"]["candidate_action_count"] == 0
+    assert matched_overlay["baseline_role"] == "matched_noop_baseline"
+    assert matched_overlay["actions"] == []
+    assert failed_comparison["baseline"] == 2
+    assert failed_comparison["candidate"] == 0
+    assert failed_comparison["direction"] == "improved"
+    assert metric_delta["summary"]["gateable_improved_metric_count"] == 1
+    assert final_decision["decision"] == "accepted_for_review"
 
 
 def test_harness_candidate_regression_threshold_rejects_neutral_candidate() -> None:

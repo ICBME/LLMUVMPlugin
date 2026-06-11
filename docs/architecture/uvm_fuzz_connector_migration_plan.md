@@ -124,6 +124,7 @@
 - `campaign_with_evaluation`
 - `campaign_with_evaluation_and_optimization`
 - `campaign_with_evaluation_and_optimization_validation`
+- `campaign_with_evaluation_and_optimization_real_validation`
 
 公开扩展点：
 
@@ -144,6 +145,12 @@
   baseline campaign manifest 派生 sandbox candidate campaign 配置，写出
   `candidate_regression_config` / `candidate_action_overlay` / 可选
   `candidate_mutation_directives`，并通过 `campaign_with_evaluation` profile 跑候选回归。
+  CLI/Make 可用 `--harness-candidate-backend real` 或
+  `real-candidate-feedback-campaign` 启用；`--harness-optimizer-backend llm` 可同时接入
+  现有 LLM optimizer backend 生成非 no-op proposal。真实 CLI 路径默认先运行 matched
+  no-op baseline，并用同配置空动作 rerun metrics 作为 candidate metric delta 的
+  baseline；可用 `--no-candidate-matched-baseline` 或
+  `HARNESS_CANDIDATE_MATCHED_BASELINE=0` 关闭。
   第四阶段进一步公开 `CandidateActionAdapter` / `JsonConfigActionAdapter`，默认把
   `replay_probe`、`scoreboard_check`、`coverage_feedback_tuning` 等 safe action 物化为
   per-action config artifact，并产出 `candidate_variant_ranking` 和
@@ -243,6 +250,11 @@
    `scoreboard_check.field_equals/field_range`、`replay_probe` 采样约束和
    `coverage_feedback_tuning` 的权重 clamp/过滤字段；runtime consumer 与 candidate
    evaluation 保持只在显式 sandbox candidate 流程中消费这些配置。
+   Harness optimization 第八阶段已完成：新增
+   `campaign_with_evaluation_and_optimization_real_validation` profile、CLI/Make 参数和
+   `real-candidate-feedback-campaign` target，可从命令行选择真实 candidate regression
+   backend，并通过 `HARNESS_CANDIDATE_*` / `CANDIDATE_*` 参数覆盖候选 rounds、modes、
+   seed、matched no-op baseline、top-K variants 和 acceptance thresholds。
 
 5. 收紧 artifact materialization。
    已完成：每个 coverage feedback connector step 声明的 output artifact 会在 step
@@ -282,8 +294,9 @@
 - `tests/test_run_profiles_evaluation.py`：覆盖 run/campaign profile 选择、mode mismatch
   拒绝、round/campaign evaluation stage、`EvaluationBackends` 替换、自定义 campaign
   stage、非法 campaign DAG 拒绝、harness optimization campaign profile 和 fake optimizer
-  backend、harness optimization validation profile 和 fake candidate validation backend，
-  以及 `CampaignRoundScheduler` 对上一轮 manifest state 的传递。
+  backend、harness optimization validation profile 和 fake candidate validation backend、
+  real validation profile 以及 CLI real candidate backend factory，外加
+  `CampaignRoundScheduler` 对上一轮 manifest state 的传递。
 - `tests/test_harness_optimization.py`：覆盖 phase-one harness optimization task/proposal/
   decision artifact 写出、默认 no-op proposal、非法 proposal schema reject、sandbox apply、
   unsafe action skip、candidate metric delta、final decision、真实 candidate regression

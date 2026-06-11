@@ -8,15 +8,19 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "libafl_bfm_fuzz" / "py"))
+sys.path.insert(0, str(ROOT / "libafl_bfm_fuzz" / "scripts"))
 
 from connector_observe import ObservationContext
 from fuzz_pipeline import (
     CampaignConfig,
     CampaignOrchestrator,
     CANDIDATE_EVALUATION_KIND,
+    DEFAULT_CAMPAIGN_PLAN_PROFILES,
     EvaluationBackends,
     FINAL_DECISION_KIND,
     FuzzRunConfig,
+    HarnessCandidateRegressionBackend,
+    LlmHarnessOptimizerBackend,
     PROPOSAL_KIND,
     RunPlanProfile,
     RunStage,
@@ -25,6 +29,7 @@ from fuzz_pipeline import (
 from fuzz_pipeline.coverage_feedback import CoverageFeedbackResult
 from fuzz_pipeline.run_adapters import RunBackends
 from fuzz_pipeline.run_orchestrator import FuzzRunOrchestrator
+import run_fuzz_pipeline as pipeline_cli
 
 
 class StubFeedbackRun(FuzzRunOrchestrator):
@@ -580,6 +585,67 @@ def test_campaign_profile_can_run_harness_optimization_validation_stages() -> No
     assert metric_delta["summary"]["improved_metric_count"] == 1
     assert final_decision["kind"] == FINAL_DECISION_KIND
     assert final_decision["decision"] == "accepted_for_review"
+
+
+def test_real_validation_campaign_profile_uses_validation_stage_sequence() -> None:
+    profile = DEFAULT_CAMPAIGN_PLAN_PROFILES[
+        "campaign_with_evaluation_and_optimization_real_validation"
+    ]
+
+    assert profile.stage_names == DEFAULT_CAMPAIGN_PLAN_PROFILES[
+        "campaign_with_evaluation_and_optimization_validation"
+    ].stage_names
+    assert "real sandbox candidate regression" in profile.description
+
+
+def test_feedback_campaign_cli_builds_real_candidate_regression_backend() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        args = pipeline_cli.parse_args(
+            [
+                "feedback-campaign",
+                "--target",
+                "demo",
+                "--libafl-manifest",
+                str(root / "Cargo.toml"),
+                "--out-dir",
+                str(root / "campaign"),
+                "--campaign-plan-profile",
+                "campaign_with_evaluation_and_optimization_real_validation",
+                "--harness-optimizer-backend",
+                "llm",
+                "--candidate-modes",
+                "heuristic_feedback",
+                "--candidate-rounds",
+                "1",
+                "--candidate-iters",
+                "0",
+                "--candidate-max-seeds",
+                "0",
+                "--candidate-max-variant-regressions",
+                "2",
+                "--no-candidate-round-evaluation",
+            ]
+        )
+
+        backends = pipeline_cli.feedback_campaign_evaluation_backends(args)
+
+    assert backends is not None
+    assert isinstance(backends.harness_optimizer, LlmHarnessOptimizerBackend)
+    assert isinstance(
+        backends.harness_candidate_evaluation,
+        HarnessCandidateRegressionBackend,
+    )
+    settings = backends.harness_candidate_evaluation.settings
+    assert settings.modes == ("heuristic_feedback",)
+    assert settings.matched_baseline is True
+    assert settings.rounds == 1
+    assert settings.iters == 0
+    assert settings.max_seeds == 0
+    assert settings.max_variant_regressions == 2
+    assert settings.round_evaluation is False
+    assert settings.thresholds.min_improved_metric_count == 0
+    assert settings.thresholds.max_regressed_metric_count == 0
 
 
 def test_campaign_orchestrator_can_insert_custom_campaign_stage() -> None:

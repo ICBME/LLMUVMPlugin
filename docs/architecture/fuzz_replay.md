@@ -63,8 +63,8 @@
   contract、静态依赖校验、runtime result readiness 和 stage policy 执行。
 - `run_profiles.py`：默认 run/campaign profile，使用 stage name 列表描述
   `feedback_fuzz`、`no_feedback`、round evaluation、campaign evaluation 和
-  harness optimization phase-one 与 validation DAG；后续 candidate regression backend
-  在同一 validation profile 内承接 phase-three/phase-four 行为。
+  harness optimization phase-one、validation 与 real validation DAG；candidate regression
+  backend 在 validation profile 内承接 phase-three/phase-four 行为。
 - `run_stage_registry.py`：把 profile 中的 stage name 解析为具体 `RunStage`，并提供
   自定义 stage 注册入口。
 - `run_adapters.py`：corpus generator、UVM replay 和 coverage report 的可替换 backend
@@ -81,7 +81,8 @@
   `scoreboard_check`、`coverage_feedback_tuning` 等 safe action 转换为 sandbox overlay、
   config artifact 和 `HARNESS_*_CONFIG` make 变量，并复用现有 campaign/run 编排执行候选
   回归，生成 candidate metrics、variant evaluations、action effect report、variant
-  ranking 和 promotion package。
+  ranking 和 promotion package；真实 CLI 路径默认先运行 matched no-op baseline，并用
+  同配置空动作 rerun 的 metrics 作为候选 metric delta 的 baseline。
 - `harness_runtime_actions.py`：safe action runtime consumer，负责加载 sandbox config，
   在 replay driver、scoreboard 和 coverage feedback 业务层消费 `replay_probe`、
   `scoreboard_check`、`coverage_feedback_tuning`，并把执行指标写入
@@ -187,14 +188,20 @@ Makefile 会把 `CARGO` 作为一个完整 wrapper 字符串传给 pipeline runn
 13. 默认 `feedback_fuzz` 和 `no_feedback` 行为保持与迁移前主流程一致；新增 stage 应通过
     registry/profile 插入，并由 `RunStage` contract 声明 result/artifact 依赖。
 14. 显式 harness optimization validation profile 可注入
-    `HarnessCandidateRegressionBackend`。backend 只在 optimization sandbox 下物化 candidate
+    `HarnessCandidateRegressionBackend`；CLI/Make 可通过
+    `--harness-candidate-backend real` 或 `real-candidate-feedback-campaign`
+    启用真实 candidate regression。backend 只在 optimization sandbox 下物化 candidate
     action overlay、per-action config、可选 mutation directives、variant ranking 和
-    review-only promotion package，并在 candidate run 内通过 `HARNESS_RUNTIME_METRICS_OUT`
-    汇总 runtime action execution metrics；第六阶段还会按 `action_id` / `action_type`
-    生成 action effect report，并可通过 `max_variant_regressions` 启用 top-K variant
-    独立回归。第七阶段可显式注入 `LlmHarnessOptimizerBackend`，由 LLM 基于 evaluation、
-    dataset、rollup 和 action effect report 生成 schema-valid safe action proposal，并保留
-    prompt/response provenance；默认主流程和源码主线不受影响。
+    review-only promotion package；真实 CLI 路径默认先运行 matched no-op baseline，
+    用相同 candidate campaign 配置但空 action overlay 的 rerun metrics 作为对比基线，
+    可通过 `--no-candidate-matched-baseline` 关闭；candidate run 内通过
+    `HARNESS_RUNTIME_METRICS_OUT` 汇总 runtime action execution metrics；第六阶段还会按
+    `action_id` / `action_type` 生成 action effect report，并可通过
+    `max_variant_regressions` 启用 top-K variant 独立回归。第七阶段可显式注入或通过
+    `--harness-optimizer-backend llm` 选择
+    `LlmHarnessOptimizerBackend`，由 LLM 基于 evaluation、dataset、rollup 和 action
+    effect report 生成 schema-valid safe action proposal，并保留 prompt/response
+    provenance；默认主流程和源码主线不受影响。
 
 结构化 coverage export 和 `rtl_gap` 的 schema 见
 [Coverage Feedback 设计](coverage_feedback_design.md)。

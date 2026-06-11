@@ -1395,5 +1395,11 @@ def normalize_campaign_modes(raw_modes: str | tuple[str, ...] | list[str]) -> tu
 def run_feedback_campaign_pipeline(
     config: CampaignConfig,
     observation_context: ObservationContext | None = None,
+    *,
+    evaluation_backends: EvaluationBackends | None = None,
 ) -> dict[str, Any]:
-    return CampaignOrchestrator(config, observation_context).run()
+    return CampaignOrchestrator(
+        config,
+        observation_context,
+        evaluation_backends=evaluation_backends,
+    ).run()

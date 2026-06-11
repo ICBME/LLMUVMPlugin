@@ -100,6 +100,7 @@ class CandidateRegressionSettings:
     run_plan_profile: str | None = None
     round_evaluation: bool = True
     campaign_plan_profile: str = "campaign_with_evaluation"
+    matched_baseline: bool = False
     thresholds: CandidateAcceptanceThresholds = CandidateAcceptanceThresholds()
 
     def __post_init__(self) -> None:
@@ -111,6 +112,13 @@ class CandidateRegressionSettings:
 class CandidateActionAdapterContext:
     candidate_id: str
     regression_dir: Path
+
+
+@dataclass(frozen=True)
+class MatchedBaselineRun:
+    metrics: dict[str, float | int]
+    artifacts: dict[str, str]
+    summary: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -210,7 +218,15 @@ class HarnessCandidateRegressionBackend:
         patch: dict[str, Any],
         candidate_manifest: dict[str, Any],
     ) -> dict[str, Any]:
-        baseline_metrics = baseline_metric_snapshot(task)
+        source_baseline_metrics = baseline_metric_snapshot(task)
+        baseline_metrics = source_baseline_metrics
+        baseline_source = "task_snapshot"
+        matched_baseline: MatchedBaselineRun | None = None
+        matched_baseline_summary: dict[str, Any] = {
+            "enabled": self.settings.matched_baseline,
+            "status": "disabled",
+            "baseline_source": baseline_source,
+        }
         sandbox_dir = _required_path(candidate_manifest.get("sandbox_dir"))
         regression_dir = sandbox_dir / "candidate_regression"
         regression_dir.mkdir(parents=True, exist_ok=True)
@@ -268,7 +284,7 @@ class HarnessCandidateRegressionBackend:
                 proposal=proposal,
                 patch=patch,
                 candidate_manifest=candidate_manifest,
-                baseline_metrics=baseline_metrics,
+                baseline_metrics=source_baseline_metrics,
                 run_config_path=run_config_path,
                 overlay_path=overlay_path,
                 adapter_results=adapter_results,
@@ -276,6 +292,44 @@ class HarnessCandidateRegressionBackend:
                 runtime_metrics_path=runtime_metrics_path,
                 reason="no safe applied actions to validate",
             )
+
+        if self.settings.matched_baseline:
+            try:
+                matched_baseline = self._run_matched_noop_baseline(
+                    task=task,
+                    proposal=proposal,
+                    patch=patch,
+                    candidate_manifest=candidate_manifest,
+                    baseline_manifest=baseline_manifest,
+                    regression_dir=regression_dir,
+                )
+            except Exception as exc:  # noqa: BLE001 - failed matched baseline rejects evidence
+                return self._error_report(
+                    task=task,
+                    proposal=proposal,
+                    baseline_metrics=source_baseline_metrics,
+                    baseline_source="task_snapshot",
+                    source_baseline_metrics=source_baseline_metrics,
+                    run_config_path=run_config_path,
+                    overlay_path=overlay_path,
+                    adapter_results=adapter_results,
+                    directives_path=candidate_directives_path,
+                    runtime_metrics_path=runtime_metrics_path,
+                    error=exc,
+                    error_context="matched_noop_baseline",
+                    matched_baseline_summary={
+                        "enabled": True,
+                        "status": "error",
+                        "baseline_source": "task_snapshot",
+                        "error": {
+                            "type": type(exc).__name__,
+                            "message": str(exc),
+                        },
+                    },
+                )
+            baseline_metrics = matched_baseline.metrics
+            baseline_source = "matched_noop_rerun"
+            matched_baseline_summary = matched_baseline.summary
 
         try:
             candidate_campaign_manifest = self._run_candidate_campaign(
@@ -289,12 +343,19 @@ class HarnessCandidateRegressionBackend:
                 task=task,
                 proposal=proposal,
                 baseline_metrics=baseline_metrics,
+                baseline_source=baseline_source,
+                source_baseline_metrics=source_baseline_metrics,
                 run_config_path=run_config_path,
                 overlay_path=overlay_path,
                 adapter_results=adapter_results,
                 directives_path=candidate_directives_path,
                 runtime_metrics_path=runtime_metrics_path,
                 error=exc,
+                error_context="candidate_campaign",
+                matched_baseline_artifacts=(
+                    matched_baseline.artifacts if matched_baseline is not None else None
+                ),
+                matched_baseline_summary=matched_baseline_summary,
             )
 
         candidate_evaluation = read_json_object(campaign_config.campaign_evaluation_out)
@@ -391,12 +452,22 @@ class HarnessCandidateRegressionBackend:
             "source": type(self).__name__,
             "status": candidate_status,
             "application_status": patch.get("status"),
+            "baseline_source": baseline_source,
             "baseline_metrics": baseline_metrics,
+            "source_baseline_metrics": source_baseline_metrics,
+            "matched_baseline_metrics": (
+                matched_baseline.metrics if matched_baseline is not None else None
+            ),
             "candidate_metrics": candidate_metrics,
             "acceptance_thresholds": self.settings.thresholds.to_json(),
             "artifacts": {
                 "candidate_regression_config": str(run_config_path),
                 "candidate_action_overlay": str(overlay_path),
+                **(
+                    matched_baseline.artifacts
+                    if matched_baseline is not None
+                    else {}
+                ),
                 **adapter_artifacts(adapter_results),
                 **_optional_artifact(
                     "candidate_mutation_directives",
@@ -421,6 +492,7 @@ class HarnessCandidateRegressionBackend:
                 "candidate_artifact_count": len(
                     list_value(candidate_manifest.get("candidate_artifacts"))
                 ),
+                "matched_baseline": matched_baseline_summary,
                 "candidate_mode_count": len(
                     candidate_campaign_manifest.get("modes", [])
                 ),
@@ -435,6 +507,97 @@ class HarnessCandidateRegressionBackend:
                 "promotion_status": promotion.get("promotion_status"),
             },
         }
+
+    def _run_matched_noop_baseline(
+        self,
+        *,
+        task: dict[str, Any],
+        proposal: dict[str, Any],
+        patch: dict[str, Any],
+        candidate_manifest: dict[str, Any],
+        baseline_manifest: dict[str, Any],
+        regression_dir: Path,
+    ) -> MatchedBaselineRun:
+        matched_dir = regression_dir / "matched_noop_baseline"
+        matched_dir.mkdir(parents=True, exist_ok=True)
+        matched_candidate_id = ":".join(
+            [
+                str(candidate_manifest.get("candidate_id") or "candidate"),
+                "matched_noop",
+            ]
+        )
+        overlay = build_candidate_action_overlay(
+            {**candidate_manifest, "candidate_id": matched_candidate_id},
+            (),
+        )
+        overlay["baseline_role"] = "matched_noop_baseline"
+        overlay_path = matched_dir / "matched_baseline_action_overlay.json"
+        _write_json(overlay_path, overlay)
+        runtime_metrics_path = matched_dir / "matched_baseline_runtime_metrics.json"
+        campaign_config = self._candidate_campaign_config(
+            task=task,
+            baseline_manifest=baseline_manifest,
+            regression_dir=matched_dir,
+            action_overlay=overlay_path,
+            adapter_results=(),
+            initial_directives=None,
+            runtime_metrics=runtime_metrics_path,
+        )
+        run_config_path = matched_dir / "matched_baseline_regression_config.json"
+        _write_json(
+            run_config_path,
+            candidate_regression_config_payload(
+                campaign_config,
+                action_overlay=overlay_path,
+                adapter_results=(),
+                initial_directives=None,
+                runtime_metrics=runtime_metrics_path,
+                run_role="matched_noop_baseline",
+            ),
+        )
+        campaign_manifest = self._run_candidate_campaign(
+            campaign_config,
+            task=task,
+            proposal=proposal,
+            patch=patch,
+        )
+        campaign_evaluation = read_json_object(campaign_config.campaign_evaluation_out)
+        metrics = candidate_metric_snapshot(
+            campaign_manifest,
+            campaign_evaluation,
+            cwd=_campaign_cwd(campaign_manifest, campaign_config.cwd),
+        )
+        metrics.update(adapter_metric_snapshot(()))
+        metrics.update(runtime_metric_snapshot(runtime_metrics_path))
+        artifacts = {
+            "matched_baseline_regression_config": str(run_config_path),
+            "matched_baseline_action_overlay": str(overlay_path),
+            "matched_baseline_campaign_manifest": str(
+                campaign_config.campaign_manifest_out
+            ),
+            "matched_baseline_campaign_evaluation": str(
+                campaign_config.campaign_evaluation_out
+            ),
+            **_optional_existing_artifact(
+                "matched_baseline_runtime_metrics",
+                runtime_metrics_path,
+            ),
+        }
+        return MatchedBaselineRun(
+            metrics=metrics,
+            artifacts=artifacts,
+            summary={
+                "enabled": True,
+                "status": "passed",
+                "baseline_source": "matched_noop_rerun",
+                "metric_count": len(metrics),
+                "artifact_count": len(artifacts),
+                "campaign_manifest": str(campaign_config.campaign_manifest_out),
+                "campaign_evaluation": str(
+                    campaign_config.campaign_evaluation_out
+                ),
+            },
+        )
 
     def _candidate_campaign_config(
         self,
@@ -737,7 +900,10 @@ class HarnessCandidateRegressionBackend:
             "source": type(self).__name__,
             "status": "not_run",
             "application_status": patch.get("status"),
+            "baseline_source": "task_snapshot",
             "baseline_metrics": baseline_metrics,
+            "source_baseline_metrics": baseline_metrics,
+            "matched_baseline_metrics": None,
             "candidate_metrics": dict(baseline_metrics),
             "acceptance_thresholds": self.settings.thresholds.to_json(),
             "reason": reason,
@@ -755,6 +921,12 @@ class HarnessCandidateRegressionBackend:
                 ),
             },
             "summary": {
+                "matched_baseline": {
+                    "enabled": self.settings.matched_baseline,
+                    "status": "skipped",
+                    "reason": reason,
+                    "baseline_source": "task_snapshot",
+                },
                 **adapter_metric_snapshot(adapter_results),
                 "candidate_variant_count": len(
                     build_candidate_variants(adapter_results)
@@ -768,12 +940,17 @@ class HarnessCandidateRegressionBackend:
         task: dict[str, Any],
         proposal: dict[str, Any],
         baseline_metrics: dict[str, float | int],
+        baseline_source: str = "task_snapshot",
+        source_baseline_metrics: dict[str, float | int] | None = None,
         run_config_path: Path,
         overlay_path: Path,
         adapter_results: tuple[CandidateActionAdapterResult, ...],
         directives_path: Path | None,
         runtime_metrics_path: Path,
         error: BaseException,
+        error_context: str = "candidate_campaign",
+        matched_baseline_artifacts: dict[str, str] | None = None,
+        matched_baseline_summary: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
             "schema_version": 1,
@@ -784,13 +961,23 @@ class HarnessCandidateRegressionBackend:
             "proposal_id": proposal.get("proposal_id"),
             "source": type(self).__name__,
             "status": "error",
+            "baseline_source": baseline_source,
             "baseline_metrics": baseline_metrics,
+            "source_baseline_metrics": source_baseline_metrics or baseline_metrics,
+            "matched_baseline_metrics": (
+                baseline_metrics if baseline_source == "matched_noop_rerun" else None
+            ),
             "candidate_metrics": {},
             "acceptance_thresholds": self.settings.thresholds.to_json(),
-            "error": {"type": type(error).__name__, "message": str(error)},
+            "error": {
+                "type": type(error).__name__,
+                "message": str(error),
+                "context": error_context,
+            },
             "artifacts": {
                 "candidate_regression_config": str(run_config_path),
                 "candidate_action_overlay": str(overlay_path),
+                **(matched_baseline_artifacts or {}),
                 **adapter_artifacts(adapter_results),
                 **_optional_artifact(
                     "candidate_mutation_directives",
@@ -802,6 +989,12 @@ class HarnessCandidateRegressionBackend:
                 ),
             },
             "summary": {
+                "matched_baseline": matched_baseline_summary
+                or {
+                    "enabled": self.settings.matched_baseline,
+                    "status": "disabled",
+                    "baseline_source": "task_snapshot",
+                },
                 **adapter_metric_snapshot(adapter_results),
                 "candidate_variant_count": len(
                     build_candidate_variants(adapter_results)
@@ -1089,11 +1282,13 @@ def candidate_regression_config_payload(
     adapter_results: tuple[CandidateActionAdapterResult, ...],
     initial_directives: Path | None,
     runtime_metrics: Path,
+    run_role: str = "candidate",
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "kind": "libafl_bfm_fuzz.harness_candidate_regression_config",
         "created_at": utc_timestamp(),
+        "run_role": run_role,
         "target": config.target,
         "out_dir": str(config.out_dir),
         "modes": list(config.modes),

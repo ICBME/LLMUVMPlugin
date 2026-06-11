@@ -169,10 +169,16 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   `replay_probe`、`scoreboard_check`、`coverage_feedback_tuning`、
   `stimulus_generation_hint` 和 `documentation_note` 写出 JSON config，并通过
   `HARNESS_*_CONFIG` 传给 sandbox run。
+- `matched_baseline` 开启时，backend 会在候选回归前用相同 modes/rounds/iters/seed
+  重跑一个 no-op candidate campaign：只注入空 action overlay 和 runtime metrics
+  输出路径，不注入 per-action config 或 mutation directives。随后 metric delta、variant
+  ranking、action effect report 和 promotion package 都以这次
+  `matched_noop_rerun` 的 metrics 为 baseline，并保留原始 task snapshot metrics 作为
+  `source_baseline_metrics`。
 - candidate evaluation report 会带上 baseline/candidate metrics、candidate campaign
-  artifacts、adapter metrics、variant evaluations、action effect report、variant ranking、
-  promotion package 和 acceptance thresholds；final decision 只给出 review 级结论，不修改
-  源码主线。
+  artifacts、matched baseline artifacts、adapter metrics、variant evaluations、action
+  effect report、variant ranking、promotion package 和 acceptance thresholds；final
+  decision 只给出 review 级结论，不修改源码主线。
 
 `py/fuzz_pipeline/harness_runtime_actions.py`
 
@@ -273,7 +279,9 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 - Harness LLM Optimization 第二阶段已作为更长的显式 campaign profile 接入：
   `campaign_with_evaluation_and_optimization_validation` 在第一阶段之后追加 sandbox
   apply、candidate evaluation、metric delta 和 final decision。该 profile 只写 sandbox
-  artifact 与 review decision，不修改源码主线。
+  artifact 与 review decision，不修改源码主线。后续新增的
+  `campaign_with_evaluation_and_optimization_real_validation` 使用相同 stage 链，但 CLI/Make
+  helper 会自动选择真实 candidate regression backend。
 - Harness LLM Optimization 第三阶段已提供真实 candidate regression backend：
   显式注入 `HarnessCandidateRegressionBackend` 后，candidate evaluation stage 会复用现有
   campaign/run 编排执行 sandbox candidate campaign，并按阈值生成 final decision。
@@ -401,6 +409,8 @@ run/campaign profile 层使用 `RunStage` 描述 stage contract，并用
   占位，可由 backend 替换；显式注入 `HarnessCandidateRegressionBackend` 后会运行 sandbox
   candidate campaign，并输出 candidate action overlay、adapter config、variant ranking
   和 promotion package
+- `campaign_with_evaluation_and_optimization_real_validation`：stage 链同 validation profile；
+  CLI/Make helper 会选择 `HarnessCandidateRegressionBackend`
 
 扩展点：
 
@@ -853,7 +863,37 @@ informational 指标：它们仍写入 comparison，用于解释成本、规模�
 `directive_count` 下降时，报告会记录 `direction=changed` 和
 `gates_acceptance=false`，而不是把更少 directive 判为质量回归。
 
-真实 candidate regression backend 需要从 Python 侧显式注入：
+真实 candidate regression 也可以直接从 CLI/Make 启用。`real-candidate-feedback-campaign`
+会选择 `campaign_with_evaluation_and_optimization_real_validation` profile，并把
+`HarnessCandidateRegressionBackend` 接到 candidate evaluation stage：
+
+```sh
+uv run make -C libafl_bfm_fuzz real-candidate-feedback-campaign \
+  TARGET=secworks_sha256 \
+  TARGET_CONFIG=/path/to/secworks_sha256.toml \
+  VERILOG_SOURCES="/path/to/sha256/src/rtl/*.v" \
+  TOPLEVEL=sha256 \
+  CAMPAIGN_ROUNDS=1 \
+  CAMPAIGN_MODES=heuristic_feedback \
+  LIBAFL_ITERS=0 \
+  LIBAFL_MAX_SEEDS=0
+```
+
+等价的脚本参数是 `--harness-candidate-backend real`，或使用
+`--campaign-plan-profile campaign_with_evaluation_and_optimization_real_validation`
+自动选择真实 candidate backend。若要让 CLI 同时生成非 no-op proposal，可设置
+`--harness-optimizer-backend llm`，该选项复用 `HARNESS_OPTIMIZER_LLM_*` /
+`OPENAI_API_KEY` 环境变量。candidate 回归参数可用
+`--candidate-modes`、`--candidate-rounds`、`--candidate-iters`、
+`--candidate-max-seeds`、`--candidate-max-variant-regressions`、
+`--candidate-matched-baseline`、`--candidate-min-improved-metrics` 和
+`--candidate-max-regressed-metrics` 覆盖；真实 candidate backend 的 CLI 路径默认开启
+matched no-op baseline，可用 `--no-candidate-matched-baseline` 或
+`HARNESS_CANDIDATE_MATCHED_BASELINE=0` 关闭。CLI 默认
+`candidate-min-improved-metrics=0`，用于 smoke/review 场景下接受“无 gateable 回归”的
+候选进入 `accepted_for_review`。
+
+Python 侧仍可显式注入真实 candidate regression backend：
 
 ```python
 from fuzz_pipeline import (
