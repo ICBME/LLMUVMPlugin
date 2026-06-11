@@ -163,8 +163,9 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   `stimulus_generation_hint` 和 `documentation_note` 写出 JSON config，并通过
   `HARNESS_*_CONFIG` 传给 sandbox run。
 - candidate evaluation report 会带上 baseline/candidate metrics、candidate campaign
-  artifacts、adapter metrics、variant ranking、promotion package 和 acceptance thresholds；
-  final decision 只给出 review 级结论，不修改源码主线。
+  artifacts、adapter metrics、variant evaluations、action effect report、variant ranking、
+  promotion package 和 acceptance thresholds；final decision 只给出 review 级结论，不修改
+  源码主线。
 
 `py/fuzz_pipeline/harness_runtime_actions.py`
 
@@ -176,6 +177,9 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   `harness_runtime_metrics`。
 - 默认没有 `HARNESS_*_CONFIG` / `HARNESS_RUNTIME_METRICS_OUT` 时不加载 runtime action，
   因此主 `feedback_fuzz` / `no_feedback` 流程行为不变。
+- runtime metrics 会保留 section 总量和 per-action 明细；candidate regression 会按
+  `action_id` / `action_type` 聚合 `replay_probe`、`scoreboard_check`、
+  `coverage_feedback_tuning` 的 consumption 状态，写出 `candidate_action_effect_report`。
 
 `py/fuzz_pipeline/harness_rollup.py`
 
@@ -273,6 +277,11 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   candidate regression 会注入 `HARNESS_RUNTIME_METRICS_OUT`；replay、scoreboard 和
   coverage feedback 业务层真实消费对应 sandbox config，并将执行计数汇总到
   `candidate_runtime_metrics` / candidate metrics。
+- Harness LLM Optimization 第六阶段已补齐 action attribution 与 top-K variant
+  evaluation：`CandidateRegressionSettings.max_variant_regressions` 控制执行的 variant
+  数量，默认只跑 combined candidate；显式增大后会为 selected single-action variants
+  分别运行 sandbox campaign，生成 `candidate_variant_evaluations`、
+  `candidate_action_effect_report` 和更新后的 ranking/promotion artifact。
 - pyUVM replay 仍在 cocotb/pyUVM 生命周期内执行，但 replay context、sequence、
   driver/ref-model、scoreboard 和 coverage 的 connector 创建已统一迁移到
   `ReplayPipelineOrchestrator`；pyUVM component 只负责 phase 内调用行为，adapter 负责
@@ -945,8 +954,8 @@ monitor JSON 聚合：
 - `EvaluationBackends(harness_candidate_evaluation=...)` 可替换第二阶段 candidate
   validation backend；`HarnessCandidateRegressionBackend` 会物化 sandbox run config，
   复用 campaign/run 编排执行候选回归，并生成 baseline/candidate metric delta、阈值化
-  final decision、adapter metrics、runtime action metrics、candidate variant ranking 和
-  promotion package。
+  final decision、adapter metrics、runtime action metrics、action effect report、candidate
+  variant evaluations/ranking 和 promotion package。
 - campaign profile 可插入自定义 campaign stage，并能拒绝缺失 `campaign_manifest`
   依赖的非法 DAG。
 - `feedback-fuzz` 单轮 manifest 写出和 `round_artifacts_to_round_manifest` 观测。

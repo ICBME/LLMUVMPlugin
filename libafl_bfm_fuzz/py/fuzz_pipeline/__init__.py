@@ -28,6 +28,8 @@ from .harness_candidate_regression import (
     CandidateRegressionSettings,
     HarnessCandidateRegressionBackend,
     JsonConfigActionAdapter,
+    build_candidate_action_effect_report,
+    select_candidate_variants,
 )
 from .harness_metadata import (
     HarnessMetadataExtractorProtocol,
@@ -212,6 +214,7 @@ __all__ = [
     "build_harness_optimization_metric_delta",
     "build_harness_optimization_patch",
     "build_harness_optimization_task",
+    "build_candidate_action_effect_report",
     "external_command_step",
     "campaign_trace_rollup_path",
     "harness_optimization_paths",
@@ -224,5 +227,6 @@ __all__ = [
     "run_generate_corpus_pipeline",
     "run_coverage_feedback_pipeline",
     "run_feedback_campaign_pipeline",
+    "select_candidate_variants",
     "validate_harness_optimization_proposal",
 ]

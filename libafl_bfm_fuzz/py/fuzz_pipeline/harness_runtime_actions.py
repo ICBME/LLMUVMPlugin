@@ -140,6 +140,15 @@ class ReplayProbeRuntime:
         self.field_sample_count = 0
         self.signal_request_count = 0
         self.samples: list[dict[str, Any]] = []
+        self.action_metrics = _initial_action_metrics(
+            config,
+            {
+                "sample_count": 0,
+                "field_sample_count": 0,
+                "signal_request_count": 0,
+                "unavailable_signal_count": 0,
+            },
+        )
 
     @classmethod
     def from_env(cls) -> "ReplayProbeRuntime":
@@ -165,6 +174,11 @@ class ReplayProbeRuntime:
             self.sample_count += 1
             self.field_sample_count += len(values)
             self.signal_request_count += len(signals)
+            action_metrics = self._action_metrics(entry)
+            action_metrics["sample_count"] += 1
+            action_metrics["field_sample_count"] += len(values)
+            action_metrics["signal_request_count"] += len(signals)
+            action_metrics["unavailable_signal_count"] += len(signals)
             if len(self.samples) < 32:
                 self.samples.append(
                     {
@@ -188,7 +202,22 @@ class ReplayProbeRuntime:
             "signal_request_count": self.signal_request_count,
             "unavailable_signal_count": self.signal_request_count,
             "sample_preview_count": len(self.samples),
+            "actions": _sorted_action_metrics(self.action_metrics),
         }
+
+    def _action_metrics(self, entry: RuntimeActionEntry) -> dict[str, Any]:
+        return self.action_metrics.setdefault(
+            entry.action_id,
+            _action_metric_entry(
+                entry,
+                {
+                    "sample_count": 0,
+                    "field_sample_count": 0,
+                    "signal_request_count": 0,
+                    "unavailable_signal_count": 0,
+                },
+            ),
+        )
 
     def flush(self) -> None:
         if self.config is None:
@@ -215,6 +244,15 @@ class ScoreboardCheckRuntime:
         self.failed_count = 0
         self.enforced_failure_count = 0
         self.failures: list[dict[str, Any]] = []
+        self.action_metrics = _initial_action_metrics(
+            config,
+            {
+                "checked_count": 0,
+                "passed_count": 0,
+                "failed_count": 0,
+                "enforced_failure_count": 0,
+            },
+        )
 
     @classmethod
     def from_env(cls) -> "ScoreboardCheckRuntime":
@@ -231,11 +269,15 @@ class ScoreboardCheckRuntime:
             return
         for entry in self.config.entries:
             passed, reason = _evaluate_scoreboard_entry(entry, record)
+            action_metrics = self._action_metrics(entry)
             self.checked_count += 1
+            action_metrics["checked_count"] += 1
             if passed:
                 self.passed_count += 1
+                action_metrics["passed_count"] += 1
             else:
                 self.failed_count += 1
+                action_metrics["failed_count"] += 1
                 failure = {
                     "action_id": entry.action_id,
                     "case_index": getattr(record, "index", None),
@@ -246,6 +288,7 @@ class ScoreboardCheckRuntime:
                     self.failures.append(failure)
                 if failure["enforced"]:
                     self.enforced_failure_count += 1
+                    action_metrics["enforced_failure_count"] += 1
         self.flush()
 
     def check(self) -> None:
@@ -265,6 +308,7 @@ class ScoreboardCheckRuntime:
             "failed_count": self.failed_count,
             "enforced_failure_count": self.enforced_failure_count,
             "failure_preview_count": len(self.failures),
+            "actions": _sorted_action_metrics(self.action_metrics),
         }
 
     def summary(self) -> dict[str, Any]:
@@ -280,6 +324,20 @@ class ScoreboardCheckRuntime:
             config_path=self.config.path,
         )
 
+    def _action_metrics(self, entry: RuntimeActionEntry) -> dict[str, Any]:
+        return self.action_metrics.setdefault(
+            entry.action_id,
+            _action_metric_entry(
+                entry,
+                {
+                    "checked_count": 0,
+                    "passed_count": 0,
+                    "failed_count": 0,
+                    "enforced_failure_count": 0,
+                },
+            ),
+        )
+
 
 class CoverageFeedbackTuningRuntime:
     def __init__(
@@ -293,6 +351,15 @@ class CoverageFeedbackTuningRuntime:
         self.applied_count = 0
         self.trimmed_gap_count = 0
         self.weighted_directive_count = 0
+        self.action_metrics = _initial_action_metrics(
+            config,
+            {
+                "applied_count": 0,
+                "trimmed_gap_count": 0,
+                "directive_application_count": 0,
+                "weighted_directive_count": 0,
+            },
+        )
 
     @classmethod
     def from_path(
@@ -315,11 +382,22 @@ class CoverageFeedbackTuningRuntime:
         rtl_gap_summary = dict(result.get("rtl_gap_summary", {}))
         top_gaps = rtl_gap_summary.get("top_gaps")
         if isinstance(top_gaps, list):
-            limit = self._max_gap_count()
-            if limit is not None and limit >= 0:
-                self.trimmed_gap_count += max(0, len(top_gaps) - limit)
-                rtl_gap_summary["top_gaps"] = top_gaps[:limit]
-                result["rtl_gap_summary"] = rtl_gap_summary
+            current_gaps = list(top_gaps)
+            for entry in self.config.entries:
+                action_metrics = self._action_metrics(entry)
+                action_metrics["applied_count"] += 1
+                if "max_gap_count" not in entry.payload:
+                    continue
+                limit = int(entry.payload["max_gap_count"])
+                trimmed = max(0, len(current_gaps) - limit)
+                self.trimmed_gap_count += trimmed
+                action_metrics["trimmed_gap_count"] += trimmed
+                current_gaps = current_gaps[:limit]
+            rtl_gap_summary["top_gaps"] = current_gaps
+            result["rtl_gap_summary"] = rtl_gap_summary
+        else:
+            for entry in self.config.entries:
+                self._action_metrics(entry)["applied_count"] += 1
         self.applied_count += len(self.config.entries)
         result.setdefault("harness_runtime_actions", {})[
             "coverage_feedback_tuning"
@@ -332,17 +410,26 @@ class CoverageFeedbackTuningRuntime:
             return directives
         result = dict(directives)
         items = result.get("directives")
-        multiplier = self._weight_multiplier()
-        if isinstance(items, list) and multiplier is not None:
+        if isinstance(items, list):
             new_items = []
             for item in items:
-                if not isinstance(item, dict):
-                    new_items.append(item)
-                    continue
-                updated = dict(item)
-                weight = _number(updated.get("weight"))
-                if weight is not None:
+                updated = dict(item) if isinstance(item, dict) else item
+                directive_weighted = False
+                for entry in self.config.entries:
+                    action_metrics = self._action_metrics(entry)
+                    action_metrics["directive_application_count"] += 1
+                    if not isinstance(updated, dict):
+                        continue
+                    multiplier = _number(entry.payload.get("directive_weight_multiplier"))
+                    if multiplier is None:
+                        continue
+                    weight = _number(updated.get("weight"))
+                    if weight is None:
+                        continue
                     updated["weight"] = weight * multiplier
+                    action_metrics["weighted_directive_count"] += 1
+                    directive_weighted = True
+                if directive_weighted:
                     self.weighted_directive_count += 1
                 new_items.append(updated)
             result["directives"] = new_items
@@ -359,6 +446,7 @@ class CoverageFeedbackTuningRuntime:
             "applied_count": self.applied_count,
             "trimmed_gap_count": self.trimmed_gap_count,
             "weighted_directive_count": self.weighted_directive_count,
+            "actions": _sorted_action_metrics(self.action_metrics),
         }
 
     def flush(self) -> None:
@@ -391,6 +479,52 @@ class CoverageFeedbackTuningRuntime:
         for value in values:
             multiplier *= value
         return multiplier
+
+    def _action_metrics(self, entry: RuntimeActionEntry) -> dict[str, Any]:
+        return self.action_metrics.setdefault(
+            entry.action_id,
+            _action_metric_entry(
+                entry,
+                {
+                    "applied_count": 0,
+                    "trimmed_gap_count": 0,
+                    "directive_application_count": 0,
+                    "weighted_directive_count": 0,
+                },
+            ),
+        )
+
+
+def _initial_action_metrics(
+    config: RuntimeActionConfig | None,
+    template: Mapping[str, int],
+) -> dict[str, dict[str, Any]]:
+    if config is None:
+        return {}
+    return {
+        entry.action_id: _action_metric_entry(entry, template)
+        for entry in config.entries
+    }
+
+
+def _action_metric_entry(
+    entry: RuntimeActionEntry,
+    template: Mapping[str, int],
+) -> dict[str, Any]:
+    return {
+        "action_id": entry.action_id,
+        "action_type": entry.action_type,
+        **dict(template),
+    }
+
+
+def _sorted_action_metrics(
+    action_metrics: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return sorted(
+        (dict(metrics) for metrics in action_metrics.values()),
+        key=lambda item: (str(item.get("action_type")), str(item.get("action_id"))),
+    )
 
 
 def _entry_from_json(

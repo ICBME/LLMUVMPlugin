@@ -67,6 +67,12 @@ ADAPTER_CONFIG_KINDS = {
     ),
 }
 
+RUNTIME_ACTION_TYPES = {
+    "replay_probe",
+    "scoreboard_check",
+    "coverage_feedback_tuning",
+}
+
 
 @dataclass(frozen=True)
 class CandidateAcceptanceThresholds:
@@ -89,10 +95,15 @@ class CandidateRegressionSettings:
     iters: int | None = None
     max_seeds: int | None = None
     seed: int | None = None
+    max_variant_regressions: int = 1
     run_plan_profile: str | None = None
     round_evaluation: bool = True
     campaign_plan_profile: str = "campaign_with_evaluation"
     thresholds: CandidateAcceptanceThresholds = CandidateAcceptanceThresholds()
+
+    def __post_init__(self) -> None:
+        if self.max_variant_regressions < 1:
+            raise ValueError("max_variant_regressions must be >= 1")
 
 
 @dataclass(frozen=True)
@@ -286,21 +297,76 @@ class HarnessCandidateRegressionBackend:
             )
 
         candidate_evaluation = read_json_object(campaign_config.campaign_evaluation_out)
-        candidate_metrics = candidate_metric_snapshot(
+        combined_metrics = candidate_metric_snapshot(
             candidate_campaign_manifest,
             candidate_evaluation,
             cwd=_campaign_cwd(candidate_campaign_manifest, campaign_config.cwd),
         )
-        candidate_metrics.update(adapter_metric_snapshot(adapter_results))
-        candidate_metrics.update(runtime_metric_snapshot(runtime_metrics_path))
+        combined_metrics.update(adapter_metric_snapshot(adapter_results))
+        combined_metrics.update(runtime_metric_snapshot(runtime_metrics_path))
+        combined_variant = combined_variant_evaluation(
+            overlay=overlay,
+            metrics=combined_metrics,
+            campaign_config=campaign_config,
+            run_config_path=run_config_path,
+            runtime_metrics_path=runtime_metrics_path,
+            adapter_results=adapter_results,
+        )
+        selected_variants = select_candidate_variants(
+            overlay.get("variants"),
+            max_count=self.settings.max_variant_regressions,
+        )
+        variant_evaluations = [
+            combined_variant,
+            *self._run_additional_variant_evaluations(
+                selected_variants=selected_variants,
+                raw_actions=raw_actions,
+                task=task,
+                proposal=proposal,
+                patch=patch,
+                candidate_manifest=candidate_manifest,
+                baseline_manifest=baseline_manifest,
+                baseline_metrics=baseline_metrics,
+                regression_dir=regression_dir,
+            ),
+        ]
         ranking = build_candidate_variant_ranking(
             action_overlay=overlay,
             baseline_metrics=baseline_metrics,
-            candidate_metrics=candidate_metrics,
+            candidate_metrics=combined_metrics,
             selected_variant_id="combined",
+            variant_evaluations=variant_evaluations,
         )
         ranking_path = regression_dir / "candidate_variant_ranking.json"
         _write_json(ranking_path, ranking)
+        selected_variant = select_top_variant_evaluation(
+            ranking,
+            variant_evaluations,
+        )
+        candidate_metrics = dict(
+            mapping(selected_variant.get("metrics")) or combined_metrics
+        )
+        candidate_status = str(selected_variant.get("status") or "passed")
+        variant_evaluations_path = regression_dir / "candidate_variant_evaluations.json"
+        _write_json(
+            variant_evaluations_path,
+            {
+                "schema_version": 1,
+                "kind": "libafl_bfm_fuzz.harness_candidate_variant_evaluations",
+                "created_at": utc_timestamp(),
+                "candidate_id": candidate_manifest.get("candidate_id"),
+                "evaluations": variant_evaluations,
+            },
+        )
+        action_effect_report = build_candidate_action_effect_report(
+            task=task,
+            proposal=proposal,
+            candidate_manifest=candidate_manifest,
+            baseline_metrics=baseline_metrics,
+            variant_evaluations=variant_evaluations,
+        )
+        action_effect_report_path = regression_dir / "candidate_action_effect_report.json"
+        _write_json(action_effect_report_path, action_effect_report)
         promotion = build_candidate_promotion_package(
             task=task,
             proposal=proposal,
@@ -322,7 +388,7 @@ class HarnessCandidateRegressionBackend:
             "proposal_id": proposal.get("proposal_id"),
             "candidate_id": candidate_manifest.get("candidate_id"),
             "source": type(self).__name__,
-            "status": "passed",
+            "status": candidate_status,
             "application_status": patch.get("status"),
             "baseline_metrics": baseline_metrics,
             "candidate_metrics": candidate_metrics,
@@ -340,6 +406,8 @@ class HarnessCandidateRegressionBackend:
                     runtime_metrics_path,
                 ),
                 "candidate_variant_ranking": str(ranking_path),
+                "candidate_variant_evaluations": str(variant_evaluations_path),
+                "candidate_action_effect_report": str(action_effect_report_path),
                 "candidate_promotion_package": str(promotion_path),
                 "candidate_campaign_manifest": str(
                     campaign_config.campaign_manifest_out
@@ -361,6 +429,8 @@ class HarnessCandidateRegressionBackend:
                     if isinstance(mode, dict)
                 ),
                 "candidate_variant_count": len(ranking.get("variants", [])),
+                "evaluated_variant_count": len(variant_evaluations),
+                "selected_variant_id": selected_variant.get("variant_id"),
                 "promotion_status": promotion.get("promotion_status"),
             },
         }
@@ -477,6 +547,168 @@ class HarnessCandidateRegressionBackend:
             run_orchestrator_factory=self.run_orchestrator_factory,
         )
         return campaign.run()
+
+    def _run_additional_variant_evaluations(
+        self,
+        *,
+        selected_variants: tuple[dict[str, Any], ...],
+        raw_actions: tuple[dict[str, Any], ...],
+        task: dict[str, Any],
+        proposal: dict[str, Any],
+        patch: dict[str, Any],
+        candidate_manifest: dict[str, Any],
+        baseline_manifest: dict[str, Any],
+        baseline_metrics: dict[str, float | int],
+        regression_dir: Path,
+    ) -> tuple[dict[str, Any], ...]:
+        evaluations: list[dict[str, Any]] = []
+        for variant in selected_variants:
+            variant_id = str(variant.get("variant_id") or "")
+            if variant_id == "combined":
+                continue
+            actions = filter_candidate_actions_for_variant(raw_actions, variant)
+            if not actions:
+                continue
+            evaluations.append(
+                self._run_single_variant_evaluation(
+                    variant=variant,
+                    actions=actions,
+                    task=task,
+                    proposal=proposal,
+                    patch=patch,
+                    candidate_manifest=candidate_manifest,
+                    baseline_manifest=baseline_manifest,
+                    baseline_metrics=baseline_metrics,
+                    regression_dir=regression_dir,
+                )
+            )
+        return tuple(evaluations)
+
+    def _run_single_variant_evaluation(
+        self,
+        *,
+        variant: dict[str, Any],
+        actions: tuple[dict[str, Any], ...],
+        task: dict[str, Any],
+        proposal: dict[str, Any],
+        patch: dict[str, Any],
+        candidate_manifest: dict[str, Any],
+        baseline_manifest: dict[str, Any],
+        baseline_metrics: dict[str, float | int],
+        regression_dir: Path,
+    ) -> dict[str, Any]:
+        variant_id = str(variant.get("variant_id") or "variant")
+        variant_dir = regression_dir / "variants" / safe_slug(variant_id)
+        variant_dir.mkdir(parents=True, exist_ok=True)
+        variant_candidate_id = ":".join(
+            [
+                str(candidate_manifest.get("candidate_id") or "candidate"),
+                safe_slug(variant_id),
+            ]
+        )
+        adapter_context = CandidateActionAdapterContext(
+            candidate_id=variant_candidate_id,
+            regression_dir=variant_dir,
+        )
+        adapter_results = adapt_candidate_actions(
+            actions,
+            adapter_context,
+            adapters=self.action_adapters,
+        )
+        overlay = build_candidate_action_overlay(
+            {**candidate_manifest, "candidate_id": variant_candidate_id},
+            adapter_results,
+        )
+        overlay["selected_variant_id"] = variant_id
+        overlay_path = variant_dir / "candidate_action_overlay.json"
+        _write_json(overlay_path, overlay)
+        directives = build_candidate_directives(adapter_results)
+        directives_path = (
+            variant_dir / "candidate_mutation_directives.json"
+            if directives["directives"]
+            else None
+        )
+        if directives_path is not None:
+            _write_json(directives_path, directives)
+        runtime_metrics_path = variant_dir / "candidate_runtime_metrics.json"
+        campaign_config = self._candidate_campaign_config(
+            task=task,
+            baseline_manifest=baseline_manifest,
+            regression_dir=variant_dir,
+            action_overlay=overlay_path,
+            adapter_results=adapter_results,
+            initial_directives=directives_path,
+            runtime_metrics=runtime_metrics_path,
+        )
+        run_config_path = variant_dir / "candidate_regression_config.json"
+        _write_json(
+            run_config_path,
+            candidate_regression_config_payload(
+                campaign_config,
+                action_overlay=overlay_path,
+                adapter_results=adapter_results,
+                initial_directives=directives_path,
+                runtime_metrics=runtime_metrics_path,
+            ),
+        )
+        artifacts = {
+            "candidate_regression_config": str(run_config_path),
+            "candidate_action_overlay": str(overlay_path),
+            **adapter_artifacts(adapter_results),
+            **_optional_artifact("candidate_mutation_directives", directives_path),
+        }
+        try:
+            campaign_manifest = self._run_candidate_campaign(
+                campaign_config,
+                task=task,
+                proposal=proposal,
+                patch=patch,
+            )
+            campaign_evaluation = read_json_object(
+                campaign_config.campaign_evaluation_out
+            )
+            metrics = candidate_metric_snapshot(
+                campaign_manifest,
+                campaign_evaluation,
+                cwd=_campaign_cwd(campaign_manifest, campaign_config.cwd),
+            )
+            metrics.update(adapter_metric_snapshot(adapter_results))
+            metrics.update(runtime_metric_snapshot(runtime_metrics_path))
+            status = "passed"
+            error = None
+            artifacts.update(
+                {
+                    **_optional_existing_artifact(
+                        "candidate_runtime_metrics",
+                        runtime_metrics_path,
+                    ),
+                    "candidate_campaign_manifest": str(
+                        campaign_config.campaign_manifest_out
+                    ),
+                    "candidate_campaign_evaluation": str(
+                        campaign_config.campaign_evaluation_out
+                    ),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - variant failure is ranked down
+            metrics = {}
+            status = "error"
+            error = {"type": type(exc).__name__, "message": str(exc)}
+            artifacts.update(
+                _optional_existing_artifact(
+                    "candidate_runtime_metrics",
+                    runtime_metrics_path,
+                )
+            )
+        return candidate_variant_evaluation_payload(
+            variant=variant,
+            status=status,
+            metrics=metrics,
+            baseline_metrics=baseline_metrics,
+            artifacts=artifacts,
+            adapter_results=adapter_results,
+            error=error,
+        )
 
     def _not_run_report(
         self,
@@ -780,6 +1012,39 @@ def build_candidate_variants(
     return [combined, *single_action_variants]
 
 
+def select_candidate_variants(
+    variants: Any,
+    *,
+    max_count: int,
+) -> tuple[dict[str, Any], ...]:
+    if max_count < 1:
+        raise ValueError("max_count must be >= 1")
+    selected = [
+        variant
+        for variant in list_value(variants)
+        if isinstance(variant, dict)
+    ]
+    return tuple(selected[:max_count])
+
+
+def filter_candidate_actions_for_variant(
+    actions: tuple[dict[str, Any], ...],
+    variant: dict[str, Any],
+) -> tuple[dict[str, Any], ...]:
+    action_ids = {
+        str(action_id)
+        for action_id in list_value(variant.get("action_ids"))
+        if action_id is not None
+    }
+    if not action_ids:
+        return ()
+    return tuple(
+        action
+        for action in actions
+        if str(action.get("action_id")) in action_ids
+    )
+
+
 def adapter_make_vars(
     adapter_results: tuple[CandidateActionAdapterResult, ...],
 ) -> tuple[str, ...]:
@@ -861,22 +1126,41 @@ def build_candidate_variant_ranking(
     baseline_metrics: dict[str, float | int],
     candidate_metrics: dict[str, float | int],
     selected_variant_id: str,
+    variant_evaluations: tuple[dict[str, Any], ...] = (),
 ) -> dict[str, Any]:
+    evaluations = {
+        str(evaluation.get("variant_id")): evaluation
+        for evaluation in variant_evaluations
+        if evaluation.get("variant_id") is not None
+    }
     variants = []
     for variant in list_value(action_overlay.get("variants")):
         if not isinstance(variant, dict):
             continue
         variant_id = str(variant.get("variant_id") or "variant")
+        evaluation = evaluations.get(variant_id)
         score = variant_materialization_score(variant)
         validation_status = variant.get("validation_status")
-        if variant_id == selected_variant_id:
-            score += metric_improvement_score(baseline_metrics, candidate_metrics)
+        metrics = candidate_metrics
+        if evaluation is not None:
+            metrics = numeric_variant_metrics(evaluation)
+            validation_status = evaluation.get("status")
+            score += variant_status_score(str(evaluation.get("status") or "unknown"))
+            score += metric_improvement_score(baseline_metrics, metrics)
+        elif variant_id == selected_variant_id:
             validation_status = "executed"
+            score += metric_improvement_score(baseline_metrics, metrics)
         variants.append(
             {
                 **variant,
                 "validation_status": validation_status,
                 "score": score,
+                "metric_delta_summary": metric_change_summary(
+                    baseline_metrics,
+                    metrics,
+                )
+                if evaluation is not None or variant_id == selected_variant_id
+                else None,
             }
         )
     ranked = sorted(
@@ -896,6 +1180,102 @@ def build_candidate_variant_ranking(
         "variants": ranked,
         "top_variant": ranked[0] if ranked else None,
     }
+
+
+def combined_variant_evaluation(
+    *,
+    overlay: dict[str, Any],
+    metrics: dict[str, float | int],
+    campaign_config: CampaignConfig,
+    run_config_path: Path,
+    runtime_metrics_path: Path,
+    adapter_results: tuple[CandidateActionAdapterResult, ...],
+) -> dict[str, Any]:
+    variant = next(
+        (
+            item
+            for item in list_value(overlay.get("variants"))
+            if isinstance(item, dict) and item.get("variant_id") == "combined"
+        ),
+        {"variant_id": "combined", "variant_type": "combined_actions"},
+    )
+    return candidate_variant_evaluation_payload(
+        variant=variant,
+        status="passed",
+        metrics=metrics,
+        baseline_metrics={},
+        artifacts={
+            "candidate_regression_config": str(run_config_path),
+            "candidate_runtime_metrics": str(runtime_metrics_path),
+            "candidate_campaign_manifest": str(campaign_config.campaign_manifest_out),
+            "candidate_campaign_evaluation": str(
+                campaign_config.campaign_evaluation_out
+            ),
+        },
+        adapter_results=adapter_results,
+    )
+
+
+def candidate_variant_evaluation_payload(
+    *,
+    variant: dict[str, Any],
+    status: str,
+    metrics: dict[str, float | int],
+    baseline_metrics: dict[str, float | int],
+    artifacts: dict[str, str],
+    adapter_results: tuple[CandidateActionAdapterResult, ...],
+    error: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "variant_id": str(variant.get("variant_id") or "variant"),
+        "variant_type": variant.get("variant_type"),
+        "action_ids": list_value(variant.get("action_ids")),
+        "action_types": list_value(variant.get("action_types")),
+        "status": status,
+        "metrics": metrics,
+        "metric_delta_summary": metric_change_summary(baseline_metrics, metrics)
+        if baseline_metrics
+        else {},
+        "artifacts": artifacts,
+        "actions": [
+            entry
+            for result in adapter_results
+            for entry in result.entries
+        ],
+    }
+    if error is not None:
+        payload["error"] = error
+    return payload
+
+
+def select_top_variant_evaluation(
+    ranking: dict[str, Any],
+    variant_evaluations: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    top_variant = mapping(ranking.get("top_variant"))
+    top_id = top_variant.get("variant_id")
+    for evaluation in variant_evaluations:
+        if evaluation.get("variant_id") == top_id:
+            return evaluation
+    return variant_evaluations[0] if variant_evaluations else {}
+
+
+def numeric_variant_metrics(
+    evaluation: dict[str, Any],
+) -> dict[str, float | int]:
+    metrics: dict[str, float | int] = {}
+    _merge_numeric_metrics(metrics, mapping(evaluation.get("metrics")))
+    return metrics
+
+
+def variant_status_score(status: str) -> float:
+    if status in {"passed", "ok"}:
+        return 100.0
+    if status == "not_run":
+        return -100.0
+    if status in {"error", "failed"}:
+        return -1000.0
+    return 0.0
 
 
 def build_candidate_promotion_package(
@@ -937,6 +1317,158 @@ def build_candidate_promotion_package(
     }
 
 
+def build_candidate_action_effect_report(
+    *,
+    task: dict[str, Any],
+    proposal: dict[str, Any],
+    candidate_manifest: dict[str, Any],
+    baseline_metrics: dict[str, float | int],
+    variant_evaluations: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    variants = []
+    consumed_action_ids: set[str] = set()
+    runtime_action_ids: set[str] = set()
+    for evaluation in variant_evaluations:
+        runtime_payload = read_runtime_metrics(
+            _path_or_none(
+                mapping(evaluation.get("artifacts")).get("candidate_runtime_metrics")
+            )
+        )
+        actions = build_variant_action_effects(
+            evaluation=evaluation,
+            runtime_payload=runtime_payload,
+            baseline_metrics=baseline_metrics,
+        )
+        for action in actions:
+            if action.get("is_runtime_action"):
+                runtime_action_ids.add(str(action.get("action_id")))
+            if action.get("consumed"):
+                consumed_action_ids.add(str(action.get("action_id")))
+        variants.append(
+            {
+                "variant_id": evaluation.get("variant_id"),
+                "status": evaluation.get("status"),
+                "action_ids": list_value(evaluation.get("action_ids")),
+                "metric_delta_summary": metric_change_summary(
+                    baseline_metrics,
+                    numeric_variant_metrics(evaluation),
+                ),
+                "actions": actions,
+            }
+        )
+    action_ids = {
+        str(action.get("action_id"))
+        for evaluation in variant_evaluations
+        for action in list_value(evaluation.get("actions"))
+        if isinstance(action, dict) and action.get("action_id") is not None
+    }
+    return {
+        "schema_version": 1,
+        "kind": "libafl_bfm_fuzz.harness_candidate_action_effect_report",
+        "created_at": utc_timestamp(),
+        "target": task.get("target"),
+        "run_id": task.get("run_id"),
+        "proposal_id": proposal.get("proposal_id"),
+        "candidate_id": candidate_manifest.get("candidate_id"),
+        "variants": variants,
+        "summary": {
+            "variant_count": len(variants),
+            "action_count": len(action_ids),
+            "runtime_action_count": len(runtime_action_ids),
+            "consumed_action_count": len(consumed_action_ids),
+        },
+    }
+
+
+def build_variant_action_effects(
+    *,
+    evaluation: dict[str, Any],
+    runtime_payload: dict[str, Any],
+    baseline_metrics: dict[str, float | int],
+) -> list[dict[str, Any]]:
+    runtime_by_action = runtime_action_metric_map(runtime_payload)
+    section_metrics = runtime_section_metric_map(runtime_payload)
+    actions = [
+        action
+        for action in list_value(evaluation.get("actions"))
+        if isinstance(action, dict)
+    ]
+    type_counts: dict[str, int] = {}
+    for action in actions:
+        action_type = str(action.get("action_type") or "")
+        type_counts[action_type] = type_counts.get(action_type, 0) + 1
+    results = []
+    for action in actions:
+        action_id = str(action.get("action_id") or "")
+        action_type = str(action.get("action_type") or "")
+        metrics = dict(runtime_by_action.get((action_id, action_type), {}))
+        if not metrics and type_counts.get(action_type) == 1:
+            metrics = dict(section_metrics.get(action_type, {}))
+        is_runtime_action = action_type in RUNTIME_ACTION_TYPES
+        consumed = bool(metrics) if is_runtime_action else False
+        results.append(
+            {
+                "action_id": action_id,
+                "action_type": action_type,
+                "is_runtime_action": is_runtime_action,
+                "consumed": consumed,
+                "consumption_status": (
+                    "consumed"
+                    if consumed
+                    else "not_consumed"
+                    if is_runtime_action
+                    else "not_runtime_action"
+                ),
+                "runtime_metrics": metrics,
+                "variant_metric_delta_summary": metric_change_summary(
+                    baseline_metrics,
+                    numeric_variant_metrics(evaluation),
+                ),
+                "evidence_refs": list_value(action.get("evidence_refs")),
+            }
+        )
+    return results
+
+
+def runtime_action_metric_map(
+    payload: dict[str, Any],
+) -> dict[tuple[str, str], dict[str, float | int]]:
+    result: dict[tuple[str, str], dict[str, float | int]] = {}
+    sections = payload.get("sections")
+    if not isinstance(sections, dict):
+        return result
+    for section, metrics in sections.items():
+        if not isinstance(metrics, dict):
+            continue
+        for action in list_value(metrics.get("actions")):
+            if not isinstance(action, dict):
+                continue
+            action_id = _optional_str(action.get("action_id"))
+            action_type = _optional_str(action.get("action_type")) or str(section)
+            if action_id is None:
+                continue
+            values: dict[str, float | int] = {}
+            _merge_numeric_metrics(values, action)
+            result[(action_id, action_type)] = values
+    return result
+
+
+def runtime_section_metric_map(
+    payload: dict[str, Any],
+) -> dict[str, dict[str, float | int]]:
+    result: dict[str, dict[str, float | int]] = {}
+    sections = payload.get("sections")
+    if not isinstance(sections, dict):
+        return result
+    for section, metrics in sections.items():
+        if not isinstance(metrics, dict):
+            continue
+        values: dict[str, float | int] = {}
+        _merge_numeric_metrics(values, metrics)
+        result[str(section)] = values
+    return result
+
+
 def metric_threshold_summary(
     baseline_metrics: dict[str, float | int],
     candidate_metrics: dict[str, float | int],
@@ -966,6 +1498,34 @@ def metric_threshold_summary(
             regressed <= thresholds.max_regressed_metric_count
             and improved >= thresholds.min_improved_metric_count
         ),
+    }
+
+
+def metric_change_summary(
+    baseline_metrics: dict[str, float | int],
+    candidate_metrics: dict[str, float | int],
+) -> dict[str, int]:
+    improved = 0
+    regressed = 0
+    changed = 0
+    comparable = 0
+    for metric, baseline in baseline_metrics.items():
+        if metric not in candidate_metrics:
+            continue
+        comparable += 1
+        delta = candidate_metrics[metric] - baseline
+        direction = metric_direction(metric, delta)
+        if direction == "improved":
+            improved += 1
+        elif direction == "regressed":
+            regressed += 1
+        elif direction == "changed":
+            changed += 1
+    return {
+        "comparable_metric_count": comparable,
+        "improved_metric_count": improved,
+        "regressed_metric_count": regressed,
+        "changed_metric_count": changed,
     }
 
 

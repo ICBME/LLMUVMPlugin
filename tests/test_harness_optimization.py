@@ -207,7 +207,11 @@ class StubRegressionCampaign(CampaignOrchestrator):
         )
         runtime_metrics_path = Path(runtime_metrics) if runtime_metrics else None
         if runtime_metrics_path is not None:
-            if extra_make_var_value(self.config.extra_make_vars, REPLAY_PROBE_CONFIG_ENV):
+            replay_config = extra_make_var_value(
+                self.config.extra_make_vars,
+                REPLAY_PROBE_CONFIG_ENV,
+            )
+            if replay_config:
                 merge_runtime_metrics(
                     runtime_metrics_path,
                     "replay_probe",
@@ -217,12 +221,22 @@ class StubRegressionCampaign(CampaignOrchestrator):
                         "field_sample_count": 3,
                         "signal_request_count": 1,
                         "unavailable_signal_count": 1,
+                        "actions": _runtime_metric_actions(
+                            replay_config,
+                            {
+                                "sample_count": 3,
+                                "field_sample_count": 3,
+                                "signal_request_count": 1,
+                                "unavailable_signal_count": 1,
+                            },
+                        ),
                     },
                 )
-            if extra_make_var_value(
+            scoreboard_config = extra_make_var_value(
                 self.config.extra_make_vars,
                 SCOREBOARD_CHECK_CONFIG_ENV,
-            ):
+            )
+            if scoreboard_config:
                 merge_runtime_metrics(
                     runtime_metrics_path,
                     "scoreboard_check",
@@ -232,12 +246,22 @@ class StubRegressionCampaign(CampaignOrchestrator):
                         "passed_count": 3,
                         "failed_count": 0,
                         "enforced_failure_count": 0,
+                        "actions": _runtime_metric_actions(
+                            scoreboard_config,
+                            {
+                                "checked_count": 3,
+                                "passed_count": 3,
+                                "failed_count": 0,
+                                "enforced_failure_count": 0,
+                            },
+                        ),
                     },
                 )
-            if extra_make_var_value(
+            tuning_config = extra_make_var_value(
                 self.config.extra_make_vars,
                 COVERAGE_FEEDBACK_TUNING_CONFIG_ENV,
-            ):
+            )
+            if tuning_config:
                 merge_runtime_metrics(
                     runtime_metrics_path,
                     "coverage_feedback_tuning",
@@ -246,6 +270,14 @@ class StubRegressionCampaign(CampaignOrchestrator):
                         "applied_count": 1,
                         "trimmed_gap_count": 2,
                         "weighted_directive_count": 1,
+                        "actions": _runtime_metric_actions(
+                            tuning_config,
+                            {
+                                "applied_count": 1,
+                                "trimmed_gap_count": 2,
+                                "weighted_directive_count": 1,
+                            },
+                        ),
                     },
                 )
         return {
@@ -924,6 +956,16 @@ def test_harness_candidate_regression_backend_runs_sandbox_campaign() -> None:
                 encoding="utf-8"
             )
         )
+        variant_evaluations = json.loads(
+            Path(artifacts["candidate_variant_evaluations"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        action_effect = json.loads(
+            Path(artifacts["candidate_action_effect_report"]).read_text(
+                encoding="utf-8"
+            )
+        )
         runtime_metrics = json.loads(
             Path(artifacts["candidate_runtime_metrics"]).read_text(
                 encoding="utf-8"
@@ -993,7 +1035,19 @@ def test_harness_candidate_regression_backend_runs_sandbox_campaign() -> None:
     assert len(ranking["variants"]) == 5
     assert promotion["promotion_status"] == "ready_for_review"
     assert promotion["safety"]["mainline_modified"] is False
+    assert len(variant_evaluations["evaluations"]) == 1
+    assert variant_evaluations["evaluations"][0]["variant_id"] == "combined"
+    assert action_effect["summary"]["variant_count"] == 1
+    assert action_effect["summary"]["consumed_action_count"] == 3
+    assert any(
+        action["action_id"] == "probe-1"
+        and action["consumed"] is True
+        and action["runtime_metrics"]["sample_count"] == 3
+        for action in action_effect["variants"][0]["actions"]
+    )
     assert candidate_evaluation["summary"]["candidate_variant_count"] == 5
+    assert candidate_evaluation["summary"]["evaluated_variant_count"] == 1
+    assert candidate_evaluation["summary"]["selected_variant_id"] == "combined"
     assert candidate_evaluation["summary"]["promotion_status"] == "ready_for_review"
     assert metric_delta["summary"]["improved_metric_count"] == 1
     assert final_decision["decision"] == "accepted_for_review"
@@ -1102,6 +1156,141 @@ def test_harness_candidate_regression_threshold_rejects_neutral_candidate() -> N
     assert final_decision["reason"] == "candidate_metric_improvement_below_threshold"
 
 
+def test_harness_candidate_regression_runs_top_k_variants() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        seen_configs: list[CampaignConfig] = []
+
+        def factory(config, observation_context, **kwargs):
+            seen_configs.append(config)
+            return StubRegressionCampaign(config, observation_context, **kwargs)
+
+        campaign_evaluation, campaign_manifest, manifest_path = _source_payloads(root)
+        evaluation_path = root / "campaign_evaluation.json"
+        paths = harness_optimization_paths(evaluation_path)
+        backend = HarnessCandidateRegressionBackend(
+            settings=CandidateRegressionSettings(
+                modes=("heuristic_feedback",),
+                rounds=1,
+                max_variant_regressions=3,
+                thresholds=CandidateAcceptanceThresholds(
+                    min_improved_metric_count=1,
+                ),
+            ),
+            evaluation_backends=EvaluationBackends(
+                campaign_evaluation=RegressionCampaignEvaluationBackend(
+                    failed_record_count=0,
+                )
+            ),
+            campaign_orchestrator_factory=factory,
+        )
+        adapter = HarnessOptimizationAdapter(
+            target="demo",
+            paths=paths,
+            campaign_evaluation_path=evaluation_path,
+            campaign_manifest_path=manifest_path,
+            cwd=root,
+            candidate_evaluation_backend=backend,
+        )
+        task = adapter.run_task(campaign_evaluation, campaign_manifest)
+        proposal = {
+            "schema_version": 1,
+            "kind": PROPOSAL_KIND,
+            "proposal_id": "proposal-top-k",
+            "status": "proposed",
+            "actions": [
+                {
+                    "action_id": "probe-1",
+                    "action_type": "replay_probe",
+                    "payload": {"probe": "result.actual"},
+                    "evidence_refs": [{"span_id": "span-dut"}],
+                },
+                {
+                    "action_id": "scoreboard-1",
+                    "action_type": "scoreboard_check",
+                    "payload": {"mode": "record_seen"},
+                    "evidence_refs": [{"span_id": "span-dut"}],
+                },
+            ],
+            "evidence_refs": [{"span_id": "span-dut"}],
+        }
+        decision = adapter.run_decision(task, proposal)
+        apply_result = adapter.run_apply(task, proposal, decision)
+        patch = apply_result["harness_optimization_patch"]
+        candidate_manifest = apply_result["harness_optimization_candidate_manifest"]
+        candidate_evaluation = adapter.run_candidate_evaluation(
+            task,
+            proposal,
+            patch,
+            candidate_manifest,
+        )
+        metric_delta = adapter.run_metric_delta(task, candidate_evaluation)
+        final_decision = adapter.run_final_decision(
+            task,
+            proposal,
+            decision,
+            patch,
+            candidate_evaluation,
+            metric_delta,
+        )
+        artifacts = candidate_evaluation["artifacts"]
+        variant_evaluations = json.loads(
+            Path(artifacts["candidate_variant_evaluations"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        ranking = json.loads(
+            Path(artifacts["candidate_variant_ranking"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        action_effect = json.loads(
+            Path(artifacts["candidate_action_effect_report"]).read_text(
+                encoding="utf-8"
+            )
+        )
+
+    assert len(seen_configs) == 3
+    assert any("variants/action_probe-1" in str(config.out_dir) for config in seen_configs)
+    assert any(
+        "variants/action_scoreboard-1" in str(config.out_dir)
+        for config in seen_configs
+    )
+    assert candidate_evaluation["status"] == "passed"
+    assert candidate_evaluation["summary"]["evaluated_variant_count"] == 3
+    assert candidate_evaluation["summary"]["selected_variant_id"] == "combined"
+    assert {item["variant_id"] for item in variant_evaluations["evaluations"]} == {
+        "combined",
+        "action_probe-1",
+        "action_scoreboard-1",
+    }
+    assert action_effect["summary"]["runtime_action_count"] == 2
+    assert action_effect["summary"]["consumed_action_count"] == 2
+    assert all(
+        item["validation_status"] == "passed"
+        for item in ranking["variants"]
+        if item["variant_id"] in {"combined", "action_probe-1", "action_scoreboard-1"}
+    )
+    probe_variant = next(
+        item for item in action_effect["variants"] if item["variant_id"] == "action_probe-1"
+    )
+    assert probe_variant["actions"][0]["consumed"] is True
+    assert probe_variant["actions"][0]["runtime_metrics"]["sample_count"] == 3
+    assert metric_delta["summary"]["improved_metric_count"] == 1
+    assert final_decision["decision"] == "accepted_for_review"
+
+
+def test_candidate_regression_settings_rejects_invalid_variant_count() -> None:
+    try:
+        CandidateRegressionSettings(max_variant_regressions=0)
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("max_variant_regressions=0 should fail schema")
+
+    assert "max_variant_regressions must be >= 1" in message
+
+
 def _set_env(values: dict[str, str]) -> dict[str, str | None]:
     old = {key: os.environ.get(key) for key in values}
     os.environ.update(values)
@@ -1114,6 +1303,22 @@ def _restore_env(values: dict[str, str | None]) -> None:
             os.environ.pop(key, None)
         else:
             os.environ[key] = value
+
+
+def _runtime_metric_actions(
+    config_path: str,
+    metrics: dict[str, int],
+) -> list[dict[str, Any]]:
+    payload = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    return [
+        {
+            "action_id": entry.get("action_id"),
+            "action_type": entry.get("action_type"),
+            **metrics,
+        }
+        for entry in payload.get("entries", [])
+        if isinstance(entry, dict)
+    ]
 
 
 def _source_payloads(root: Path) -> tuple[dict, dict, Path]:

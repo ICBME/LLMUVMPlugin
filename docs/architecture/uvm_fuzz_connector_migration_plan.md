@@ -70,6 +70,10 @@
   consumption，pyUVM replay/scoreboard 与 coverage feedback 业务层会在显式 candidate
   regression 中消费 sandbox config，并通过 `HARNESS_RUNTIME_METRICS_OUT` 导出 runtime
   action metrics。
+  第十一阶段已完成 Harness LLM Optimization 第六阶段：candidate regression 会把 runtime
+  metrics 按 `action_id` / `action_type` 聚合为 `candidate_action_effect_report`，并可通过
+  `CandidateRegressionSettings.max_variant_regressions` 启用 top-K variant 独立 sandbox
+  回归；默认值为 1，保持只执行 combined candidate 的现有行为。
 - `CampaignOrchestrator` 已负责 campaign-level plan、manifest 和 connector 包装；
   mode/round 展开、上一轮 `round_manifest` 状态读取和每轮 `FuzzRunConfig` 构造已抽到
   `CampaignRoundScheduler`。
@@ -136,7 +140,9 @@
   per-action config artifact，并产出 `candidate_variant_ranking` 和
   `candidate_promotion_package`。第五阶段新增 `harness_runtime_actions.py`，让这些
   per-action config 在 candidate run 内被 replay/scoreboard/coverage feedback 真实消费，
-  并把 `candidate_runtime_metrics` 合入 candidate evaluation metrics。
+  并把 `candidate_runtime_metrics` 合入 candidate evaluation metrics。第六阶段新增
+  `candidate_variant_evaluations` 和 `candidate_action_effect_report`，用于记录 top-K
+  variant 独立回归结果、runtime action consumption 状态和每个 action 的效果归因。
 - CLI/Makefile：`--run-plan-profile`、`--campaign-plan-profile`、`--round-evaluation`、
   `--evaluation-out`、`--campaign-evaluation-out` 以及对应 Makefile 变量
   `RUN_PLAN_PROFILE`、`CAMPAIGN_PLAN_PROFILE`、`ROUND_EVALUATION_ENABLE`、
@@ -213,6 +219,11 @@
    `HARNESS_COVERAGE_FEEDBACK_TUNING_CONFIG` 和 `HARNESS_RUNTIME_METRICS_OUT`；
    runtime consumer 会写出 replay probe、scoreboard check 和 coverage feedback tuning
    的执行指标，candidate evaluation 会读取这些指标参与 metric delta。
+   Harness optimization 第六阶段已完成：runtime consumer 会写出 per-action metrics；
+   candidate regression 会生成 action effect report，并在显式设置
+   `max_variant_regressions > 1` 时为 selected variants 分别物化 sandbox config、执行
+   candidate campaign、生成 variant evaluation，再由 ranking/final decision 选择 top
+   variant。默认主流程与默认 candidate regression 行为不变。
 
 5. 收紧 artifact materialization。
    已完成：每个 coverage feedback connector step 声明的 output artifact 会在 step
@@ -258,8 +269,8 @@
   decision artifact 写出、默认 no-op proposal、非法 proposal schema reject、sandbox apply、
   unsafe action skip、candidate metric delta、final decision、真实 candidate regression
   backend 的 sandbox run config 物化、safe action adapter config 输出、内部 campaign
-  编排调用、adapter metrics、runtime action schema/消费/指标聚合、multi-candidate
-  ranking、promotion package 和阈值 reject。
+  编排调用、adapter metrics、runtime action schema/消费/指标聚合、action effect report、
+  top-K variant 独立回归、multi-candidate ranking、promotion package 和阈值 reject。
 - `tests/test_harness_trace.py`：覆盖 connector events 到 harness execution records 的转换、
   connector/module/failure/case/directive 聚合、hanging span 检测、trace quality report、
   LLM optimization dataset 写出、通用 trace core 独立使用、可注入 metadata extractor、
