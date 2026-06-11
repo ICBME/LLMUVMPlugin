@@ -194,6 +194,9 @@ RUN_ORCHESTRATION_TOPOLOGY = PipelineTopology(
         ComponentNode("round_manifest", "artifact", "Single-round orchestration manifest"),
         ComponentNode("campaign_manifest", "artifact", "Multi-round campaign manifest"),
         ComponentNode("evaluation_report", "artifact", "Run or campaign evaluation report"),
+        ComponentNode("harness_optimization_task", "artifact", "Structured harness optimization task"),
+        ComponentNode("harness_optimization_proposal", "artifact", "Optimizer proposal before application"),
+        ComponentNode("harness_optimization_decision", "artifact", "Schema-level accept/reject decision"),
     ),
     connectors=(
         ConnectorEdge(
@@ -274,6 +277,30 @@ RUN_ORCHESTRATION_TOPOLOGY = PipelineTopology(
             "evaluation_report",
             input_roles=("campaign_manifest",),
             output_roles=("evaluation_report",),
+        ),
+        ConnectorEdge(
+            "evaluation_to_harness_optimization_task",
+            "evaluation_report",
+            "harness_optimization_task",
+            input_roles=("evaluation_report",),
+            output_roles=("harness_optimization_task",),
+        ),
+        ConnectorEdge(
+            "harness_optimization_task_to_proposal",
+            "harness_optimization_task",
+            "harness_optimization_proposal",
+            input_roles=("harness_optimization_task",),
+            output_roles=("harness_optimization_proposal",),
+        ),
+        ConnectorEdge(
+            "harness_optimization_proposal_to_decision",
+            "harness_optimization_proposal",
+            "harness_optimization_decision",
+            input_roles=(
+                "harness_optimization_task",
+                "harness_optimization_proposal",
+            ),
+            output_roles=("harness_optimization_decision",),
         ),
     ),
 )

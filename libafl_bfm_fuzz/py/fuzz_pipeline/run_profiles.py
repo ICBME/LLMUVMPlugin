@@ -113,6 +113,20 @@ DEFAULT_CAMPAIGN_PLAN_PROFILES: Mapping[str, RunPlanProfile] = {
         stage_names=("campaign_manifest", "campaign_evaluation"),
         description="Write the campaign manifest and a follow-on evaluation report.",
     ),
+    "campaign_with_evaluation_and_optimization": RunPlanProfile(
+        name="campaign_with_evaluation_and_optimization",
+        stage_names=(
+            "campaign_manifest",
+            "campaign_evaluation",
+            "harness_optimization_task",
+            "harness_optimization_proposal",
+            "harness_optimization_decision",
+        ),
+        description=(
+            "Write campaign evaluation and phase-one harness optimization "
+            "task/proposal/decision artifacts."
+        ),
+    ),
 }
 
 

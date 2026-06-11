@@ -48,6 +48,12 @@
   `produces_results`、`input_roles`、`output_roles` 和 `policy`；`RunPlan` 在执行前
   静态校验 result/artifact 依赖、重复 result key 和 profile policy 引用，执行时再检查
   runtime result readiness。
+  第六阶段已完成 Harness LLM Optimization 第一阶段：新增 campaign profile
+  `campaign_with_evaluation_and_optimization`，在 `campaign_evaluation` 后生成
+  `harness_optimization_task`、`harness_optimization_proposal` 和
+  `harness_optimization_decision`。默认 no-op optimizer backend 只生成 schema-valid
+  proposal，占位 decision 做 schema-level accept/reject，并将应用状态标为
+  `not_applied`。
 - `CampaignOrchestrator` 已负责 campaign-level plan、manifest 和 connector 包装；
   mode/round 展开、上一轮 `round_manifest` 状态读取和每轮 `FuzzRunConfig` 构造已抽到
   `CampaignRoundScheduler`。
@@ -89,6 +95,7 @@
 
 - `campaign_manifest`
 - `campaign_with_evaluation`
+- `campaign_with_evaluation_and_optimization`
 
 公开扩展点：
 
@@ -98,6 +105,8 @@
   `register_campaign_plan_profile()`：插入 campaign-level stage。
 - `RunBackends`：替换 corpus generator、UVM replay、coverage report 后端。
 - `EvaluationBackends`：替换 round/campaign evaluation 后端。
+- `EvaluationBackends(harness_optimizer=...)`：替换 phase-one harness optimizer proposal
+  backend；默认 `NoopHarnessOptimizerBackend` 不应用变更。
 - CLI/Makefile：`--run-plan-profile`、`--campaign-plan-profile`、`--round-evaluation`、
   `--evaluation-out`、`--campaign-evaluation-out` 以及对应 Makefile 变量
   `RUN_PLAN_PROFILE`、`CAMPAIGN_PLAN_PROFILE`、`ROUND_EVALUATION_ENABLE`、
@@ -152,6 +161,9 @@
    execution records 包含 `span_id`、`case_id`、`directive_id` 和 `corpus_sha256`，
    harness evaluation 额外提供 hanging span、case/directive 聚合和 trace quality report；
    replacement backend 仍可完全接管这部分逻辑。
+   Harness optimization 第一阶段已完成：`harness_optimization.py` 从 campaign evaluation、
+   harness evaluation、LLM dataset 和 campaign rollup 构造结构化 task；optimizer backend
+   返回 proposal；decision artifact 只做 schema-level accept/reject，不执行 sandbox apply。
 
 5. 收紧 artifact materialization。
    已完成：每个 coverage feedback connector step 声明的 output artifact 会在 step
@@ -190,8 +202,10 @@
   和 backend 替换边界。
 - `tests/test_run_profiles_evaluation.py`：覆盖 run/campaign profile 选择、mode mismatch
   拒绝、round/campaign evaluation stage、`EvaluationBackends` 替换、自定义 campaign
-  stage、非法 campaign DAG 拒绝，以及 `CampaignRoundScheduler` 对上一轮 manifest state
-  的传递。
+  stage、非法 campaign DAG 拒绝、harness optimization campaign profile 和 fake optimizer
+  backend，以及 `CampaignRoundScheduler` 对上一轮 manifest state 的传递。
+- `tests/test_harness_optimization.py`：覆盖 phase-one harness optimization task/proposal/
+  decision artifact 写出、默认 no-op proposal 和非法 proposal schema reject。
 - `tests/test_harness_trace.py`：覆盖 connector events 到 harness execution records 的转换、
   connector/module/failure/case/directive 聚合、hanging span 检测、trace quality report、
   LLM optimization dataset 写出、通用 trace core 独立使用、可注入 metadata extractor、

@@ -10,6 +10,7 @@ from typing import Any, Callable, Protocol
 from connector_observe import ObservationContext
 
 from .coverage_feedback import CoverageFeedbackResult
+from .harness_optimization import HarnessOptimizerBackend
 from .harness_trace import HarnessTraceBuilder, HarnessTraceOutputs
 from .harness_rollup import CampaignTraceRollupBuilder, campaign_trace_rollup_path
 from .run_adapters import RunPathResolver
@@ -35,6 +36,7 @@ class CampaignEvaluationBackend(Protocol):
 class EvaluationBackends:
     round_evaluation: RoundEvaluationBackend | None = None
     campaign_evaluation: CampaignEvaluationBackend | None = None
+    harness_optimizer: HarnessOptimizerBackend | None = None
 
 
 class EvaluationConfigView(Protocol):

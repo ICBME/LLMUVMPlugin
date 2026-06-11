@@ -133,6 +133,17 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 - 负责把 execution records 和 evaluation report 转换为 LLM optimization dataset。
 - 后续可在这里扩展 task-level prompt/evidence/replay command，而不影响 trace core。
 
+`py/fuzz_pipeline/harness_optimization.py`
+
+- 定义 phase-one harness LLM optimization 的结构化 artifact：optimization task、
+  proposal 和 decision。
+- `HarnessOptimizationAdapter` 从 campaign evaluation、harness evaluation、LLM dataset
+  和 campaign rollup 构造 task；optimizer backend 只返回 proposal，不直接修改源码或
+  harness artifact。
+- 默认 `NoopHarnessOptimizerBackend` 生成 schema-valid no-op proposal；
+  decision stage 只做 schema-level accept/reject，并将 `application_status` 标为
+  `not_applied`，为后续 sandbox apply 和回归验证预留接口。
+
 `py/fuzz_pipeline/harness_rollup.py`
 
 - 负责把 campaign manifest、harness execution records 和 harness evaluation 聚合为
@@ -210,6 +221,10 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   `feedback_fuzz`、`no_feedback` 行为保持不变，`round_evaluation` 和
   `campaign_evaluation` 可通过 profile/CLI/Makefile 插入，执行 backend 可由
   `RunBackends` / `EvaluationBackends` 替换。
+- Harness LLM Optimization 第一阶段已作为显式 campaign profile 接入：
+  `campaign_with_evaluation_and_optimization` 在 campaign evaluation 后生成
+  `harness_optimization_task`、`harness_optimization_proposal` 和
+  `harness_optimization_decision`。默认 campaign profile 不启用优化 stage。
 - pyUVM replay 仍在 cocotb/pyUVM 生命周期内执行，但 replay context、sequence、
   driver/ref-model、scoreboard 和 coverage 的 connector 创建已统一迁移到
   `ReplayPipelineOrchestrator`；pyUVM component 只负责 phase 内调用行为，adapter 负责
@@ -314,6 +329,8 @@ run/campaign profile 层使用 `RunStage` 描述 stage contract，并用
 
 - `campaign_manifest`：只聚合并写出 `campaign_manifest`
 - `campaign_with_evaluation`：写出 manifest 后追加 `campaign_evaluation`
+- `campaign_with_evaluation_and_optimization`：追加 phase-one harness optimization
+  task/proposal/decision，默认 no-op optimizer 只生成可验证占位 proposal，不应用变更
 
 扩展点：
 
@@ -324,7 +341,8 @@ run/campaign profile 层使用 `RunStage` 描述 stage contract，并用
 - 执行 backend 用 `RunBackends(corpus_generator=..., uvm_replay=..., coverage_report=...)`
   替换外部命令实现。
 - 评测 backend 用 `EvaluationBackends(round_evaluation=..., campaign_evaluation=...)`
-  替换默认 JSON report 生成逻辑。
+  替换默认 JSON report 生成逻辑；`EvaluationBackends(harness_optimizer=...)` 可替换
+  phase-one harness optimizer proposal backend。
 
 ### 优先迁移点
 
@@ -718,6 +736,18 @@ uv run make -C libafl_bfm_fuzz \
   feedback-campaign
 ```
 
+显式启用 phase-one harness optimization：
+
+```sh
+uv run make -C libafl_bfm_fuzz \
+  TARGET=secworks_sha256 \
+  VERILOG_SOURCES="/path/to/rtl/*.v" \
+  TOPLEVEL=sha256 \
+  CAMPAIGN_PLAN_PROFILE=campaign_with_evaluation_and_optimization \
+  CAMPAIGN_EVALUATION_ENABLE=1 \
+  feedback-campaign
+```
+
 ## 事件与 monitor 示例
 
 JSONL event 中常用字段：
@@ -810,6 +840,8 @@ monitor JSON 聚合：
   readiness、fail-open policy 和 timeout。
 - run profile/stage registry 可插入自定义 stage、拒绝 mode 不匹配和未知 policy stage。
 - `EvaluationBackends` 可替换 round/campaign evaluation backend。
+- `EvaluationBackends(harness_optimizer=...)` 可替换 phase-one harness optimizer backend，
+  生成 proposal 并由 decision artifact 做 schema accept/reject。
 - campaign profile 可插入自定义 campaign stage，并能拒绝缺失 `campaign_manifest`
   依赖的非法 DAG。
 - `feedback-fuzz` 单轮 manifest 写出和 `round_artifacts_to_round_manifest` 观测。

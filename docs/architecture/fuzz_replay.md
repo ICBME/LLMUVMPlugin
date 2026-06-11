@@ -62,13 +62,16 @@
 - `run_plan.py`：`RunStage` / `RunPlan` / `RunPlanExecutor`，负责 run/campaign stage
   contract、静态依赖校验、runtime result readiness 和 stage policy 执行。
 - `run_profiles.py`：默认 run/campaign profile，使用 stage name 列表描述
-  `feedback_fuzz`、`no_feedback`、round evaluation 和 campaign evaluation DAG。
+  `feedback_fuzz`、`no_feedback`、round evaluation、campaign evaluation 和
+  phase-one harness optimization DAG。
 - `run_stage_registry.py`：把 profile 中的 stage name 解析为具体 `RunStage`，并提供
   自定义 stage 注册入口。
 - `run_adapters.py`：corpus generator、UVM replay 和 coverage report 的可替换 backend
   adapter。
 - `run_evaluation.py`：默认 round/campaign evaluation report adapter，以及可替换的
   `EvaluationBackends`。
+- `harness_optimization.py`：从 campaign evaluation、harness evaluation、LLM dataset 和
+  campaign rollup 生成 phase-one optimization task/proposal/decision artifacts。
 - `run_orchestrator.py`：`FuzzRunOrchestrator`，负责顶层 corpus generation /
   validation、coverage replay、Verilator coverage report、coverage feedback、feedback
   replay、round manifest 和 round evaluation 的 profile 编排。

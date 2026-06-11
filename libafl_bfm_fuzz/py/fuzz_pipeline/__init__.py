@@ -24,6 +24,19 @@ from .harness_metadata import (
     HarnessMetadataExtractorProtocol,
     UvmFuzzMetadataExtractor,
 )
+from .harness_optimization import (
+    DECISION_KIND,
+    PROPOSAL_KIND,
+    TASK_KIND,
+    HarnessOptimizationAdapter,
+    HarnessOptimizationPaths,
+    HarnessOptimizerBackend,
+    NoopHarnessOptimizerBackend,
+    build_harness_optimization_decision,
+    build_harness_optimization_task,
+    harness_optimization_paths,
+    validate_harness_optimization_proposal,
+)
 from .harness_records import HarnessRecordProjector, HarnessRecordProjectorProtocol
 from .harness_rollup import CampaignTraceRollupBuilder, campaign_trace_rollup_path
 from .orchestrator import (
@@ -116,8 +129,12 @@ __all__ = [
     "HarnessLlmDatasetBuilder",
     "HarnessLlmDatasetBuilderProtocol",
     "HarnessMetadataExtractorProtocol",
+    "HarnessOptimizationAdapter",
+    "HarnessOptimizationPaths",
+    "HarnessOptimizerBackend",
     "HarnessRecordProjector",
     "HarnessRecordProjectorProtocol",
+    "NoopHarnessOptimizerBackend",
     "ObservationRuntime",
     "PipelineContext",
     "PipelineOrchestrator",
@@ -141,8 +158,14 @@ __all__ = [
     "UvmReplayAdapter",
     "UvmFuzzMetadataExtractor",
     "UvmFuzzHarnessAnalyzer",
+    "DECISION_KIND",
+    "PROPOSAL_KIND",
+    "TASK_KIND",
+    "build_harness_optimization_decision",
+    "build_harness_optimization_task",
     "external_command_step",
     "campaign_trace_rollup_path",
+    "harness_optimization_paths",
     "normalize_campaign_modes",
     "replay_corpus_from_env",
     "run_coverage_feedback_stage_pipeline",
@@ -151,4 +174,5 @@ __all__ = [
     "run_generate_corpus_pipeline",
     "run_coverage_feedback_pipeline",
     "run_feedback_campaign_pipeline",
+    "validate_harness_optimization_proposal",
 ]

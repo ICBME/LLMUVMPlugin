@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -14,8 +15,10 @@ from fuzz_pipeline import (
     CampaignOrchestrator,
     EvaluationBackends,
     FuzzRunConfig,
+    PROPOSAL_KIND,
     RunPlanProfile,
     RunStage,
+    harness_optimization_paths,
 )
 from fuzz_pipeline.coverage_feedback import CoverageFeedbackResult
 from fuzz_pipeline.run_adapters import RunBackends
@@ -358,6 +361,135 @@ def test_campaign_orchestrator_accepts_replacement_campaign_evaluation_backend()
         assert backend.manifest["target"] == "demo"
         assert manifest["artifacts"]["evaluation_report"] == str(evaluation_path)
         assert evaluation_path.read_text(encoding="utf-8") == "fake evaluation\n"
+
+
+class FakeHarnessTraceCampaignEvaluationBackend:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def run(self, campaign_manifest: dict) -> dict:
+        root = self.path.parent
+        harness_evaluation = root / "evaluation_harness_evaluation.json"
+        llm_dataset = root / "evaluation_llm_dataset.jsonl"
+        campaign_rollup = root / "evaluation_campaign_rollup.json"
+        harness_evaluation.write_text(
+            json.dumps(
+                {
+                    "summary": {"record_count": 1, "failed_record_count": 1},
+                    "optimization_hints": {
+                        "failing_connectors": ["case_to_dut"],
+                    },
+                    "trace_quality": {"hanging_span_count": 0},
+                    "failed_records": [
+                        {
+                            "span_id": "span-dut",
+                            "connector": "case_to_dut",
+                            "case_id": "case-0",
+                            "directive_id": "dir-a",
+                        }
+                    ],
+                    "failure_clusters": [
+                        {
+                            "connector": "case_to_dut",
+                            "examples": [{"span_id": "span-dut"}],
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        llm_dataset.write_text('{"sample":1}\n', encoding="utf-8")
+        campaign_rollup.write_text(
+            json.dumps(
+                {
+                    "summary": {"round_count": 1, "record_count": 1},
+                    "coverage_trends": [],
+                    "failure_trends": [],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        payload = {
+            "kind": "fake.campaign_evaluation",
+            "target": campaign_manifest.get("target"),
+            "run_id": campaign_manifest.get("run_id"),
+            "summary": {"round_count": 1},
+            "harness_trace": {
+                "status": "ok",
+                "artifacts": {
+                    "harness_evaluation": str(harness_evaluation),
+                    "llm_optimization_dataset": str(llm_dataset),
+                    "campaign_trace_rollup": str(campaign_rollup),
+                },
+            },
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        return payload
+
+
+class FakeHarnessOptimizerBackend:
+    def __init__(self) -> None:
+        self.task: dict | None = None
+
+    def run(self, task: dict) -> dict:
+        self.task = task
+        return {
+            "schema_version": 1,
+            "kind": PROPOSAL_KIND,
+            "proposal_id": "proposal-1",
+            "status": "proposed",
+            "source": "fake",
+            "actions": [
+                {
+                    "action_id": "action-1",
+                    "action_type": "scoreboard_check",
+                    "target": "demo",
+                    "rationale": "tighten failing case scoreboard checks",
+                    "evidence_refs": [{"span_id": "span-dut"}],
+                }
+            ],
+            "evidence_refs": [{"span_id": "span-dut"}],
+        }
+
+
+def test_campaign_profile_can_insert_harness_optimization_stages() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        evaluation_path = root / "campaign" / "evaluation.json"
+        optimizer = FakeHarnessOptimizerBackend()
+        campaign = StubCampaign(
+            CampaignConfig(
+                target="demo",
+                out_dir=root / "campaign",
+                libafl_manifest=root / "Cargo.toml",
+                modes=("heuristic_feedback",),
+                campaign_plan_profile="campaign_with_evaluation_and_optimization",
+                campaign_evaluation_out=evaluation_path,
+            ),
+            ObservationContext(run_id="run-1"),
+            evaluation_backends=EvaluationBackends(
+                campaign_evaluation=FakeHarnessTraceCampaignEvaluationBackend(
+                    evaluation_path,
+                ),
+                harness_optimizer=optimizer,
+            ),
+        )
+
+        manifest = campaign.run()
+        paths = harness_optimization_paths(evaluation_path)
+        task = json.loads(paths.task.read_text(encoding="utf-8"))
+        proposal = json.loads(paths.proposal.read_text(encoding="utf-8"))
+        decision = json.loads(paths.decision.read_text(encoding="utf-8"))
+
+    assert optimizer.task is not None
+    assert manifest["artifacts"]["harness_optimization_task"] == str(paths.task)
+    assert task["summary"]["llm_sample_count"] == 1
+    assert proposal["actions"][0]["action_type"] == "scoreboard_check"
+    assert decision["decision"] == "accepted"
+    assert decision["summary"]["accepted_action_count"] == 1
 
 
 def test_campaign_orchestrator_can_insert_custom_campaign_stage() -> None:
