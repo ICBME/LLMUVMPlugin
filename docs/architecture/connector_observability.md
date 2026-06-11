@@ -301,10 +301,11 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   candidate regression 会注入 `HARNESS_RUNTIME_METRICS_OUT`；replay、scoreboard 和
   coverage feedback 业务层真实消费对应 sandbox config，并将执行计数汇总到
   `candidate_runtime_metrics` / candidate metrics。
-- Harness LLM Optimization 第六阶段已补齐 action attribution 与 top-K variant
-  evaluation：`CandidateRegressionSettings.max_variant_regressions` 控制执行的 variant
-  数量，默认只跑 combined candidate；显式增大后会为 selected single-action variants
-  分别运行 sandbox campaign，生成 `candidate_variant_evaluations`、
+- Harness LLM Optimization 第六阶段已补齐 action attribution 与 top-K/all-actions
+  variant evaluation：`CandidateRegressionSettings.max_variant_regressions` /
+  `attribution_top_k` 控制 top-K variant 数量，`attribution_mode=all_actions` 会评测所有
+  materialized single-action variants；默认只跑 combined candidate。variant evaluation
+  会分别运行 sandbox campaign，生成 `candidate_variant_evaluations`、
   `candidate_action_effect_report` 和更新后的 ranking/promotion artifact。
 - pyUVM replay 仍在 cocotb/pyUVM 生命周期内执行，但 replay context、sequence、
   driver/ref-model、scoreboard 和 coverage 的 connector 创建已统一迁移到
@@ -872,8 +873,12 @@ informational 指标：它们仍写入 comparison，用于解释成本、规模�
 `gates_acceptance=false`，而不是把更少 directive 判为质量回归。
 
 真实 candidate regression 也可以直接从 CLI/Make 启用。`real-candidate-feedback-campaign`
-会选择 `campaign_with_evaluation_and_optimization_real_validation` profile，并把
-`HarnessCandidateRegressionBackend` 接到 candidate evaluation stage：
+现在等价于 evidence profile：选择
+`campaign_with_evaluation_and_optimization_real_validation` profile，把
+`HarnessCandidateRegressionBackend` 接到 candidate evaluation stage，并要求 candidate 在
+matched no-op baseline 上至少产生一个 gateable improvement。快速闭环可改用
+`real-candidate-smoke-campaign`，该 target 保留零预算、单次 attribution 和
+`candidate-min-improved-metrics=0`。
 
 ```sh
 uv run make -C libafl_bfm_fuzz real-candidate-feedback-campaign \
@@ -883,8 +888,8 @@ uv run make -C libafl_bfm_fuzz real-candidate-feedback-campaign \
   TOPLEVEL=sha256 \
   CAMPAIGN_ROUNDS=1 \
   CAMPAIGN_MODES=heuristic_feedback \
-  LIBAFL_ITERS=0 \
-  LIBAFL_MAX_SEEDS=0
+  LIBAFL_ITERS=256 \
+  LIBAFL_MAX_SEEDS=32
 ```
 
 等价的脚本参数是 `--harness-candidate-backend real`，或使用
@@ -894,15 +899,19 @@ uv run make -C libafl_bfm_fuzz real-candidate-feedback-campaign \
 `OPENAI_API_KEY` 环境变量。candidate 回归参数可用
 `--candidate-modes`、`--candidate-rounds`、`--candidate-iters`、
 `--candidate-max-seeds`、`--candidate-max-variant-regressions`、
-`--candidate-attribution-top-k`、`--candidate-paired-repeats`、
-`--candidate-repeat-seed-stride`、`--candidate-matched-baseline`、
+`--candidate-attribution-top-k`、`--candidate-attribution-mode`、
+`--candidate-paired-repeats`、`--candidate-repeat-seed-stride`、
+`--candidate-matched-baseline`、
 `--candidate-min-improved-metrics`、`--candidate-max-regressed-metrics` 和
 `--candidate-max-flaky-metrics` 覆盖；真实 candidate backend 的 CLI 路径默认开启
 matched no-op baseline，可用 `--no-candidate-matched-baseline` 或
 `HARNESS_CANDIDATE_MATCHED_BASELINE=0` 关闭。CLI 默认
-`candidate-paired-repeats=3`、`candidate-min-improved-metrics=0` 和
-`candidate-max-flaky-metrics=0`，用于 smoke/review 场景下接受“无 gateable 回归且无
-flaky gateable metric”的候选进入 `accepted_for_review`。
+`candidate-paired-repeats=3`、`candidate-min-improved-metrics=1` 和
+`candidate-max-flaky-metrics=0`，用于 evidence 场景下拒绝“稳定但无 gateable 改进”的
+neutral candidate。`--candidate-attribution-mode all_actions` 会评测所有 materialized
+single-action variants，使 action effect report 能说明每个 action 是否独立有效；默认
+`top_k` 仍只评测 combined candidate 和前 `candidate-attribution-top-k` /
+`candidate-max-variant-regressions` 个 variants。
 
 Python 侧仍可显式注入真实 candidate regression backend：
 

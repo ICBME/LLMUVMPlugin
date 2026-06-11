@@ -226,6 +226,10 @@ def add_feedback_campaign_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--candidate-seed", type=int)
     parser.add_argument("--candidate-max-variant-regressions", type=int)
     parser.add_argument("--candidate-attribution-top-k", type=int)
+    parser.add_argument(
+        "--candidate-attribution-mode",
+        choices=("top_k", "all_actions"),
+    )
     parser.add_argument("--candidate-paired-repeats", type=int)
     parser.add_argument("--candidate-repeat-seed-stride", type=int)
     parser.add_argument("--candidate-run-plan-profile")
@@ -625,6 +629,11 @@ def candidate_regression_settings_from_args(
             args.candidate_attribution_top_k,
             "HARNESS_CANDIDATE_ATTRIBUTION_TOP_K",
         ),
+        attribution_mode=(
+            args.candidate_attribution_mode
+            or os.getenv("HARNESS_CANDIDATE_ATTRIBUTION_MODE")
+            or "top_k"
+        ),
         paired_repeats=int_arg(
             args.candidate_paired_repeats,
             "HARNESS_CANDIDATE_PAIRED_REPEATS",
@@ -663,7 +672,7 @@ def candidate_regression_settings_from_args(
             min_improved_metric_count=int_arg(
                 args.candidate_min_improved_metrics,
                 "HARNESS_CANDIDATE_MIN_IMPROVED_METRICS",
-                0,
+                CandidateAcceptanceThresholds().min_improved_metric_count,
             ),
             max_flaky_metric_count=int_arg(
                 args.candidate_max_flaky_metrics,

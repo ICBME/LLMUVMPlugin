@@ -72,8 +72,9 @@
   action metrics。
   第十一阶段已完成 Harness LLM Optimization 第六阶段：candidate regression 会把 runtime
   metrics 按 `action_id` / `action_type` 聚合为 `candidate_action_effect_report`，并可通过
-  `CandidateRegressionSettings.max_variant_regressions` 启用 top-K variant 独立 sandbox
-  回归；默认值为 1，保持只执行 combined candidate 的现有行为。
+  `CandidateRegressionSettings.max_variant_regressions` / `attribution_top_k` 启用 top-K
+  variant 独立 sandbox 回归，或通过 `attribution_mode=all_actions` 评测所有 action
+  variants；默认值保持只执行 combined candidate 的现有行为。
   第十二阶段已完成 Harness LLM Optimization 第七阶段：新增真实 LLM optimizer backend
   接入。`LlmHarnessOptimizerBackend` 会基于 harness evaluation、LLM dataset、
   campaign rollup 和 action effect report 构造 optimizer prompt artifact，调用
@@ -160,8 +161,8 @@
   `candidate_promotion_package`。第五阶段新增 `harness_runtime_actions.py`，让这些
   per-action config 在 candidate run 内被 replay/scoreboard/coverage feedback 真实消费，
   并把 `candidate_runtime_metrics` 合入 candidate evaluation metrics。第六阶段新增
-  `candidate_variant_evaluations` 和 `candidate_action_effect_report`，用于记录 top-K
-  variant 独立回归结果、runtime action consumption 状态和每个 action 的效果归因；
+  `candidate_variant_evaluations` 和 `candidate_action_effect_report`，用于记录 top-K 或
+  all-actions variant 独立回归结果、runtime action consumption 状态和每个 action 的效果归因；
   action effect report 会把 action 分类为 `improved`、`neutral`、`regressed` 或
   `not_consumed`，promotion package 会引用该汇总。
 - CLI/Makefile：`--run-plan-profile`、`--campaign-plan-profile`、`--round-evaluation`、
@@ -259,8 +260,11 @@
    `campaign_with_evaluation_and_optimization_real_validation` profile、CLI/Make 参数和
    `real-candidate-feedback-campaign` target，可从命令行选择真实 candidate regression
    backend，并通过 `HARNESS_CANDIDATE_*` / `CANDIDATE_*` 参数覆盖候选 rounds、modes、
-   seed、matched no-op baseline、paired repeats、repeat seed stride、top-K attribution、
-   max flaky metrics 和 acceptance thresholds。
+   seed、matched no-op baseline、paired repeats、repeat seed stride、top-K/all-actions
+   attribution、max flaky metrics 和 acceptance thresholds。`real-candidate-feedback-campaign`
+   现在走 strict evidence 默认：非零 candidate fuzz budget、至少一个 gateable improvement、
+   零 gateable regression、零 flaky metric；`real-candidate-smoke-campaign` 保留零预算
+   neutral-pass 快速闭环。
 
 5. 收紧 artifact materialization。
    已完成：每个 coverage feedback connector step 声明的 output artifact 会在 step
@@ -308,7 +312,7 @@
   unsafe action skip、candidate metric delta、final decision、真实 candidate regression
   backend 的 sandbox run config 物化、safe action adapter config 输出、内部 campaign
   编排调用、adapter metrics、runtime action schema/消费/指标聚合、action effect report、
-  top-K variant 独立回归、multi-candidate ranking、promotion package、阈值 reject、真实
+  top-K/all-actions variant 独立回归、multi-candidate ranking、promotion package、阈值 reject、真实
   LLM optimizer prompt/response provenance、proposal repair/retry，以及扩展 safe action
   DSL 的 schema reject。
 - `tests/test_harness_trace.py`：覆盖 connector events 到 harness execution records 的转换、

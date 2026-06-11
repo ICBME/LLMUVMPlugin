@@ -38,6 +38,7 @@ from fuzz_pipeline import (  # noqa: E402
     build_harness_optimization_final_decision,
     build_harness_optimization_metric_delta,
     harness_optimization_paths,
+    select_candidate_variants,
 )
 from fuzz_pipeline.coverage_feedback import (  # noqa: E402
     CoverageFeedbackConfig,
@@ -1477,6 +1478,10 @@ def test_harness_candidate_regression_backend_runs_sandbox_campaign() -> None:
     assert run_config["safety"]["mainline_modified"] is False
     assert run_config["initial_directives"] == str(directives_path)
     assert run_config["runtime_metrics"] == artifacts["candidate_runtime_metrics"]
+    assert run_config["validation_settings"]["attribution_mode"] == "top_k"
+    assert run_config["validation_settings"]["thresholds"][
+        "min_improved_metric_count"
+    ] == 1
     assert run_config["adapter_metrics"]["candidate_action_count"] == 4
     assert "candidate_replay_probe_config" in run_config["adapter_artifacts"]
     assert "candidate_scoreboard_check_config" in run_config["adapter_artifacts"]
@@ -2014,6 +2019,43 @@ def test_candidate_regression_settings_rejects_invalid_variant_count() -> None:
         raise AssertionError("attribution_top_k=0 should fail schema")
 
     assert "attribution_top_k must be >= 1" in message
+
+    try:
+        CandidateRegressionSettings(attribution_mode="everything")
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("unknown attribution_mode should fail schema")
+
+    assert "attribution_mode must be one of" in message
+
+
+def test_candidate_attribution_all_actions_keeps_each_variant() -> None:
+    variants = [
+        {"variant_id": "combined", "action_ids": ["a", "b", "c"]},
+        {"variant_id": "action_a", "action_ids": ["a"]},
+        {"variant_id": "action_b", "action_ids": ["b"]},
+        {"variant_id": "action_c", "action_ids": ["c"]},
+    ]
+
+    top_k = select_candidate_variants(
+        variants,
+        max_count=2,
+        attribution_mode="top_k",
+    )
+    all_actions = select_candidate_variants(
+        variants,
+        max_count=2,
+        attribution_mode="all_actions",
+    )
+
+    assert [item["variant_id"] for item in top_k] == ["combined", "action_a"]
+    assert [item["variant_id"] for item in all_actions] == [
+        "combined",
+        "action_a",
+        "action_b",
+        "action_c",
+    ]
 
 
 def _set_env(values: dict[str, str]) -> dict[str, str | None]:

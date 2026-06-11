@@ -106,6 +106,7 @@ class CandidateRegressionSettings:
     paired_repeats: int = 1
     repeat_seed_stride: int = 1
     attribution_top_k: int | None = None
+    attribution_mode: str = "top_k"
     thresholds: CandidateAcceptanceThresholds = CandidateAcceptanceThresholds()
 
     def __post_init__(self) -> None:
@@ -117,6 +118,27 @@ class CandidateRegressionSettings:
             raise ValueError("repeat_seed_stride must be >= 1")
         if self.attribution_top_k is not None and self.attribution_top_k < 1:
             raise ValueError("attribution_top_k must be >= 1")
+        if self.attribution_mode not in {"top_k", "all_actions"}:
+            raise ValueError("attribution_mode must be one of: top_k, all_actions")
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "modes": list(self.modes) if self.modes is not None else None,
+            "rounds": self.rounds,
+            "iters": self.iters,
+            "max_seeds": self.max_seeds,
+            "seed": self.seed,
+            "max_variant_regressions": self.max_variant_regressions,
+            "run_plan_profile": self.run_plan_profile,
+            "round_evaluation": self.round_evaluation,
+            "campaign_plan_profile": self.campaign_plan_profile,
+            "matched_baseline": self.matched_baseline,
+            "paired_repeats": self.paired_repeats,
+            "repeat_seed_stride": self.repeat_seed_stride,
+            "attribution_top_k": self.attribution_top_k,
+            "attribution_mode": self.attribution_mode,
+            "thresholds": self.thresholds.to_json(),
+        }
 
 
 @dataclass(frozen=True)
@@ -294,6 +316,7 @@ class HarnessCandidateRegressionBackend:
                 adapter_results=adapter_results,
                 initial_directives=candidate_directives_path,
                 runtime_metrics=runtime_metrics_path,
+                settings=self.settings,
             ),
         )
         if int(mapping(patch.get("summary")).get("applied_action_count", 0)) <= 0:
@@ -461,6 +484,7 @@ class HarnessCandidateRegressionBackend:
                 self.settings.attribution_top_k
                 or self.settings.max_variant_regressions
             ),
+            attribution_mode=self.settings.attribution_mode,
         )
         variant_evaluations = [
             combined_variant,
@@ -648,6 +672,7 @@ class HarnessCandidateRegressionBackend:
             initial_directives=None,
             runtime_metrics=runtime_metrics_path,
             run_role=run_role,
+            settings=self.settings,
         )
         if repeat_index is not None:
             config_payload["repeat_index"] = repeat_index
@@ -889,6 +914,7 @@ class HarnessCandidateRegressionBackend:
             initial_directives=directives_path,
             runtime_metrics=runtime_metrics_path,
             run_role="candidate_repeat",
+            settings=self.settings,
         )
         config_payload["repeat_index"] = repeat_index
         _write_json(run_config_path, config_payload)
@@ -1146,6 +1172,7 @@ class HarnessCandidateRegressionBackend:
                 adapter_results=adapter_results,
                 initial_directives=directives_path,
                 runtime_metrics=runtime_metrics_path,
+                settings=self.settings,
             ),
         )
         artifacts = {
@@ -1543,14 +1570,19 @@ def select_candidate_variants(
     variants: Any,
     *,
     max_count: int,
+    attribution_mode: str = "top_k",
 ) -> tuple[dict[str, Any], ...]:
     if max_count < 1:
         raise ValueError("max_count must be >= 1")
+    if attribution_mode not in {"top_k", "all_actions"}:
+        raise ValueError("attribution_mode must be one of: top_k, all_actions")
     selected = [
         variant
         for variant in list_value(variants)
         if isinstance(variant, dict)
     ]
+    if attribution_mode == "all_actions":
+        return tuple(selected)
     return tuple(selected[:max_count])
 
 
@@ -1777,6 +1809,7 @@ def candidate_regression_config_payload(
     initial_directives: Path | None,
     runtime_metrics: Path,
     run_role: str = "candidate",
+    settings: CandidateRegressionSettings | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -1801,6 +1834,7 @@ def candidate_regression_config_payload(
         "runtime_metrics": str(runtime_metrics),
         "adapter_artifacts": adapter_artifacts(adapter_results),
         "adapter_metrics": adapter_metric_snapshot(adapter_results),
+        "validation_settings": settings.to_json() if settings is not None else None,
         "campaign_manifest_out": str(config.campaign_manifest_out),
         "campaign_evaluation_out": str(config.campaign_evaluation_out),
         "safety": {

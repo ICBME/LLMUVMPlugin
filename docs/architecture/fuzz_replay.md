@@ -197,13 +197,17 @@ Makefile 会把 `CARGO` 作为一个完整 wrapper 字符串传给 pipeline runn
     action overlay、per-action config、可选 mutation directives、variant ranking 和
     review-only promotion package；真实 CLI 路径默认先运行 matched no-op baseline，
     用相同 candidate campaign 配置但空 action overlay 的 rerun metrics 作为对比基线，
-    并默认执行三次 paired repeats 生成稳定性证据；可通过
+    并默认执行三次 paired repeats 生成稳定性证据；evidence target 默认使用非零
+    candidate fuzz budget、`candidate-min-improved-metrics=1` 和
+    `--candidate-attribution-mode all_actions`，因此 neutral candidate 会被拒绝且每个
+    materialized action 至少有一次独立归因评测；快速闭环可用
+    `real-candidate-smoke-campaign` 或显式把 min-improved 阈值降为 0。可通过
     `--candidate-paired-repeats` 调整重复次数，或用
     `--no-candidate-matched-baseline` 关闭 matched baseline；candidate run 内通过
     `HARNESS_RUNTIME_METRICS_OUT` 汇总 runtime action execution metrics；第六阶段还会按
     `action_id` / `action_type` 生成 action effect report，并可通过
-    `max_variant_regressions` 或 `candidate-attribution-top-k` 启用 top-K variant 独立
-    回归。第七阶段可显式注入或通过
+    `max_variant_regressions`、`candidate-attribution-top-k` 或
+    `candidate-attribution-mode=all_actions` 启用 variant 独立回归。第七阶段可显式注入或通过
     `--harness-optimizer-backend llm` 选择
     `LlmHarnessOptimizerBackend`，由 LLM 基于 evaluation、dataset、rollup 和 action
     effect report 生成 schema-valid safe action proposal，并保留 prompt/response

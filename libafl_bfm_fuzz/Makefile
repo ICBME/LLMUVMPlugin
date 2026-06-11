@@ -38,12 +38,17 @@ CANDIDATE_ITERS ?=
 CANDIDATE_MAX_SEEDS ?=
 CANDIDATE_SEED ?=
 CANDIDATE_MAX_VARIANT_REGRESSIONS ?=
+CANDIDATE_ATTRIBUTION_TOP_K ?=
+CANDIDATE_ATTRIBUTION_MODE ?=
+CANDIDATE_PAIRED_REPEATS ?=
+CANDIDATE_REPEAT_SEED_STRIDE ?=
 CANDIDATE_RUN_PLAN_PROFILE ?=
 CANDIDATE_CAMPAIGN_PLAN_PROFILE ?=
 CANDIDATE_ROUND_EVALUATION ?=
 CANDIDATE_MATCHED_BASELINE ?=
 CANDIDATE_MAX_REGRESSED_METRICS ?=
 CANDIDATE_MIN_IMPROVED_METRICS ?=
+CANDIDATE_MAX_FLAKY_METRICS ?=
 CANDIDATE_ACCEPTED_STATUSES ?=
 CONNECTOR_OBSERVE_OUT ?=
 CONNECTOR_OBSERVE_RUN_ID ?=
@@ -113,7 +118,7 @@ GHDL_ARGS := --ieee=synopsys
 COCOTB_HDL_TIMEUNIT = 1ns
 COCOTB_HDL_TIMEPRECISION = 1ps
 
-.PHONY: generate-corpus check check-corpus check-uvm check-all coverage-run coverage-report coverage-feedback llm-coverage-feedback feedback-fuzz llm-feedback-fuzz feedback-campaign real-candidate-feedback-campaign llm-feedback-campaign require-target-config require-rtl
+.PHONY: generate-corpus check check-corpus check-uvm check-all coverage-run coverage-report coverage-feedback llm-coverage-feedback feedback-fuzz llm-feedback-fuzz feedback-campaign real-candidate-smoke-campaign real-candidate-evidence-campaign real-candidate-feedback-campaign llm-feedback-campaign require-target-config require-rtl
 
 COCOTB_MAKEFILES := $(shell cocotb-config --makefiles 2>/dev/null)
 ifneq ($(COCOTB_MAKEFILES),)
@@ -309,6 +314,7 @@ feedback-campaign: require-rtl
 		$(if $(CANDIDATE_SEED),--candidate-seed $(CANDIDATE_SEED),) \
 		$(if $(CANDIDATE_MAX_VARIANT_REGRESSIONS),--candidate-max-variant-regressions $(CANDIDATE_MAX_VARIANT_REGRESSIONS),) \
 		$(if $(CANDIDATE_ATTRIBUTION_TOP_K),--candidate-attribution-top-k $(CANDIDATE_ATTRIBUTION_TOP_K),) \
+		$(if $(CANDIDATE_ATTRIBUTION_MODE),--candidate-attribution-mode $(CANDIDATE_ATTRIBUTION_MODE),) \
 		$(if $(CANDIDATE_PAIRED_REPEATS),--candidate-paired-repeats $(CANDIDATE_PAIRED_REPEATS),) \
 		$(if $(CANDIDATE_REPEAT_SEED_STRIDE),--candidate-repeat-seed-stride $(CANDIDATE_REPEAT_SEED_STRIDE),) \
 		$(if $(CANDIDATE_RUN_PLAN_PROFILE),--candidate-run-plan-profile $(CANDIDATE_RUN_PLAN_PROFILE),) \
@@ -337,16 +343,35 @@ feedback-campaign: require-rtl
 		$(if $(filter 1,$(IGNORE_FUNCTIONAL_COVERAGE)),--ignore-functional-coverage,) \
 		$(if $(LLM_MODEL),--model $(LLM_MODEL),)
 
-real-candidate-feedback-campaign: CAMPAIGN_PLAN_PROFILE=campaign_with_evaluation_and_optimization_real_validation
-real-candidate-feedback-campaign: CAMPAIGN_EVALUATION_ENABLE=1
-real-candidate-feedback-campaign: HARNESS_CANDIDATE_BACKEND=real
-real-candidate-feedback-campaign: CANDIDATE_MATCHED_BASELINE=1
-real-candidate-feedback-campaign: CANDIDATE_PAIRED_REPEATS=3
-real-candidate-feedback-campaign: CANDIDATE_REPEAT_SEED_STRIDE=1
-real-candidate-feedback-campaign: CANDIDATE_ATTRIBUTION_TOP_K=3
-real-candidate-feedback-campaign: CANDIDATE_MAX_FLAKY_METRICS=0
-real-candidate-feedback-campaign: CANDIDATE_MIN_IMPROVED_METRICS=0
-real-candidate-feedback-campaign: feedback-campaign
+real-candidate-smoke-campaign: CAMPAIGN_PLAN_PROFILE=campaign_with_evaluation_and_optimization_real_validation
+real-candidate-smoke-campaign: CAMPAIGN_EVALUATION_ENABLE=1
+real-candidate-smoke-campaign: HARNESS_CANDIDATE_BACKEND=real
+real-candidate-smoke-campaign: CANDIDATE_MATCHED_BASELINE=1
+real-candidate-smoke-campaign: CANDIDATE_ITERS=0
+real-candidate-smoke-campaign: CANDIDATE_MAX_SEEDS=0
+real-candidate-smoke-campaign: CANDIDATE_PAIRED_REPEATS=1
+real-candidate-smoke-campaign: CANDIDATE_REPEAT_SEED_STRIDE=1
+real-candidate-smoke-campaign: CANDIDATE_ATTRIBUTION_TOP_K=1
+real-candidate-smoke-campaign: CANDIDATE_MAX_FLAKY_METRICS=0
+real-candidate-smoke-campaign: CANDIDATE_MIN_IMPROVED_METRICS=0
+real-candidate-smoke-campaign: feedback-campaign
+
+real-candidate-evidence-campaign: CAMPAIGN_PLAN_PROFILE=campaign_with_evaluation_and_optimization_real_validation
+real-candidate-evidence-campaign: CAMPAIGN_EVALUATION_ENABLE=1
+real-candidate-evidence-campaign: HARNESS_CANDIDATE_BACKEND=real
+real-candidate-evidence-campaign: CANDIDATE_MATCHED_BASELINE=1
+real-candidate-evidence-campaign: CANDIDATE_ROUNDS=1
+real-candidate-evidence-campaign: CANDIDATE_ITERS=100
+real-candidate-evidence-campaign: CANDIDATE_MAX_SEEDS=16
+real-candidate-evidence-campaign: CANDIDATE_PAIRED_REPEATS=3
+real-candidate-evidence-campaign: CANDIDATE_REPEAT_SEED_STRIDE=1
+real-candidate-evidence-campaign: CANDIDATE_ATTRIBUTION_MODE=all_actions
+real-candidate-evidence-campaign: CANDIDATE_MAX_REGRESSED_METRICS=0
+real-candidate-evidence-campaign: CANDIDATE_MAX_FLAKY_METRICS=0
+real-candidate-evidence-campaign: CANDIDATE_MIN_IMPROVED_METRICS=1
+real-candidate-evidence-campaign: feedback-campaign
+
+real-candidate-feedback-campaign: real-candidate-evidence-campaign
 
 llm-feedback-campaign: CAMPAIGN_MODES=llm_feedback
 llm-feedback-campaign: feedback-campaign

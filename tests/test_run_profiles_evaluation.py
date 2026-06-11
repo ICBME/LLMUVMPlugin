@@ -626,6 +626,8 @@ def test_feedback_campaign_cli_builds_real_candidate_regression_backend() -> Non
                 "2",
                 "--candidate-attribution-top-k",
                 "2",
+                "--candidate-attribution-mode",
+                "all_actions",
                 "--candidate-paired-repeats",
                 "2",
                 "--candidate-repeat-seed-stride",
@@ -652,12 +654,51 @@ def test_feedback_campaign_cli_builds_real_candidate_regression_backend() -> Non
     assert settings.max_seeds == 0
     assert settings.max_variant_regressions == 2
     assert settings.attribution_top_k == 2
+    assert settings.attribution_mode == "all_actions"
     assert settings.paired_repeats == 2
     assert settings.repeat_seed_stride == 5
     assert settings.round_evaluation is False
-    assert settings.thresholds.min_improved_metric_count == 0
+    assert settings.thresholds.min_improved_metric_count == 1
     assert settings.thresholds.max_regressed_metric_count == 0
     assert settings.thresholds.max_flaky_metric_count == 1
+
+
+def test_real_candidate_make_targets_encode_smoke_and_evidence_defaults() -> None:
+    root = Path(__file__).resolve().parents[1]
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest = Path(tmp) / "Cargo.toml"
+        manifest.write_text("[package]\nname='demo'\n", encoding="utf-8")
+        common = [
+            "make",
+            "-n",
+            "-C",
+            str(root / "libafl_bfm_fuzz"),
+            "TARGET=demo",
+            "VERILOG_SOURCES=/tmp/demo.v",
+            "TOPLEVEL=demo",
+            f"LIBAFL_MANIFEST={manifest}",
+        ]
+        evidence = subprocess.run(
+            [*common, "real-candidate-evidence-campaign"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+        smoke = subprocess.run(
+            [*common, "real-candidate-smoke-campaign"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+
+    assert "--candidate-iters 100" in evidence
+    assert "--candidate-max-seeds 16" in evidence
+    assert "--candidate-attribution-mode all_actions" in evidence
+    assert "--candidate-min-improved-metrics 1" in evidence
+    assert "--candidate-paired-repeats 3" in evidence
+    assert "--candidate-iters 0" in smoke
+    assert "--candidate-max-seeds 0" in smoke
+    assert "--candidate-min-improved-metrics 0" in smoke
 
 
 def test_campaign_orchestrator_can_insert_custom_campaign_stage() -> None:
