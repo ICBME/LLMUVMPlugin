@@ -20,6 +20,11 @@ from .harness_llm_tasks import (
     HarnessLlmDatasetBuilder,
     HarnessLlmDatasetBuilderProtocol,
 )
+from .harness_candidate_regression import (
+    CandidateAcceptanceThresholds,
+    CandidateRegressionSettings,
+    HarnessCandidateRegressionBackend,
+)
 from .harness_metadata import (
     HarnessMetadataExtractorProtocol,
     UvmFuzzMetadataExtractor,
@@ -116,6 +121,8 @@ __all__ = [
     "CampaignTraceRollupBuilder",
     "CANDIDATE_EVALUATION_KIND",
     "CANDIDATE_MANIFEST_KIND",
+    "CandidateAcceptanceThresholds",
+    "CandidateRegressionSettings",
     "ConnectorEdge",
     "COVERAGE_FEEDBACK_TOPOLOGY",
     "CorpusGeneratorAdapter",
@@ -135,6 +142,7 @@ __all__ = [
     "FuzzRunOrchestrator",
     "HARNESS_TOPOLOGY",
     "HarnessCandidateEvaluationBackend",
+    "HarnessCandidateRegressionBackend",
     "HarnessTraceBuilder",
     "HarnessTraceOutputs",
     "HarnessTraceResult",

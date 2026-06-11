@@ -40,6 +40,7 @@ class CampaignConfig:
     out_dir: Path
     libafl_manifest: Path
     target_config: Path | None = None
+    initial_directives: Path | None = None
     modes: tuple[str, ...] = ("heuristic_feedback",)
     rounds: int = 2
     iters: int = 256
@@ -273,7 +274,7 @@ class CampaignRoundScheduler:
             directives=(
                 previous.require_artifact("mutation_directives")
                 if previous is not None
-                else None
+                else self.config.initial_directives
             ),
             iters=self.config.iters,
             max_seeds=self.config.max_seeds,
@@ -1262,6 +1263,11 @@ class CampaignOrchestrator:
                 "toplevel": self.config.toplevel,
                 "verilog_sources": self.config.verilog_sources,
                 "extra_make_vars": list(self.config.extra_make_vars),
+                "initial_directives": (
+                    str(self._path_from_cwd(self.config.initial_directives))
+                    if self.config.initial_directives is not None
+                    else None
+                ),
                 "ignore_functional_coverage": self.config.ignore_functional_coverage,
                 "llm_model": self.config.llm_model,
                 "require_real_llm": self.config.require_real_llm,
@@ -1306,6 +1312,7 @@ class CampaignOrchestrator:
     def _optional_artifacts(self) -> dict[str, str]:
         paths = {
             "target_manifest": self.config.target_config,
+            "initial_directives": self.config.initial_directives,
             "libafl_manifest": self.config.libafl_manifest,
             "observation_events": self.config.observation_out,
             "monitoring": self.config.monitoring_out,

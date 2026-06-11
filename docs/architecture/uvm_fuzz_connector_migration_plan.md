@@ -58,6 +58,10 @@
   `campaign_with_evaluation_and_optimization_validation`，在第一阶段后追加 sandbox
   apply、candidate evaluation、metric delta 和 final decision；安全 action 子集只转换为
   sandbox candidate artifacts，默认不修改源码主线。
+  第八阶段已完成 Harness LLM Optimization 第三阶段：新增
+  `HarnessCandidateRegressionBackend`，可将安全 proposal action 子集物化为 sandbox run
+  配置，并复用 `CampaignOrchestrator` / `FuzzRunOrchestrator` 执行 candidate campaign；
+  final decision 支持基于 candidate status、回归指标和最小改善数的阈值化判断。
 - `CampaignOrchestrator` 已负责 campaign-level plan、manifest 和 connector 包装；
   mode/round 展开、上一轮 `round_manifest` 状态读取和每轮 `FuzzRunConfig` 构造已抽到
   `CampaignRoundScheduler`。
@@ -115,6 +119,10 @@
 - `EvaluationBackends(harness_candidate_evaluation=...)`：替换第二阶段 candidate
   validation backend；默认 `NoopHarnessCandidateEvaluationBackend` 生成 `not_run`
   validation report，不运行真实回归。
+- `HarnessCandidateRegressionBackend`：第三阶段真实 candidate validation backend；从
+  baseline campaign manifest 派生 sandbox candidate campaign 配置，写出
+  `candidate_regression_config` / `candidate_action_overlay` / 可选
+  `candidate_mutation_directives`，并通过 `campaign_with_evaluation` profile 跑候选回归。
 - CLI/Makefile：`--run-plan-profile`、`--campaign-plan-profile`、`--round-evaluation`、
   `--evaluation-out`、`--campaign-evaluation-out` 以及对应 Makefile 变量
   `RUN_PLAN_PROFILE`、`CAMPAIGN_PLAN_PROFILE`、`ROUND_EVALUATION_ENABLE`、
@@ -176,6 +184,11 @@
    转换成 sandbox-only candidate artifacts，生成 candidate manifest、candidate evaluation、
    baseline/candidate metric delta 和 final decision；`ref_model_patch` 等潜在源码修改 action
    先被标为 unsafe/skipped，默认 backend 不修改源码、不运行真实候选回归。
+   Harness optimization 第三阶段已完成：`HarnessCandidateRegressionBackend` 会把
+   `mutation_directive_update` 转换成 sandbox 初始 directives，把其它安全 action 物化到
+   action overlay，然后复用 campaign/run 编排执行 candidate campaign；candidate evaluation
+   输出 baseline/candidate metrics 和 acceptance thresholds，final decision 按
+   `max_regressed_metric_count`、`min_improved_metric_count` 和 accepted status 阈值判断。
 
 5. 收紧 artifact materialization。
    已完成：每个 coverage feedback connector step 声明的 output artifact 会在 step
@@ -219,7 +232,8 @@
   以及 `CampaignRoundScheduler` 对上一轮 manifest state 的传递。
 - `tests/test_harness_optimization.py`：覆盖 phase-one harness optimization task/proposal/
   decision artifact 写出、默认 no-op proposal、非法 proposal schema reject、sandbox apply、
-  unsafe action skip、candidate metric delta 和 final decision。
+  unsafe action skip、candidate metric delta、final decision、真实 candidate regression
+  backend 的 sandbox run config 物化、内部 campaign 编排调用和阈值 reject。
 - `tests/test_harness_trace.py`：覆盖 connector events 到 harness execution records 的转换、
   connector/module/failure/case/directive 聚合、hanging span 检测、trace quality report、
   LLM optimization dataset 写出、通用 trace core 独立使用、可注入 metadata extractor、

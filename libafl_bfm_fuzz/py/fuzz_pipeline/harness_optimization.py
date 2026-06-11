@@ -656,6 +656,9 @@ def build_harness_optimization_final_decision(
     delta_summary = mapping(metric_delta.get("summary"))
     patch_summary = mapping(patch.get("summary"))
     candidate_status = candidate_evaluation.get("status")
+    thresholds = final_decision_thresholds(candidate_evaluation, metric_delta)
+    regressed_metric_count = int_value(delta_summary.get("regressed_metric_count"))
+    improved_metric_count = int_value(delta_summary.get("improved_metric_count"))
     if schema_decision.get("decision") != "accepted":
         decision = "rejected"
         reason = "schema_decision_rejected"
@@ -671,10 +674,13 @@ def build_harness_optimization_final_decision(
     elif candidate_status == "not_run":
         decision = "rejected"
         reason = "candidate_validation_not_run"
-    elif int_value(delta_summary.get("regressed_metric_count")) > 0:
+    elif regressed_metric_count > thresholds["max_regressed_metric_count"]:
         decision = "rejected"
         reason = "candidate_metric_regression"
-    elif candidate_status in {"ok", "passed"}:
+    elif improved_metric_count < thresholds["min_improved_metric_count"]:
+        decision = "rejected"
+        reason = "candidate_metric_improvement_below_threshold"
+    elif candidate_status in set(thresholds["accepted_candidate_statuses"]):
         decision = "accepted_for_review"
         reason = "candidate_validation_passed_without_regressions"
     else:
@@ -708,6 +714,7 @@ def build_harness_optimization_final_decision(
             "regressed_metric_count": int_value(
                 delta_summary.get("regressed_metric_count")
             ),
+            "acceptance_thresholds": thresholds,
         },
     }
 
@@ -862,6 +869,33 @@ def evidence_ref_error(ref: Any, evidence_index: dict[str, Any]) -> str | None:
         if known and value not in known:
             return f"unknown {field} {value!r}"
     return None
+
+
+def final_decision_thresholds(
+    candidate_evaluation: dict[str, Any],
+    metric_delta: dict[str, Any],
+) -> dict[str, Any]:
+    raw = mapping(candidate_evaluation.get("acceptance_thresholds")) or mapping(
+        metric_delta.get("acceptance_thresholds")
+    )
+    statuses = [
+        str(item)
+        for item in list_value(raw.get("accepted_candidate_statuses"))
+        if item is not None
+    ]
+    return {
+        "max_regressed_metric_count": int_value(
+            raw.get("max_regressed_metric_count")
+            if "max_regressed_metric_count" in raw
+            else 0
+        ),
+        "min_improved_metric_count": int_value(
+            raw.get("min_improved_metric_count")
+            if "min_improved_metric_count" in raw
+            else 0
+        ),
+        "accepted_candidate_statuses": statuses or ["ok", "passed"],
+    }
 
 
 def normalize_candidate_evaluation(
