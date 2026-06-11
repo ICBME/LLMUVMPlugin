@@ -62,6 +62,14 @@
   `HarnessCandidateRegressionBackend`，可将安全 proposal action 子集物化为 sandbox run
   配置，并复用 `CampaignOrchestrator` / `FuzzRunOrchestrator` 执行 candidate campaign；
   final decision 支持基于 candidate status、回归指标和最小改善数的阈值化判断。
+  第九阶段已完成 Harness LLM Optimization 第四阶段：新增 candidate action adapter 层，
+  将 `replay_probe`、`scoreboard_check`、`coverage_feedback_tuning` 等安全 action 转换为
+  sandbox overlay/config artifact 和 `HARNESS_*_CONFIG` make 变量；candidate evaluation
+  增加 adapter metrics、multi-candidate ranking 和 review-only promotion package。
+  第十阶段已完成 Harness LLM Optimization 第五阶段：新增 safe action runtime
+  consumption，pyUVM replay/scoreboard 与 coverage feedback 业务层会在显式 candidate
+  regression 中消费 sandbox config，并通过 `HARNESS_RUNTIME_METRICS_OUT` 导出 runtime
+  action metrics。
 - `CampaignOrchestrator` 已负责 campaign-level plan、manifest 和 connector 包装；
   mode/round 展开、上一轮 `round_manifest` 状态读取和每轮 `FuzzRunConfig` 构造已抽到
   `CampaignRoundScheduler`。
@@ -123,6 +131,12 @@
   baseline campaign manifest 派生 sandbox candidate campaign 配置，写出
   `candidate_regression_config` / `candidate_action_overlay` / 可选
   `candidate_mutation_directives`，并通过 `campaign_with_evaluation` profile 跑候选回归。
+  第四阶段进一步公开 `CandidateActionAdapter` / `JsonConfigActionAdapter`，默认把
+  `replay_probe`、`scoreboard_check`、`coverage_feedback_tuning` 等 safe action 物化为
+  per-action config artifact，并产出 `candidate_variant_ranking` 和
+  `candidate_promotion_package`。第五阶段新增 `harness_runtime_actions.py`，让这些
+  per-action config 在 candidate run 内被 replay/scoreboard/coverage feedback 真实消费，
+  并把 `candidate_runtime_metrics` 合入 candidate evaluation metrics。
 - CLI/Makefile：`--run-plan-profile`、`--campaign-plan-profile`、`--round-evaluation`、
   `--evaluation-out`、`--campaign-evaluation-out` 以及对应 Makefile 变量
   `RUN_PLAN_PROFILE`、`CAMPAIGN_PLAN_PROFILE`、`ROUND_EVALUATION_ENABLE`、
@@ -189,6 +203,16 @@
    action overlay，然后复用 campaign/run 编排执行 candidate campaign；candidate evaluation
    输出 baseline/candidate metrics 和 acceptance thresholds，final decision 按
    `max_regressed_metric_count`、`min_improved_metric_count` 和 accepted status 阈值判断。
+   Harness optimization 第四阶段已完成：safe action 物化由 action adapter 层负责，
+   默认 adapter 支持 `replay_probe`、`scoreboard_check`、`coverage_feedback_tuning`、
+   `stimulus_generation_hint` 和 `documentation_note` 的 sandbox config 输出；candidate
+   evaluation 会统计 action/overlay/directive/variant metrics，生成多候选 ranking 和
+   review-only promotion artifact，仍不修改源码主线。
+   Harness optimization 第五阶段已完成：candidate campaign 通过 `extra_make_vars`
+   注入 `HARNESS_REPLAY_PROBE_CONFIG`、`HARNESS_SCOREBOARD_CHECK_CONFIG`、
+   `HARNESS_COVERAGE_FEEDBACK_TUNING_CONFIG` 和 `HARNESS_RUNTIME_METRICS_OUT`；
+   runtime consumer 会写出 replay probe、scoreboard check 和 coverage feedback tuning
+   的执行指标，candidate evaluation 会读取这些指标参与 metric delta。
 
 5. 收紧 artifact materialization。
    已完成：每个 coverage feedback connector step 声明的 output artifact 会在 step
@@ -233,7 +257,9 @@
 - `tests/test_harness_optimization.py`：覆盖 phase-one harness optimization task/proposal/
   decision artifact 写出、默认 no-op proposal、非法 proposal schema reject、sandbox apply、
   unsafe action skip、candidate metric delta、final decision、真实 candidate regression
-  backend 的 sandbox run config 物化、内部 campaign 编排调用和阈值 reject。
+  backend 的 sandbox run config 物化、safe action adapter config 输出、内部 campaign
+  编排调用、adapter metrics、runtime action schema/消费/指标聚合、multi-candidate
+  ranking、promotion package 和阈值 reject。
 - `tests/test_harness_trace.py`：覆盖 connector events 到 harness execution records 的转换、
   connector/module/failure/case/directive 聚合、hanging span 检测、trace quality report、
   LLM optimization dataset 写出、通用 trace core 独立使用、可注入 metadata extractor、

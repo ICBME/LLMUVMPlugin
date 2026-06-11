@@ -16,6 +16,7 @@ from fuzz_feedback.coverage import build_summary
 from fuzz_feedback.feedback_loop import build_gap_feedback, build_mutation_feedback
 from fuzz_feedback.mutation_planner import plan_mutations_from_rtl_gaps
 
+from .harness_runtime_actions import CoverageFeedbackTuningRuntime
 from .orchestrator import PipelineContext, PipelineOrchestrator, StepSpec
 from .topology import FULL_FUZZ_TOPOLOGY, PipelineTopology
 
@@ -43,6 +44,8 @@ class CoverageFeedbackConfig:
     model: str | None = None
     topology_out: Path | None = None
     mode: str | None = None
+    coverage_feedback_tuning: Path | None = None
+    runtime_metrics_out: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,10 @@ class CoverageFeedbackPipeline:
         self.config = config
         self.context = context
         self.topology = topology
+        self.coverage_feedback_tuning = CoverageFeedbackTuningRuntime.from_path(
+            config.coverage_feedback_tuning,
+            metrics_out=config.runtime_metrics_out,
+        )
         self.orchestrator = PipelineOrchestrator(
             topology,
             context,
@@ -265,6 +272,7 @@ class CoverageFeedbackPipeline:
             functional_coverage=config.functional_coverage,
             ignore_functional_coverage=config.ignore_functional_coverage,
         )
+        summary = self.coverage_feedback_tuning.apply_summary(summary)
         write_json(config.summary_out, summary)
         return summary
 
@@ -320,6 +328,7 @@ class CoverageFeedbackPipeline:
             gap_feedback=gap_feedback,
             mutation_feedback=mutation_feedback,
         )
+        heuristic = self.coverage_feedback_tuning.apply_directives(heuristic)
         write_json(self._heuristic_directives_out(), heuristic)
         return heuristic
 
@@ -351,6 +360,9 @@ class CoverageFeedbackPipeline:
         llm_value: dict[str, Any],
     ) -> dict[str, Any]:
         final_directives = validate_directives(self.config.target, llm_value)
+        final_directives = self.coverage_feedback_tuning.apply_directives(
+            final_directives
+        )
         write_json(self.config.directives_out, final_directives)
         return final_directives
 
@@ -397,6 +409,8 @@ class CoverageFeedbackPipeline:
             "gap_feedback": config.gap_feedback_out,
             "mutation_feedback": config.mutation_feedback_out,
             "llm_response": config.llm_response_out,
+            "coverage_feedback_tuning": config.coverage_feedback_tuning,
+            "harness_runtime_metrics": config.runtime_metrics_out,
         }
         artifacts.update(
             {

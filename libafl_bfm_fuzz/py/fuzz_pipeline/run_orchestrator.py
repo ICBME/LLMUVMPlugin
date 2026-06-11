@@ -18,6 +18,11 @@ from .coverage_feedback import (
     run_coverage_feedback_pipeline,
 )
 from .harness import observation_context_from_env
+from .harness_runtime_actions import (
+    COVERAGE_FEEDBACK_TUNING_CONFIG_ENV,
+    RUNTIME_METRICS_OUT_ENV,
+    extra_make_var_value,
+)
 from .orchestrator import (
     PipelineContext,
     PipelineOrchestrator,
@@ -678,6 +683,9 @@ class FuzzRunOrchestrator:
             artifacts["evaluation_report"] = self._path_from_cwd(
                 self.config.evaluation_out
             )
+        runtime_metrics = self._harness_runtime_metrics()
+        if runtime_metrics is not None:
+            artifacts["harness_runtime_metrics"] = runtime_metrics
         return artifacts
 
     def _generator_input_roles(self) -> tuple[str, ...]:
@@ -792,6 +800,10 @@ class FuzzRunOrchestrator:
             model=self.config.llm_model,
             topology_out=self.config.topology_out,
             mode=self._mode(),
+            coverage_feedback_tuning=self._harness_runtime_config(
+                COVERAGE_FEEDBACK_TUNING_CONFIG_ENV
+            ),
+            runtime_metrics_out=self._harness_runtime_metrics(),
         )
 
     def _require_feedback_paths(self) -> None:
@@ -1006,6 +1018,7 @@ class FuzzRunOrchestrator:
         }
         materialized_paths = {
             "functional_coverage": self.config.functional_coverage,
+            "harness_runtime_metrics": self._harness_runtime_metrics(),
         }
         if "feedback_corpus_generation" in stage_results:
             materialized_paths["feedback_corpus"] = self.config.feedback_corpus
@@ -1036,6 +1049,14 @@ class FuzzRunOrchestrator:
 
     def _feedback_functional_coverage(self) -> Path | None:
         return self.paths.feedback_functional_coverage()
+
+    def _harness_runtime_config(self, env_name: str) -> Path | None:
+        value = extra_make_var_value(self.config.extra_make_vars, env_name)
+        return self._path_from_cwd(Path(value)) if value is not None else None
+
+    def _harness_runtime_metrics(self) -> Path | None:
+        value = extra_make_var_value(self.config.extra_make_vars, RUNTIME_METRICS_OUT_ENV)
+        return self._path_from_cwd(Path(value)) if value is not None else None
 
     def _heuristic_directives(self) -> Path | None:
         return self.paths.heuristic_directives()

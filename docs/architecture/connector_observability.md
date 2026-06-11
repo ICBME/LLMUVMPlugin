@@ -153,13 +153,29 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 `py/fuzz_pipeline/harness_candidate_regression.py`
 
 - 定义 `HarnessCandidateRegressionBackend`、`CandidateRegressionSettings` 和
-  `CandidateAcceptanceThresholds`。
+  `CandidateAcceptanceThresholds`，并公开 `CandidateActionAdapter` /
+  `JsonConfigActionAdapter` 作为 safe action 到 sandbox overlay 的扩展点。
 - backend 从 optimization task 指向的 baseline campaign manifest 读取配置，在 sandbox 下
-  物化 `candidate_regression_config`、`candidate_action_overlay` 和可选
-  `candidate_mutation_directives`，然后用内部 `CampaignOrchestrator` 跑
-  `campaign_with_evaluation` candidate campaign。
+  物化 `candidate_regression_config`、`candidate_action_overlay`、per-action config artifact
+  和可选 `candidate_mutation_directives`，然后用内部 `CampaignOrchestrator` 跑
+  `campaign_with_evaluation` candidate campaign。默认 adapter 会为
+  `replay_probe`、`scoreboard_check`、`coverage_feedback_tuning`、
+  `stimulus_generation_hint` 和 `documentation_note` 写出 JSON config，并通过
+  `HARNESS_*_CONFIG` 传给 sandbox run。
 - candidate evaluation report 会带上 baseline/candidate metrics、candidate campaign
-  artifacts 和 acceptance thresholds；final decision 只给出 review 级结论，不修改源码主线。
+  artifacts、adapter metrics、variant ranking、promotion package 和 acceptance thresholds；
+  final decision 只给出 review 级结论，不修改源码主线。
+
+`py/fuzz_pipeline/harness_runtime_actions.py`
+
+- 定义 safe action runtime config schema、loader 和 metrics writer。
+- `replay_probe` 由 pyUVM replay driver adapter 消费，记录 case/result 字段采样和
+  Python runtime 无法直接采样的 signal request；`scoreboard_check` 由 scoreboard adapter
+  消费，记录额外 check 的 pass/fail/enforced failure；`coverage_feedback_tuning` 由
+  `CoverageFeedbackPipeline` 消费，用于限制 gap 选择、调整 directive weight，并写出
+  `harness_runtime_metrics`。
+- 默认没有 `HARNESS_*_CONFIG` / `HARNESS_RUNTIME_METRICS_OUT` 时不加载 runtime action，
+  因此主 `feedback_fuzz` / `no_feedback` 流程行为不变。
 
 `py/fuzz_pipeline/harness_rollup.py`
 
@@ -249,6 +265,14 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 - Harness LLM Optimization 第三阶段已提供真实 candidate regression backend：
   显式注入 `HarnessCandidateRegressionBackend` 后，candidate evaluation stage 会复用现有
   campaign/run 编排执行 sandbox candidate campaign，并按阈值生成 final decision。
+- Harness LLM Optimization 第四阶段已补齐 candidate action adapter 层：
+  `replay_probe`、`scoreboard_check`、`coverage_feedback_tuning` 等安全 action 会被物化为
+  sandbox overlay/config artifact 和 make 变量，candidate evaluation 额外输出 action
+  metrics、multi-candidate ranking 和 review-only promotion package。
+- Harness LLM Optimization 第五阶段已接通 safe action runtime consumption：
+  candidate regression 会注入 `HARNESS_RUNTIME_METRICS_OUT`；replay、scoreboard 和
+  coverage feedback 业务层真实消费对应 sandbox config，并将执行计数汇总到
+  `candidate_runtime_metrics` / candidate metrics。
 - pyUVM replay 仍在 cocotb/pyUVM 生命周期内执行，但 replay context、sequence、
   driver/ref-model、scoreboard 和 coverage 的 connector 创建已统一迁移到
   `ReplayPipelineOrchestrator`；pyUVM component 只负责 phase 内调用行为，adapter 负责
@@ -358,7 +382,8 @@ run/campaign profile 层使用 `RunStage` 描述 stage contract，并用
 - `campaign_with_evaluation_and_optimization_validation`：在 phase-one 后追加 sandbox
   apply、candidate evaluation、metric delta 和 final decision；默认候选验证为 `not_run`
   占位，可由 backend 替换；显式注入 `HarnessCandidateRegressionBackend` 后会运行 sandbox
-  candidate campaign
+  candidate campaign，并输出 candidate action overlay、adapter config、variant ranking
+  和 promotion package
 
 扩展点：
 
@@ -373,7 +398,9 @@ run/campaign profile 层使用 `RunStage` 描述 stage contract，并用
   phase-one harness optimizer proposal backend；
   `EvaluationBackends(harness_candidate_evaluation=...)` 可替换第二阶段候选验证 backend。
   第三阶段可传入 `HarnessCandidateRegressionBackend(settings=...)`，让 candidate
-  evaluation stage 运行真实 sandbox regression。
+  evaluation stage 运行真实 sandbox regression；第四阶段可通过
+  `HarnessCandidateRegressionBackend(action_adapters=...)` 注入新的 safe action adapter，
+  或覆盖默认 `replay_probe` / `scoreboard_check` / `coverage_feedback_tuning` 物化逻辑。
 
 ### 优先迁移点
 
@@ -917,8 +944,9 @@ monitor JSON 聚合：
   生成 proposal 并由 decision artifact 做 schema accept/reject。
 - `EvaluationBackends(harness_candidate_evaluation=...)` 可替换第二阶段 candidate
   validation backend；`HarnessCandidateRegressionBackend` 会物化 sandbox run config，
-  复用 campaign/run 编排执行候选回归，并生成 baseline/candidate metric delta 和阈值化
-  final decision。
+  复用 campaign/run 编排执行候选回归，并生成 baseline/candidate metric delta、阈值化
+  final decision、adapter metrics、runtime action metrics、candidate variant ranking 和
+  promotion package。
 - campaign profile 可插入自定义 campaign stage，并能拒绝缺失 `campaign_manifest`
   依赖的非法 DAG。
 - `feedback-fuzz` 单轮 manifest 写出和 `round_artifacts_to_round_manifest` 观测。

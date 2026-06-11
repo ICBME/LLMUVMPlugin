@@ -8,6 +8,10 @@ from typing import Any
 from fuzz_bfm.plugin_loader import build_driver
 from fuzz_bfm.target_config import TargetConfig
 from fuzz_pipeline.replay_orchestrator import ReplayPipelineOrchestrator
+from fuzz_pipeline.harness_runtime_actions import (
+    ReplayProbeRuntime,
+    ScoreboardCheckRuntime,
+)
 from fuzz_uvm.functional_coverage import build_coverage_model
 from fuzz_uvm.ref_models import build_ref_model
 from fuzz_uvm.scoreboards import build_scoreboard
@@ -142,6 +146,7 @@ class ObservableReplayDriverAdapter:
         self.stage = stage_adapter or ReplayStageAdapter(config, orchestrator)
         self.ref_model = self.stage.build_ref_model()
         self.target_driver = self.stage.build_replay_driver()
+        self.replay_probe = ReplayProbeRuntime.from_env()
 
     async def reset(self) -> None:
         await self.stage.reset_driver(self.target_driver)
@@ -149,9 +154,12 @@ class ObservableReplayDriverAdapter:
     async def execute(self, case: Any, *, index: int) -> Any:
         result = await self.stage.execute_case(self.target_driver, case, index=index)
         if self.ref_model is None:
+            self.replay_probe.sample(index=index, case=case, result=result)
             return result
         expected = self.stage.predict_ref_model(self.ref_model, case, index=index)
-        return replace(result, expected=expected.expected)
+        final_result = replace(result, expected=expected.expected)
+        self.replay_probe.sample(index=index, case=case, result=final_result)
+        return final_result
 
 
 class ObservableScoreboardAdapter:
@@ -163,15 +171,22 @@ class ObservableScoreboardAdapter:
     ):
         self.stage = stage_adapter or ReplayStageAdapter(config, orchestrator)
         self.checker = self.stage.build_scoreboard()
+        self.runtime_checks = ScoreboardCheckRuntime.from_env()
 
     def write(self, record: ReplayRecord) -> None:
         self.stage.scoreboard_write(self.checker, record)
+        self.runtime_checks.evaluate_record(record)
 
     def check(self) -> None:
         self.stage.scoreboard_check(self.checker)
+        self.runtime_checks.check()
 
     def summary(self) -> dict[str, Any]:
-        return self.stage.scoreboard_summary(self.checker)
+        summary = self.stage.scoreboard_summary(self.checker)
+        if self.runtime_checks.config is not None:
+            summary = dict(summary)
+            summary["harness_scoreboard_checks"] = self.runtime_checks.summary()
+        return summary
 
 
 class ObservableCoverageAdapter:

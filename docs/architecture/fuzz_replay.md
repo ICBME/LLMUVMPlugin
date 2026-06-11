@@ -63,7 +63,8 @@
   contract、静态依赖校验、runtime result readiness 和 stage policy 执行。
 - `run_profiles.py`：默认 run/campaign profile，使用 stage name 列表描述
   `feedback_fuzz`、`no_feedback`、round evaluation、campaign evaluation 和
-  harness optimization phase-one/phase-two/phase-three DAG。
+  harness optimization phase-one 与 validation DAG；后续 candidate regression backend
+  在同一 validation profile 内承接 phase-three/phase-four 行为。
 - `run_stage_registry.py`：把 profile 中的 stage name 解析为具体 `RunStage`，并提供
   自定义 stage 注册入口。
 - `run_adapters.py`：corpus generator、UVM replay 和 coverage report 的可替换 backend
@@ -74,7 +75,14 @@
   campaign rollup 生成 optimization task/proposal/schema decision，并支持显式 profile 下的
   sandbox apply、candidate evaluation、metric delta 和 final decision artifacts。
 - `harness_candidate_regression.py`：真实 candidate validation backend，将安全 proposal
-  action 子集物化成 sandbox run config，并复用现有 campaign/run 编排执行候选回归。
+  action 子集物化成 sandbox run config；candidate action adapter 会把 `replay_probe`、
+  `scoreboard_check`、`coverage_feedback_tuning` 等 safe action 转换为 sandbox overlay、
+  config artifact 和 `HARNESS_*_CONFIG` make 变量，并复用现有 campaign/run 编排执行候选
+  回归，生成 candidate metrics、variant ranking 和 promotion package。
+- `harness_runtime_actions.py`：safe action runtime consumer，负责加载 sandbox config，
+  在 replay driver、scoreboard 和 coverage feedback 业务层消费 `replay_probe`、
+  `scoreboard_check`、`coverage_feedback_tuning`，并把执行指标写入
+  `harness_runtime_metrics`。
 - `run_orchestrator.py`：`FuzzRunOrchestrator`，负责顶层 corpus generation /
   validation、coverage replay、Verilator coverage report、coverage feedback、feedback
   replay、round manifest 和 round evaluation 的 profile 编排。
@@ -175,6 +183,11 @@ Makefile 会把 `CARGO` 作为一个完整 wrapper 字符串传给 pipeline runn
     和 `--campaign-evaluation-out` 生成 round/campaign evaluation report。
 13. 默认 `feedback_fuzz` 和 `no_feedback` 行为保持与迁移前主流程一致；新增 stage 应通过
     registry/profile 插入，并由 `RunStage` contract 声明 result/artifact 依赖。
+14. 显式 harness optimization validation profile 可注入
+    `HarnessCandidateRegressionBackend`。backend 只在 optimization sandbox 下物化 candidate
+    action overlay、per-action config、可选 mutation directives、variant ranking 和
+    review-only promotion package，并在 candidate run 内通过 `HARNESS_RUNTIME_METRICS_OUT`
+    汇总 runtime action execution metrics；默认主流程和源码主线不受影响。
 
 结构化 coverage export 和 `rtl_gap` 的 schema 见
 [Coverage Feedback 设计](coverage_feedback_design.md)。

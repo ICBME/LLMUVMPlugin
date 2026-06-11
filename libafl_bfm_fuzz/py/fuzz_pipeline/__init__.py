@@ -22,12 +22,24 @@ from .harness_llm_tasks import (
 )
 from .harness_candidate_regression import (
     CandidateAcceptanceThresholds,
+    CandidateActionAdapter,
+    CandidateActionAdapterContext,
+    CandidateActionAdapterResult,
     CandidateRegressionSettings,
     HarnessCandidateRegressionBackend,
+    JsonConfigActionAdapter,
 )
 from .harness_metadata import (
     HarnessMetadataExtractorProtocol,
     UvmFuzzMetadataExtractor,
+)
+from .harness_runtime_actions import (
+    CoverageFeedbackTuningRuntime,
+    ReplayProbeRuntime,
+    RuntimeActionConfig,
+    RuntimeActionEntry,
+    ScoreboardCheckRuntime,
+    load_runtime_action_config,
 )
 from .harness_optimization import (
     CANDIDATE_EVALUATION_KIND,
@@ -122,6 +134,9 @@ __all__ = [
     "CANDIDATE_EVALUATION_KIND",
     "CANDIDATE_MANIFEST_KIND",
     "CandidateAcceptanceThresholds",
+    "CandidateActionAdapter",
+    "CandidateActionAdapterContext",
+    "CandidateActionAdapterResult",
     "CandidateRegressionSettings",
     "ConnectorEdge",
     "COVERAGE_FEEDBACK_TOPOLOGY",
@@ -155,6 +170,8 @@ __all__ = [
     "HarnessOptimizerBackend",
     "HarnessRecordProjector",
     "HarnessRecordProjectorProtocol",
+    "JsonConfigActionAdapter",
+    "CoverageFeedbackTuningRuntime",
     "NoopHarnessOptimizerBackend",
     "NoopHarnessCandidateEvaluationBackend",
     "ObservationRuntime",
@@ -163,6 +180,7 @@ __all__ = [
     "PipelineTopology",
     "ReplayPipelineOrchestrator",
     "ReplayBackend",
+    "ReplayProbeRuntime",
     "RegisteredRunStage",
     "RunBackends",
     "RunEvaluationAdapter",
@@ -175,6 +193,9 @@ __all__ = [
     "RunStageFactory",
     "RunStageRegistry",
     "RUN_ORCHESTRATION_TOPOLOGY",
+    "RuntimeActionConfig",
+    "RuntimeActionEntry",
+    "ScoreboardCheckRuntime",
     "StepPolicy",
     "StepSpec",
     "UvmReplayAdapter",
@@ -194,6 +215,7 @@ __all__ = [
     "external_command_step",
     "campaign_trace_rollup_path",
     "harness_optimization_paths",
+    "load_runtime_action_config",
     "normalize_campaign_modes",
     "replay_corpus_from_env",
     "run_coverage_feedback_stage_pipeline",
