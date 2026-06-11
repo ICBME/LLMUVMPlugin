@@ -82,7 +82,10 @@
   config artifact 和 `HARNESS_*_CONFIG` make 变量，并复用现有 campaign/run 编排执行候选
   回归，生成 candidate metrics、variant evaluations、action effect report、variant
   ranking 和 promotion package；真实 CLI 路径默认先运行 matched no-op baseline，并用
-  同配置空动作 rerun 的 metrics 作为候选 metric delta 的 baseline。
+  同配置空动作 rerun 的 metrics 作为候选 metric delta 的 baseline；默认真实 CLI 还会
+  执行 paired repeated validation，按相同 seed 偏移成对重跑 matched no-op 和 candidate，
+  将 repeat mean/worst/variance/flaky 写入 `candidate_paired_validation`，并用均值
+  metrics 与 flaky threshold 做最终证据判断。
 - `harness_runtime_actions.py`：safe action runtime consumer，负责加载 sandbox config，
   在 replay driver、scoreboard 和 coverage feedback 业务层消费 `replay_probe`、
   `scoreboard_check`、`coverage_feedback_tuning`，并把执行指标写入
@@ -194,10 +197,13 @@ Makefile 会把 `CARGO` 作为一个完整 wrapper 字符串传给 pipeline runn
     action overlay、per-action config、可选 mutation directives、variant ranking 和
     review-only promotion package；真实 CLI 路径默认先运行 matched no-op baseline，
     用相同 candidate campaign 配置但空 action overlay 的 rerun metrics 作为对比基线，
-    可通过 `--no-candidate-matched-baseline` 关闭；candidate run 内通过
+    并默认执行三次 paired repeats 生成稳定性证据；可通过
+    `--candidate-paired-repeats` 调整重复次数，或用
+    `--no-candidate-matched-baseline` 关闭 matched baseline；candidate run 内通过
     `HARNESS_RUNTIME_METRICS_OUT` 汇总 runtime action execution metrics；第六阶段还会按
     `action_id` / `action_type` 生成 action effect report，并可通过
-    `max_variant_regressions` 启用 top-K variant 独立回归。第七阶段可显式注入或通过
+    `max_variant_regressions` 或 `candidate-attribution-top-k` 启用 top-K variant 独立
+    回归。第七阶段可显式注入或通过
     `--harness-optimizer-backend llm` 选择
     `LlmHarnessOptimizerBackend`，由 LLM 基于 evaluation、dataset、rollup 和 action
     effect report 生成 schema-valid safe action proposal，并保留 prompt/response

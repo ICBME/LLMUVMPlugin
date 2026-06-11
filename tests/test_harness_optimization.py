@@ -1637,6 +1637,132 @@ def test_harness_candidate_regression_uses_matched_noop_baseline() -> None:
     assert final_decision["decision"] == "accepted_for_review"
 
 
+def test_harness_candidate_regression_runs_paired_repeated_validation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        seen_configs: list[CampaignConfig] = []
+
+        def factory(config, observation_context, **kwargs):
+            seen_configs.append(config)
+            return StubRegressionCampaign(config, observation_context, **kwargs)
+
+        campaign_evaluation, campaign_manifest, manifest_path = _source_payloads(root)
+        evaluation_path = root / "campaign_evaluation.json"
+        paths = harness_optimization_paths(evaluation_path)
+        sequence_backend = SequenceRegressionCampaignEvaluationBackend((2, 0, 2, 2))
+        backend = HarnessCandidateRegressionBackend(
+            settings=CandidateRegressionSettings(
+                modes=("heuristic_feedback",),
+                rounds=1,
+                matched_baseline=True,
+                paired_repeats=2,
+                repeat_seed_stride=1,
+                thresholds=CandidateAcceptanceThresholds(
+                    min_improved_metric_count=1,
+                    max_flaky_metric_count=0,
+                ),
+            ),
+            evaluation_backends=EvaluationBackends(
+                campaign_evaluation=sequence_backend,
+            ),
+            campaign_orchestrator_factory=factory,
+        )
+        adapter = HarnessOptimizationAdapter(
+            target="demo",
+            paths=paths,
+            campaign_evaluation_path=evaluation_path,
+            campaign_manifest_path=manifest_path,
+            cwd=root,
+            candidate_evaluation_backend=backend,
+        )
+        task = adapter.run_task(campaign_evaluation, campaign_manifest)
+        proposal = {
+            "schema_version": 1,
+            "kind": PROPOSAL_KIND,
+            "proposal_id": "proposal-paired-validation",
+            "status": "proposed",
+            "actions": [
+                {
+                    "action_id": "probe-1",
+                    "action_type": "replay_probe",
+                    "payload": {"signals": ["dut.state"], "sample_on": "posedge"},
+                    "evidence_refs": [{"span_id": "span-dut"}],
+                }
+            ],
+            "evidence_refs": [{"span_id": "span-dut"}],
+        }
+        decision = adapter.run_decision(task, proposal)
+        apply_result = adapter.run_apply(task, proposal, decision)
+        patch = apply_result["harness_optimization_patch"]
+        candidate_manifest = apply_result["harness_optimization_candidate_manifest"]
+
+        candidate_evaluation = adapter.run_candidate_evaluation(
+            task,
+            proposal,
+            patch,
+            candidate_manifest,
+        )
+        metric_delta = adapter.run_metric_delta(task, candidate_evaluation)
+        final_decision = adapter.run_final_decision(
+            task,
+            proposal,
+            decision,
+            patch,
+            candidate_evaluation,
+            metric_delta,
+        )
+        artifacts = candidate_evaluation["artifacts"]
+        paired_validation = json.loads(
+            Path(artifacts["candidate_paired_validation"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        action_effect = json.loads(
+            Path(artifacts["candidate_action_effect_report"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        promotion = json.loads(
+            Path(artifacts["candidate_promotion_package"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        failed_stability = next(
+            item
+            for item in paired_validation["metric_stability"]
+            if item["metric"] == "failed_record_count"
+        )
+
+    assert len(seen_configs) == 4
+    assert len(sequence_backend.calls) == 4
+    assert "matched_noop_baseline" in str(seen_configs[0].out_dir)
+    assert "paired_validation/repeat_001/matched_noop_baseline" in str(
+        seen_configs[2].out_dir
+    )
+    assert "paired_validation/repeat_001/candidate" in str(seen_configs[3].out_dir)
+    assert seen_configs[0].seed == 7
+    assert seen_configs[1].seed == 7
+    assert seen_configs[2].seed == 8
+    assert seen_configs[3].seed == 8
+    assert candidate_evaluation["baseline_metrics"]["failed_record_count"] == 2
+    assert candidate_evaluation["candidate_metrics"]["failed_record_count"] == 1
+    assert candidate_evaluation["stability_summary"]["complete_pair_count"] == 2
+    assert candidate_evaluation["stability_summary"]["flaky_metric_count"] == 1
+    assert paired_validation["summary"]["aggregate"] == "mean"
+    assert paired_validation["summary"]["flaky_metric_count"] == 1
+    assert len(paired_validation["runs"]) == 2
+    assert paired_validation["runs"][1]["seed"] == 8
+    assert failed_stability["flaky"] is True
+    assert failed_stability["paired_directions"] == ["improved", "unchanged"]
+    assert action_effect["summary"]["improved_action_count"] == 1
+    assert action_effect["actions"][0]["effect_status"] == "improved"
+    assert promotion["promotion_status"] == "hold"
+    assert promotion["threshold_summary"]["flaky_metric_count"] == 1
+    assert metric_delta["summary"]["gateable_improved_metric_count"] == 1
+    assert final_decision["decision"] == "rejected"
+    assert final_decision["reason"] == "candidate_stability_below_threshold"
+
+
 def test_harness_candidate_regression_threshold_rejects_neutral_candidate() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -1870,6 +1996,24 @@ def test_candidate_regression_settings_rejects_invalid_variant_count() -> None:
         raise AssertionError("max_variant_regressions=0 should fail schema")
 
     assert "max_variant_regressions must be >= 1" in message
+
+    try:
+        CandidateRegressionSettings(paired_repeats=0)
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("paired_repeats=0 should fail schema")
+
+    assert "paired_repeats must be >= 1" in message
+
+    try:
+        CandidateRegressionSettings(attribution_top_k=0)
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("attribution_top_k=0 should fail schema")
+
+    assert "attribution_top_k must be >= 1" in message
 
 
 def _set_env(values: dict[str, str]) -> dict[str, str | None]:

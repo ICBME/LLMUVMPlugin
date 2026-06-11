@@ -175,10 +175,16 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   ranking、action effect report 和 promotion package 都以这次
   `matched_noop_rerun` 的 metrics 为 baseline，并保留原始 task snapshot metrics 作为
   `source_baseline_metrics`。
+- `paired_repeats > 1` 时，backend 会把第一次 matched/candidate 运行作为 repeat 0，
+  再按 `repeat_seed_stride` 偏移 seed 补跑相同数量的 matched no-op / candidate 成对
+  回归。`candidate_paired_validation` artifact 会记录每个 repeat 的 seed、原始
+  metrics、paired delta、mean/worst/variance 和 flaky metric 标记；主
+  `baseline_metrics` / `candidate_metrics` 使用 repeat 均值，final decision 会用
+  `max_flaky_metric_count` 拦截不稳定候选。
 - candidate evaluation report 会带上 baseline/candidate metrics、candidate campaign
-  artifacts、matched baseline artifacts、adapter metrics、variant evaluations、action
-  effect report、variant ranking、promotion package 和 acceptance thresholds；final
-  decision 只给出 review 级结论，不修改源码主线。
+  artifacts、matched baseline artifacts、paired validation artifacts、adapter metrics、
+  variant evaluations、action effect report、variant ranking、promotion package 和
+  acceptance thresholds；final decision 只给出 review 级结论，不修改源码主线。
 
 `py/fuzz_pipeline/harness_runtime_actions.py`
 
@@ -193,7 +199,9 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   因此主 `feedback_fuzz` / `no_feedback` 流程行为不变。
 - runtime metrics 会保留 section 总量和 per-action 明细；candidate regression 会按
   `action_id` / `action_type` 聚合 `replay_probe`、`scoreboard_check`、
-  `coverage_feedback_tuning` 的 consumption 状态，写出 `candidate_action_effect_report`。
+  `coverage_feedback_tuning` 的 consumption 状态，并把每个 action 标记为
+  `improved`、`neutral`、`regressed` 或 `not_consumed`，写出
+  `candidate_action_effect_report`。
 
 `py/fuzz_pipeline/harness_rollup.py`
 
@@ -886,12 +894,15 @@ uv run make -C libafl_bfm_fuzz real-candidate-feedback-campaign \
 `OPENAI_API_KEY` 环境变量。candidate 回归参数可用
 `--candidate-modes`、`--candidate-rounds`、`--candidate-iters`、
 `--candidate-max-seeds`、`--candidate-max-variant-regressions`、
-`--candidate-matched-baseline`、`--candidate-min-improved-metrics` 和
-`--candidate-max-regressed-metrics` 覆盖；真实 candidate backend 的 CLI 路径默认开启
+`--candidate-attribution-top-k`、`--candidate-paired-repeats`、
+`--candidate-repeat-seed-stride`、`--candidate-matched-baseline`、
+`--candidate-min-improved-metrics`、`--candidate-max-regressed-metrics` 和
+`--candidate-max-flaky-metrics` 覆盖；真实 candidate backend 的 CLI 路径默认开启
 matched no-op baseline，可用 `--no-candidate-matched-baseline` 或
 `HARNESS_CANDIDATE_MATCHED_BASELINE=0` 关闭。CLI 默认
-`candidate-min-improved-metrics=0`，用于 smoke/review 场景下接受“无 gateable 回归”的
-候选进入 `accepted_for_review`。
+`candidate-paired-repeats=3`、`candidate-min-improved-metrics=0` 和
+`candidate-max-flaky-metrics=0`，用于 smoke/review 场景下接受“无 gateable 回归且无
+flaky gateable metric”的候选进入 `accepted_for_review`。
 
 Python 侧仍可显式注入真实 candidate regression backend：
 
@@ -911,6 +922,7 @@ evaluation_backends = EvaluationBackends(
             thresholds=CandidateAcceptanceThresholds(
                 max_regressed_metric_count=0,
                 min_improved_metric_count=1,
+                max_flaky_metric_count=0,
             ),
         ),
     ),

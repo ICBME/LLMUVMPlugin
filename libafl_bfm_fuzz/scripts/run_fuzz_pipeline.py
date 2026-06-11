@@ -225,6 +225,9 @@ def add_feedback_campaign_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--candidate-max-seeds", type=int)
     parser.add_argument("--candidate-seed", type=int)
     parser.add_argument("--candidate-max-variant-regressions", type=int)
+    parser.add_argument("--candidate-attribution-top-k", type=int)
+    parser.add_argument("--candidate-paired-repeats", type=int)
+    parser.add_argument("--candidate-repeat-seed-stride", type=int)
     parser.add_argument("--candidate-run-plan-profile")
     parser.add_argument("--candidate-campaign-plan-profile")
     parser.add_argument(
@@ -240,6 +243,7 @@ def add_feedback_campaign_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--candidate-max-regressed-metrics", type=int)
     parser.add_argument("--candidate-min-improved-metrics", type=int)
+    parser.add_argument("--candidate-max-flaky-metrics", type=int)
     parser.add_argument("--candidate-accepted-statuses")
     parser.add_argument("--observation-out", type=Path)
     parser.add_argument("--monitoring-out", type=Path)
@@ -617,6 +621,20 @@ def candidate_regression_settings_from_args(
             "HARNESS_CANDIDATE_MAX_VARIANT_REGRESSIONS",
             1,
         ),
+        attribution_top_k=optional_int_arg(
+            args.candidate_attribution_top_k,
+            "HARNESS_CANDIDATE_ATTRIBUTION_TOP_K",
+        ),
+        paired_repeats=int_arg(
+            args.candidate_paired_repeats,
+            "HARNESS_CANDIDATE_PAIRED_REPEATS",
+            3,
+        ),
+        repeat_seed_stride=int_arg(
+            args.candidate_repeat_seed_stride,
+            "HARNESS_CANDIDATE_REPEAT_SEED_STRIDE",
+            1,
+        ),
         run_plan_profile=(
             args.candidate_run_plan_profile
             or os.getenv("HARNESS_CANDIDATE_RUN_PLAN_PROFILE")
@@ -645,6 +663,11 @@ def candidate_regression_settings_from_args(
             min_improved_metric_count=int_arg(
                 args.candidate_min_improved_metrics,
                 "HARNESS_CANDIDATE_MIN_IMPROVED_METRICS",
+                0,
+            ),
+            max_flaky_metric_count=int_arg(
+                args.candidate_max_flaky_metrics,
+                "HARNESS_CANDIDATE_MAX_FLAKY_METRICS",
                 0,
             ),
             accepted_candidate_statuses=accepted_candidate_statuses(args),

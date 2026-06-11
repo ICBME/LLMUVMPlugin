@@ -151,6 +151,9 @@
   no-op baseline，并用同配置空动作 rerun metrics 作为 candidate metric delta 的
   baseline；可用 `--no-candidate-matched-baseline` 或
   `HARNESS_CANDIDATE_MATCHED_BASELINE=0` 关闭。
+  第九阶段新增 paired repeated validation：真实 CLI/Make 默认 `candidate-paired-repeats=3`，
+  matched no-op 与 candidate 使用同一 seed 序列成对运行，输出
+  `candidate_paired_validation`，并将 mean/worst/variance/flaky 统计接入 final decision。
   第四阶段进一步公开 `CandidateActionAdapter` / `JsonConfigActionAdapter`，默认把
   `replay_probe`、`scoreboard_check`、`coverage_feedback_tuning` 等 safe action 物化为
   per-action config artifact，并产出 `candidate_variant_ranking` 和
@@ -158,7 +161,9 @@
   per-action config 在 candidate run 内被 replay/scoreboard/coverage feedback 真实消费，
   并把 `candidate_runtime_metrics` 合入 candidate evaluation metrics。第六阶段新增
   `candidate_variant_evaluations` 和 `candidate_action_effect_report`，用于记录 top-K
-  variant 独立回归结果、runtime action consumption 状态和每个 action 的效果归因。
+  variant 独立回归结果、runtime action consumption 状态和每个 action 的效果归因；
+  action effect report 会把 action 分类为 `improved`、`neutral`、`regressed` 或
+  `not_consumed`，promotion package 会引用该汇总。
 - CLI/Makefile：`--run-plan-profile`、`--campaign-plan-profile`、`--round-evaluation`、
   `--evaluation-out`、`--campaign-evaluation-out` 以及对应 Makefile 变量
   `RUN_PLAN_PROFILE`、`CAMPAIGN_PLAN_PROFILE`、`ROUND_EVALUATION_ENABLE`、
@@ -254,7 +259,8 @@
    `campaign_with_evaluation_and_optimization_real_validation` profile、CLI/Make 参数和
    `real-candidate-feedback-campaign` target，可从命令行选择真实 candidate regression
    backend，并通过 `HARNESS_CANDIDATE_*` / `CANDIDATE_*` 参数覆盖候选 rounds、modes、
-   seed、matched no-op baseline、top-K variants 和 acceptance thresholds。
+   seed、matched no-op baseline、paired repeats、repeat seed stride、top-K attribution、
+   max flaky metrics 和 acceptance thresholds。
 
 5. 收紧 artifact materialization。
    已完成：每个 coverage feedback connector step 声明的 output artifact 会在 step

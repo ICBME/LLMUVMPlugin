@@ -1203,6 +1203,8 @@ def build_harness_optimization_final_decision(
         "gateable_improved_metric_count",
         "improved_metric_count",
     )
+    stability_summary = mapping(candidate_evaluation.get("stability_summary"))
+    flaky_metric_count = int_value(stability_summary.get("flaky_metric_count"))
     if schema_decision.get("decision") != "accepted":
         decision = "rejected"
         reason = "schema_decision_rejected"
@@ -1224,6 +1226,9 @@ def build_harness_optimization_final_decision(
     elif improved_metric_count < thresholds["min_improved_metric_count"]:
         decision = "rejected"
         reason = "candidate_metric_improvement_below_threshold"
+    elif flaky_metric_count > thresholds["max_flaky_metric_count"]:
+        decision = "rejected"
+        reason = "candidate_stability_below_threshold"
     elif candidate_status in set(thresholds["accepted_candidate_statuses"]):
         decision = "accepted_for_review"
         reason = "candidate_validation_passed_without_regressions"
@@ -1263,6 +1268,7 @@ def build_harness_optimization_final_decision(
             "informational_changed_metric_count": int_value(
                 delta_summary.get("informational_changed_metric_count")
             ),
+            "flaky_metric_count": flaky_metric_count,
             "acceptance_thresholds": thresholds,
         },
     }
@@ -1622,6 +1628,11 @@ def final_decision_thresholds(
         "min_improved_metric_count": int_value(
             raw.get("min_improved_metric_count")
             if "min_improved_metric_count" in raw
+            else 0
+        ),
+        "max_flaky_metric_count": int_value(
+            raw.get("max_flaky_metric_count")
+            if "max_flaky_metric_count" in raw
             else 0
         ),
         "accepted_candidate_statuses": statuses or ["ok", "passed"],

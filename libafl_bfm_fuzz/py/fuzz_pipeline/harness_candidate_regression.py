@@ -79,12 +79,14 @@ RUNTIME_ACTION_TYPES = {
 class CandidateAcceptanceThresholds:
     max_regressed_metric_count: int = 0
     min_improved_metric_count: int = 1
+    max_flaky_metric_count: int = 0
     accepted_candidate_statuses: tuple[str, ...] = ("passed", "ok")
 
     def to_json(self) -> dict[str, Any]:
         return {
             "max_regressed_metric_count": self.max_regressed_metric_count,
             "min_improved_metric_count": self.min_improved_metric_count,
+            "max_flaky_metric_count": self.max_flaky_metric_count,
             "accepted_candidate_statuses": list(self.accepted_candidate_statuses),
         }
 
@@ -101,11 +103,20 @@ class CandidateRegressionSettings:
     round_evaluation: bool = True
     campaign_plan_profile: str = "campaign_with_evaluation"
     matched_baseline: bool = False
+    paired_repeats: int = 1
+    repeat_seed_stride: int = 1
+    attribution_top_k: int | None = None
     thresholds: CandidateAcceptanceThresholds = CandidateAcceptanceThresholds()
 
     def __post_init__(self) -> None:
         if self.max_variant_regressions < 1:
             raise ValueError("max_variant_regressions must be >= 1")
+        if self.paired_repeats < 1:
+            raise ValueError("paired_repeats must be >= 1")
+        if self.repeat_seed_stride < 1:
+            raise ValueError("repeat_seed_stride must be >= 1")
+        if self.attribution_top_k is not None and self.attribution_top_k < 1:
+            raise ValueError("attribution_top_k must be >= 1")
 
 
 @dataclass(frozen=True)
@@ -119,6 +130,13 @@ class MatchedBaselineRun:
     metrics: dict[str, float | int]
     artifacts: dict[str, str]
     summary: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class CandidateRepeatRun:
+    metrics: dict[str, float | int]
+    artifacts: dict[str, str]
+    evaluation: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -366,17 +384,83 @@ class HarnessCandidateRegressionBackend:
         )
         combined_metrics.update(adapter_metric_snapshot(adapter_results))
         combined_metrics.update(runtime_metric_snapshot(runtime_metrics_path))
+        candidate_run_artifacts = {
+            "candidate_regression_config": str(run_config_path),
+            "candidate_action_overlay": str(overlay_path),
+            **adapter_artifacts(adapter_results),
+            **_optional_artifact(
+                "candidate_mutation_directives",
+                candidate_directives_path,
+            ),
+            **_optional_existing_artifact(
+                "candidate_runtime_metrics",
+                runtime_metrics_path,
+            ),
+            "candidate_campaign_manifest": str(campaign_config.campaign_manifest_out),
+            "candidate_campaign_evaluation": str(
+                campaign_config.campaign_evaluation_out
+            ),
+        }
+        matched_baseline_metrics = (
+            matched_baseline.metrics if matched_baseline is not None else None
+        )
+        paired_validation_path: Path | None = None
+        paired_validation_summary: dict[str, Any] = {
+            "enabled": self.settings.paired_repeats > 1,
+            "status": "disabled",
+            "requested_repeats": self.settings.paired_repeats,
+        }
+        if self.settings.paired_repeats > 1:
+            if matched_baseline is None:
+                paired_validation_summary = {
+                    "enabled": False,
+                    "status": "skipped",
+                    "requested_repeats": self.settings.paired_repeats,
+                    "reason": "matched_baseline_required",
+                }
+            else:
+                paired_validation = self._run_paired_repeated_validation(
+                    task=task,
+                    proposal=proposal,
+                    patch=patch,
+                    candidate_manifest=candidate_manifest,
+                    baseline_manifest=baseline_manifest,
+                    raw_actions=raw_actions,
+                    regression_dir=regression_dir,
+                    repeat0_seed=campaign_config.seed,
+                    repeat0_baseline=matched_baseline,
+                    repeat0_candidate=CandidateRepeatRun(
+                        metrics=combined_metrics,
+                        artifacts=candidate_run_artifacts,
+                        evaluation=candidate_evaluation,
+                    ),
+                )
+                baseline_metrics = paired_validation["baseline_metrics"]
+                matched_baseline_metrics = baseline_metrics
+                combined_metrics = paired_validation["candidate_metrics"]
+                paired_validation_summary = paired_validation["summary"]
+                paired_validation_path = _required_path(
+                    paired_validation["artifact_path"]
+                )
         combined_variant = combined_variant_evaluation(
             overlay=overlay,
             metrics=combined_metrics,
+            baseline_metrics=baseline_metrics,
             campaign_config=campaign_config,
             run_config_path=run_config_path,
             runtime_metrics_path=runtime_metrics_path,
             adapter_results=adapter_results,
+            extra_artifacts=_optional_artifact(
+                "candidate_paired_validation",
+                paired_validation_path,
+            ),
         )
         selected_variants = select_candidate_variants(
             overlay.get("variants"),
-            max_count=self.settings.max_variant_regressions,
+            max_count=(
+                self.settings.attribution_top_k
+                or self.settings.max_variant_regressions
+            ),
         )
         variant_evaluations = [
             combined_variant,
@@ -409,6 +493,8 @@ class HarnessCandidateRegressionBackend:
             mapping(selected_variant.get("metrics")) or combined_metrics
         )
         candidate_status = str(selected_variant.get("status") or "passed")
+        if paired_validation_summary.get("status") == "error":
+            candidate_status = "error"
         variant_evaluations_path = regression_dir / "candidate_variant_evaluations.json"
         _write_json(
             variant_evaluations_path,
@@ -438,6 +524,8 @@ class HarnessCandidateRegressionBackend:
             baseline_metrics=baseline_metrics,
             ranking=ranking,
             thresholds=self.settings.thresholds,
+            stability_summary=paired_validation_summary,
+            action_effect_report=action_effect_report,
         )
         promotion_path = regression_dir / "candidate_promotion_package.json"
         _write_json(promotion_path, promotion)
@@ -455,11 +543,10 @@ class HarnessCandidateRegressionBackend:
             "baseline_source": baseline_source,
             "baseline_metrics": baseline_metrics,
             "source_baseline_metrics": source_baseline_metrics,
-            "matched_baseline_metrics": (
-                matched_baseline.metrics if matched_baseline is not None else None
-            ),
+            "matched_baseline_metrics": matched_baseline_metrics,
             "candidate_metrics": candidate_metrics,
             "acceptance_thresholds": self.settings.thresholds.to_json(),
+            "stability_summary": paired_validation_summary,
             "artifacts": {
                 "candidate_regression_config": str(run_config_path),
                 "candidate_action_overlay": str(overlay_path),
@@ -477,6 +564,10 @@ class HarnessCandidateRegressionBackend:
                     "candidate_runtime_metrics",
                     runtime_metrics_path,
                 ),
+                **_optional_artifact(
+                    "candidate_paired_validation",
+                    paired_validation_path,
+                ),
                 "candidate_variant_ranking": str(ranking_path),
                 "candidate_variant_evaluations": str(variant_evaluations_path),
                 "candidate_action_effect_report": str(action_effect_report_path),
@@ -493,6 +584,7 @@ class HarnessCandidateRegressionBackend:
                     list_value(candidate_manifest.get("candidate_artifacts"))
                 ),
                 "matched_baseline": matched_baseline_summary,
+                "paired_validation": paired_validation_summary,
                 "candidate_mode_count": len(
                     candidate_campaign_manifest.get("modes", [])
                 ),
@@ -517,13 +609,17 @@ class HarnessCandidateRegressionBackend:
         candidate_manifest: dict[str, Any],
         baseline_manifest: dict[str, Any],
         regression_dir: Path,
+        matched_dir: Path | None = None,
+        seed: int | None = None,
+        run_role: str = "matched_noop_baseline",
+        repeat_index: int | None = None,
     ) -> MatchedBaselineRun:
-        matched_dir = regression_dir / "matched_noop_baseline"
+        matched_dir = matched_dir or regression_dir / "matched_noop_baseline"
         matched_dir.mkdir(parents=True, exist_ok=True)
         matched_candidate_id = ":".join(
             [
                 str(candidate_manifest.get("candidate_id") or "candidate"),
-                "matched_noop",
+                safe_slug(run_role),
             ]
         )
         overlay = build_candidate_action_overlay(
@@ -542,19 +638,20 @@ class HarnessCandidateRegressionBackend:
             adapter_results=(),
             initial_directives=None,
             runtime_metrics=runtime_metrics_path,
+            seed=seed,
         )
         run_config_path = matched_dir / "matched_baseline_regression_config.json"
-        _write_json(
-            run_config_path,
-            candidate_regression_config_payload(
-                campaign_config,
-                action_overlay=overlay_path,
-                adapter_results=(),
-                initial_directives=None,
-                runtime_metrics=runtime_metrics_path,
-                run_role="matched_noop_baseline",
-            ),
+        config_payload = candidate_regression_config_payload(
+            campaign_config,
+            action_overlay=overlay_path,
+            adapter_results=(),
+            initial_directives=None,
+            runtime_metrics=runtime_metrics_path,
+            run_role=run_role,
         )
+        if repeat_index is not None:
+            config_payload["repeat_index"] = repeat_index
+        _write_json(run_config_path, config_payload)
         campaign_manifest = self._run_candidate_campaign(
             campaign_config,
             task=task,
@@ -590,6 +687,11 @@ class HarnessCandidateRegressionBackend:
                 "enabled": True,
                 "status": "passed",
                 "baseline_source": "matched_noop_rerun",
+                **(
+                    {"repeat_index": repeat_index}
+                    if repeat_index is not None
+                    else {}
+                ),
                 "metric_count": len(metrics),
                 "artifact_count": len(artifacts),
                 "campaign_manifest": str(campaign_config.campaign_manifest_out),
@@ -597,6 +699,231 @@ class HarnessCandidateRegressionBackend:
                     campaign_config.campaign_evaluation_out
                 ),
             },
+        )
+
+    def _run_paired_repeated_validation(
+        self,
+        *,
+        task: dict[str, Any],
+        proposal: dict[str, Any],
+        patch: dict[str, Any],
+        candidate_manifest: dict[str, Any],
+        baseline_manifest: dict[str, Any],
+        raw_actions: tuple[dict[str, Any], ...],
+        regression_dir: Path,
+        repeat0_seed: int,
+        repeat0_baseline: MatchedBaselineRun,
+        repeat0_candidate: CandidateRepeatRun,
+    ) -> dict[str, Any]:
+        evidence_dir = regression_dir / "paired_validation"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        baseline_samples: list[dict[str, float | int]] = [repeat0_baseline.metrics]
+        candidate_samples: list[dict[str, float | int]] = [repeat0_candidate.metrics]
+        runs = [
+            paired_validation_run_payload(
+                repeat_index=0,
+                seed=repeat0_seed,
+                baseline_metrics=repeat0_baseline.metrics,
+                candidate_metrics=repeat0_candidate.metrics,
+                baseline_artifacts=repeat0_baseline.artifacts,
+                candidate_artifacts=repeat0_candidate.artifacts,
+            )
+        ]
+        run_error_count = 0
+        for repeat_index in range(1, self.settings.paired_repeats):
+            seed = repeat0_seed + repeat_index * self.settings.repeat_seed_stride
+            repeat_dir = evidence_dir / f"repeat_{repeat_index:03d}"
+            try:
+                baseline = self._run_matched_noop_baseline(
+                    task=task,
+                    proposal=proposal,
+                    patch=patch,
+                    candidate_manifest=candidate_manifest,
+                    baseline_manifest=baseline_manifest,
+                    regression_dir=regression_dir,
+                    matched_dir=repeat_dir / "matched_noop_baseline",
+                    seed=seed,
+                    run_role="matched_noop_baseline_repeat",
+                    repeat_index=repeat_index,
+                )
+                candidate = self._run_combined_candidate_repeat(
+                    task=task,
+                    proposal=proposal,
+                    patch=patch,
+                    candidate_manifest=candidate_manifest,
+                    baseline_manifest=baseline_manifest,
+                    raw_actions=raw_actions,
+                    repeat_dir=repeat_dir / "candidate",
+                    seed=seed,
+                    repeat_index=repeat_index,
+                )
+            except Exception as exc:  # noqa: BLE001 - repeat errors become evidence
+                run_error_count += 1
+                runs.append(
+                    {
+                        "repeat_index": repeat_index,
+                        "seed": seed,
+                        "status": "error",
+                        "error": {
+                            "type": type(exc).__name__,
+                            "message": str(exc),
+                        },
+                    }
+                )
+                continue
+            baseline_samples.append(baseline.metrics)
+            candidate_samples.append(candidate.metrics)
+            runs.append(
+                paired_validation_run_payload(
+                    repeat_index=repeat_index,
+                    seed=seed,
+                    baseline_metrics=baseline.metrics,
+                    candidate_metrics=candidate.metrics,
+                    baseline_artifacts=baseline.artifacts,
+                    candidate_artifacts=candidate.artifacts,
+                )
+            )
+        baseline_metrics = aggregate_metric_snapshots(baseline_samples)
+        candidate_metrics = aggregate_metric_snapshots(candidate_samples)
+        metric_stability = paired_metric_stability(
+            baseline_samples,
+            candidate_samples,
+        )
+        summary = {
+            "enabled": True,
+            "status": "error" if run_error_count else "passed",
+            "requested_repeats": self.settings.paired_repeats,
+            "complete_pair_count": len(baseline_samples),
+            "run_error_count": run_error_count,
+            "seed_strategy": {
+                "base_seed": repeat0_seed,
+                "repeat_seed_stride": self.settings.repeat_seed_stride,
+            },
+            "aggregate": "mean",
+            **metric_stability["summary"],
+        }
+        payload = {
+            "schema_version": 1,
+            "kind": "libafl_bfm_fuzz.harness_candidate_paired_validation",
+            "created_at": utc_timestamp(),
+            "target": task.get("target"),
+            "run_id": task.get("run_id"),
+            "proposal_id": proposal.get("proposal_id"),
+            "candidate_id": candidate_manifest.get("candidate_id"),
+            "baseline_metrics": baseline_metrics,
+            "candidate_metrics": candidate_metrics,
+            "summary": summary,
+            "metric_stability": metric_stability["metrics"],
+            "runs": runs,
+        }
+        artifact_path = evidence_dir / "candidate_paired_validation.json"
+        _write_json(artifact_path, payload)
+        return {
+            "baseline_metrics": baseline_metrics,
+            "candidate_metrics": candidate_metrics,
+            "summary": summary,
+            "artifact_path": str(artifact_path),
+        }
+
+    def _run_combined_candidate_repeat(
+        self,
+        *,
+        task: dict[str, Any],
+        proposal: dict[str, Any],
+        patch: dict[str, Any],
+        candidate_manifest: dict[str, Any],
+        baseline_manifest: dict[str, Any],
+        raw_actions: tuple[dict[str, Any], ...],
+        repeat_dir: Path,
+        seed: int,
+        repeat_index: int,
+    ) -> CandidateRepeatRun:
+        repeat_dir.mkdir(parents=True, exist_ok=True)
+        repeat_candidate_id = ":".join(
+            [
+                str(candidate_manifest.get("candidate_id") or "candidate"),
+                f"repeat_{repeat_index:03d}",
+            ]
+        )
+        adapter_context = CandidateActionAdapterContext(
+            candidate_id=repeat_candidate_id,
+            regression_dir=repeat_dir,
+        )
+        adapter_results = adapt_candidate_actions(
+            raw_actions,
+            adapter_context,
+            adapters=self.action_adapters,
+        )
+        overlay = build_candidate_action_overlay(
+            {**candidate_manifest, "candidate_id": repeat_candidate_id},
+            adapter_results,
+        )
+        overlay["selected_variant_id"] = "combined"
+        overlay["repeat_index"] = repeat_index
+        overlay_path = repeat_dir / "candidate_action_overlay.json"
+        _write_json(overlay_path, overlay)
+        directives = build_candidate_directives(adapter_results)
+        directives_path = (
+            repeat_dir / "candidate_mutation_directives.json"
+            if directives["directives"]
+            else None
+        )
+        if directives_path is not None:
+            _write_json(directives_path, directives)
+        runtime_metrics_path = repeat_dir / "candidate_runtime_metrics.json"
+        campaign_config = self._candidate_campaign_config(
+            task=task,
+            baseline_manifest=baseline_manifest,
+            regression_dir=repeat_dir,
+            action_overlay=overlay_path,
+            adapter_results=adapter_results,
+            initial_directives=directives_path,
+            runtime_metrics=runtime_metrics_path,
+            seed=seed,
+        )
+        run_config_path = repeat_dir / "candidate_regression_config.json"
+        config_payload = candidate_regression_config_payload(
+            campaign_config,
+            action_overlay=overlay_path,
+            adapter_results=adapter_results,
+            initial_directives=directives_path,
+            runtime_metrics=runtime_metrics_path,
+            run_role="candidate_repeat",
+        )
+        config_payload["repeat_index"] = repeat_index
+        _write_json(run_config_path, config_payload)
+        campaign_manifest = self._run_candidate_campaign(
+            campaign_config,
+            task=task,
+            proposal=proposal,
+            patch=patch,
+        )
+        campaign_evaluation = read_json_object(campaign_config.campaign_evaluation_out)
+        metrics = candidate_metric_snapshot(
+            campaign_manifest,
+            campaign_evaluation,
+            cwd=_campaign_cwd(campaign_manifest, campaign_config.cwd),
+        )
+        metrics.update(adapter_metric_snapshot(adapter_results))
+        metrics.update(runtime_metric_snapshot(runtime_metrics_path))
+        artifacts = {
+            "candidate_regression_config": str(run_config_path),
+            "candidate_action_overlay": str(overlay_path),
+            **adapter_artifacts(adapter_results),
+            **_optional_artifact("candidate_mutation_directives", directives_path),
+            **_optional_existing_artifact(
+                "candidate_runtime_metrics",
+                runtime_metrics_path,
+            ),
+            "candidate_campaign_manifest": str(campaign_config.campaign_manifest_out),
+            "candidate_campaign_evaluation": str(
+                campaign_config.campaign_evaluation_out
+            ),
+        }
+        return CandidateRepeatRun(
+            metrics=metrics,
+            artifacts=artifacts,
+            evaluation=campaign_evaluation,
         )
 
     def _candidate_campaign_config(
@@ -609,6 +936,7 @@ class HarnessCandidateRegressionBackend:
         adapter_results: tuple[CandidateActionAdapterResult, ...],
         initial_directives: Path | None,
         runtime_metrics: Path,
+        seed: int | None = None,
     ) -> CampaignConfig:
         baseline_config = mapping(baseline_manifest.get("config"))
         baseline_artifacts = mapping(baseline_manifest.get("artifacts"))
@@ -658,7 +986,12 @@ class HarnessCandidateRegressionBackend:
                 "max_seeds",
                 32,
             ),
-            seed=_setting_int(self.settings.seed, baseline_config, "seed", 1),
+            seed=_setting_int(
+                seed if seed is not None else self.settings.seed,
+                baseline_config,
+                "seed",
+                1,
+            ),
             cargo=str(baseline_config.get("cargo") or "cargo"),
             make=str(baseline_config.get("make") or "make"),
             verilog_sources=_optional_str(baseline_config.get("verilog_sources")),
@@ -1275,6 +1608,167 @@ def adapter_metric_snapshot(
     return metrics
 
 
+def paired_validation_run_payload(
+    *,
+    repeat_index: int,
+    seed: int,
+    baseline_metrics: dict[str, float | int],
+    candidate_metrics: dict[str, float | int],
+    baseline_artifacts: dict[str, str],
+    candidate_artifacts: dict[str, str],
+) -> dict[str, Any]:
+    return {
+        "repeat_index": repeat_index,
+        "seed": seed,
+        "status": "passed",
+        "baseline_metrics": baseline_metrics,
+        "candidate_metrics": candidate_metrics,
+        "metric_delta_summary": metric_change_summary(
+            baseline_metrics,
+            candidate_metrics,
+        ),
+        "artifacts": {
+            "baseline": baseline_artifacts,
+            "candidate": candidate_artifacts,
+        },
+    }
+
+
+def aggregate_metric_snapshots(
+    samples: list[dict[str, float | int]] | tuple[dict[str, float | int], ...],
+) -> dict[str, float | int]:
+    metric_names = sorted(
+        {
+            metric
+            for sample in samples
+            for metric, value in sample.items()
+            if number_value(value) is not None
+        }
+    )
+    return {
+        metric: aggregate_metric_value(
+            [
+                number
+                for sample in samples
+                if (number := number_value(sample.get(metric))) is not None
+            ]
+        )
+        for metric in metric_names
+    }
+
+
+def aggregate_metric_value(values: list[float | int]) -> float | int:
+    if not values:
+        return 0
+    mean = sum(values) / len(values)
+    if all(isinstance(value, int) for value in values) and mean.is_integer():
+        return int(mean)
+    return mean
+
+
+def paired_metric_stability(
+    baseline_samples: list[dict[str, float | int]],
+    candidate_samples: list[dict[str, float | int]],
+) -> dict[str, Any]:
+    metrics = []
+    flaky_metric_count = 0
+    gateable_metric_count = 0
+    for metric in sorted(
+        {
+            key
+            for sample in [*baseline_samples, *candidate_samples]
+            for key, value in sample.items()
+            if number_value(value) is not None
+        }
+    ):
+        pair_deltas: list[float | int] = []
+        directions: list[str] = []
+        baseline_values = [
+            number
+            for sample in baseline_samples
+            if (number := number_value(sample.get(metric))) is not None
+        ]
+        candidate_values = [
+            number
+            for sample in candidate_samples
+            if (number := number_value(sample.get(metric))) is not None
+        ]
+        for baseline, candidate in zip(baseline_samples, candidate_samples):
+            baseline_value = number_value(baseline.get(metric))
+            candidate_value = number_value(candidate.get(metric))
+            if baseline_value is None or candidate_value is None:
+                continue
+            delta = candidate_value - baseline_value
+            pair_deltas.append(delta)
+            directions.append(metric_direction(metric, delta))
+        gates_acceptance = metric_gates_acceptance(metric)
+        direction_set = sorted(set(directions))
+        flaky = gates_acceptance and len(direction_set) > 1
+        if gates_acceptance:
+            gateable_metric_count += 1
+        if flaky:
+            flaky_metric_count += 1
+        metrics.append(
+            {
+                "metric": metric,
+                "role": "quality_gate" if gates_acceptance else "informational",
+                "gates_acceptance": gates_acceptance,
+                "sample_count": len(pair_deltas),
+                "baseline_mean": aggregate_metric_value(baseline_values)
+                if baseline_values
+                else None,
+                "candidate_mean": aggregate_metric_value(candidate_values)
+                if candidate_values
+                else None,
+                "baseline_worst": worst_metric_value(metric, baseline_values),
+                "candidate_worst": worst_metric_value(metric, candidate_values),
+                "baseline_variance": metric_variance(baseline_values),
+                "candidate_variance": metric_variance(candidate_values),
+                "paired_delta_mean": aggregate_metric_value(pair_deltas)
+                if pair_deltas
+                else None,
+                "paired_delta_worst": worst_paired_delta(metric, pair_deltas),
+                "paired_directions": direction_set,
+                "flaky": flaky,
+            }
+        )
+    return {
+        "summary": {
+            "metric_count": len(metrics),
+            "gateable_metric_count": gateable_metric_count,
+            "flaky_metric_count": flaky_metric_count,
+        },
+        "metrics": metrics,
+    }
+
+
+def metric_variance(values: list[float | int]) -> float:
+    if not values:
+        return 0.0
+    mean = sum(values) / len(values)
+    return sum((value - mean) ** 2 for value in values) / len(values)
+
+
+def worst_metric_value(metric: str, values: list[float | int]) -> float | int | None:
+    if not values:
+        return None
+    if metric_direction(metric, 1) == "improved":
+        return min(values)
+    if metric_direction(metric, 1) == "regressed":
+        return max(values)
+    return max(values)
+
+
+def worst_paired_delta(metric: str, deltas: list[float | int]) -> float | int | None:
+    if not deltas:
+        return None
+    if metric_direction(metric, 1) == "improved":
+        return min(deltas)
+    if metric_direction(metric, 1) == "regressed":
+        return max(deltas)
+    return max(deltas, key=lambda value: abs(value))
+
+
 def candidate_regression_config_payload(
     config: CampaignConfig,
     *,
@@ -1382,10 +1876,12 @@ def combined_variant_evaluation(
     *,
     overlay: dict[str, Any],
     metrics: dict[str, float | int],
+    baseline_metrics: dict[str, float | int] | None = None,
     campaign_config: CampaignConfig,
     run_config_path: Path,
     runtime_metrics_path: Path,
     adapter_results: tuple[CandidateActionAdapterResult, ...],
+    extra_artifacts: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     variant = next(
         (
@@ -1399,7 +1895,7 @@ def combined_variant_evaluation(
         variant=variant,
         status="passed",
         metrics=metrics,
-        baseline_metrics={},
+        baseline_metrics=baseline_metrics or {},
         artifacts={
             "candidate_regression_config": str(run_config_path),
             "candidate_runtime_metrics": str(runtime_metrics_path),
@@ -1407,6 +1903,7 @@ def combined_variant_evaluation(
             "candidate_campaign_evaluation": str(
                 campaign_config.campaign_evaluation_out
             ),
+            **(extra_artifacts or {}),
         },
         adapter_results=adapter_results,
     )
@@ -1484,11 +1981,14 @@ def build_candidate_promotion_package(
     baseline_metrics: dict[str, float | int],
     ranking: dict[str, Any],
     thresholds: CandidateAcceptanceThresholds,
+    stability_summary: dict[str, Any] | None = None,
+    action_effect_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     summary = metric_threshold_summary(
         baseline_metrics,
         candidate_metrics,
         thresholds,
+        stability_summary=stability_summary,
     )
     promotion_status = "ready_for_review" if summary["passes_thresholds"] else "hold"
     return {
@@ -1502,6 +2002,13 @@ def build_candidate_promotion_package(
         "promotion_status": promotion_status,
         "top_variant": ranking.get("top_variant"),
         "threshold_summary": summary,
+        "stability_summary": stability_summary or {},
+        "action_effect_summary": mapping(action_effect_report).get("summary")
+        if action_effect_report
+        else {},
+        "action_effects": list_value(mapping(action_effect_report).get("actions"))
+        if action_effect_report
+        else [],
         "evidence_refs": list_value(proposal.get("evidence_refs")),
         "safety": {
             "mainline_modified": False,
@@ -1558,6 +2065,8 @@ def build_candidate_action_effect_report(
         for action in list_value(evaluation.get("actions"))
         if isinstance(action, dict) and action.get("action_id") is not None
     }
+    aggregate_actions = aggregate_action_effects(variants)
+    effect_counts = action_effect_status_counts(aggregate_actions)
     return {
         "schema_version": 1,
         "kind": "libafl_bfm_fuzz.harness_candidate_action_effect_report",
@@ -1567,11 +2076,13 @@ def build_candidate_action_effect_report(
         "proposal_id": proposal.get("proposal_id"),
         "candidate_id": candidate_manifest.get("candidate_id"),
         "variants": variants,
+        "actions": aggregate_actions,
         "summary": {
             "variant_count": len(variants),
             "action_count": len(action_ids),
             "runtime_action_count": len(runtime_action_ids),
             "consumed_action_count": len(consumed_action_ids),
+            **effect_counts,
         },
     }
 
@@ -1602,6 +2113,10 @@ def build_variant_action_effects(
             metrics = dict(section_metrics.get(action_type, {}))
         is_runtime_action = action_type in RUNTIME_ACTION_TYPES
         consumed = bool(metrics) if is_runtime_action else False
+        delta_summary = metric_change_summary(
+            baseline_metrics,
+            numeric_variant_metrics(evaluation),
+        )
         results.append(
             {
                 "action_id": action_id,
@@ -1615,15 +2130,103 @@ def build_variant_action_effects(
                     if is_runtime_action
                     else "not_runtime_action"
                 ),
-                "runtime_metrics": metrics,
-                "variant_metric_delta_summary": metric_change_summary(
-                    baseline_metrics,
-                    numeric_variant_metrics(evaluation),
+                "effect_status": classify_action_effect(
+                    is_runtime_action=is_runtime_action,
+                    consumed=consumed,
+                    delta_summary=delta_summary,
                 ),
+                "runtime_metrics": metrics,
+                "variant_metric_delta_summary": delta_summary,
                 "evidence_refs": list_value(action.get("evidence_refs")),
             }
         )
     return results
+
+
+def classify_action_effect(
+    *,
+    is_runtime_action: bool,
+    consumed: bool,
+    delta_summary: dict[str, Any],
+) -> str:
+    if is_runtime_action and not consumed:
+        return "not_consumed"
+    if (
+        int(number_value(delta_summary.get("gateable_regressed_metric_count")) or 0)
+        > 0
+    ):
+        return "regressed"
+    if (
+        int(number_value(delta_summary.get("gateable_improved_metric_count")) or 0)
+        > 0
+    ):
+        return "improved"
+    return "neutral"
+
+
+def aggregate_action_effects(variants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_action: dict[str, dict[str, Any]] = {}
+    for variant in variants:
+        variant_id = str(variant.get("variant_id") or "")
+        for action in list_value(variant.get("actions")):
+            if not isinstance(action, dict):
+                continue
+            action_id = str(action.get("action_id") or "")
+            if not action_id:
+                continue
+            entry = by_action.setdefault(
+                action_id,
+                {
+                    "action_id": action_id,
+                    "action_type": action.get("action_type"),
+                    "is_runtime_action": action.get("is_runtime_action"),
+                    "consumed": False,
+                    "effect_status": "neutral",
+                    "supporting_variants": [],
+                    "evidence_refs": list_value(action.get("evidence_refs")),
+                },
+            )
+            entry["consumed"] = bool(entry.get("consumed") or action.get("consumed"))
+            entry["effect_status"] = merge_action_effect_status(
+                str(entry.get("effect_status") or "neutral"),
+                str(action.get("effect_status") or "neutral"),
+            )
+            entry["supporting_variants"].append(
+                {
+                    "variant_id": variant_id,
+                    "status": action.get("effect_status"),
+                    "consumed": action.get("consumed"),
+                    "metric_delta_summary": action.get(
+                        "variant_metric_delta_summary"
+                    ),
+                }
+            )
+    return sorted(by_action.values(), key=lambda item: str(item.get("action_id")))
+
+
+def merge_action_effect_status(current: str, new: str) -> str:
+    priority = {
+        "regressed": 4,
+        "improved": 3,
+        "neutral": 2,
+        "not_consumed": 1,
+    }
+    return new if priority.get(new, 0) > priority.get(current, 0) else current
+
+
+def action_effect_status_counts(actions: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {
+        "improved_action_count": 0,
+        "neutral_action_count": 0,
+        "regressed_action_count": 0,
+        "not_consumed_action_count": 0,
+    }
+    for action in actions:
+        status = str(action.get("effect_status") or "neutral")
+        key = f"{status}_action_count"
+        if key in counts:
+            counts[key] += 1
+    return counts
 
 
 def runtime_action_metric_map(
@@ -1669,6 +2272,8 @@ def metric_threshold_summary(
     baseline_metrics: dict[str, float | int],
     candidate_metrics: dict[str, float | int],
     thresholds: CandidateAcceptanceThresholds,
+    *,
+    stability_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     improved = 0
     regressed = 0
@@ -1697,6 +2302,9 @@ def metric_threshold_summary(
                 informational_changed += 1
         elif direction == "unchanged" and gates_acceptance:
             gateable_unchanged += 1
+    flaky_metric_count = int(
+        number_value(mapping(stability_summary).get("flaky_metric_count")) or 0
+    )
     return {
         "improved_metric_count": improved,
         "regressed_metric_count": regressed,
@@ -1707,9 +2315,12 @@ def metric_threshold_summary(
         "informational_changed_metric_count": informational_changed,
         "max_regressed_metric_count": thresholds.max_regressed_metric_count,
         "min_improved_metric_count": thresholds.min_improved_metric_count,
+        "flaky_metric_count": flaky_metric_count,
+        "max_flaky_metric_count": thresholds.max_flaky_metric_count,
         "passes_thresholds": (
             gateable_regressed <= thresholds.max_regressed_metric_count
             and gateable_improved >= thresholds.min_improved_metric_count
+            and flaky_metric_count <= thresholds.max_flaky_metric_count
         ),
     }
 

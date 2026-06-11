@@ -624,6 +624,14 @@ def test_feedback_campaign_cli_builds_real_candidate_regression_backend() -> Non
                 "0",
                 "--candidate-max-variant-regressions",
                 "2",
+                "--candidate-attribution-top-k",
+                "2",
+                "--candidate-paired-repeats",
+                "2",
+                "--candidate-repeat-seed-stride",
+                "5",
+                "--candidate-max-flaky-metrics",
+                "1",
                 "--no-candidate-round-evaluation",
             ]
         )
@@ -643,9 +651,13 @@ def test_feedback_campaign_cli_builds_real_candidate_regression_backend() -> Non
     assert settings.iters == 0
     assert settings.max_seeds == 0
     assert settings.max_variant_regressions == 2
+    assert settings.attribution_top_k == 2
+    assert settings.paired_repeats == 2
+    assert settings.repeat_seed_stride == 5
     assert settings.round_evaluation is False
     assert settings.thresholds.min_improved_metric_count == 0
     assert settings.thresholds.max_regressed_metric_count == 0
+    assert settings.thresholds.max_flaky_metric_count == 1
 
 
 def test_campaign_orchestrator_can_insert_custom_campaign_stage() -> None:

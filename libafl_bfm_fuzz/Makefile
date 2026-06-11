@@ -308,6 +308,9 @@ feedback-campaign: require-rtl
 		$(if $(CANDIDATE_MAX_SEEDS),--candidate-max-seeds $(CANDIDATE_MAX_SEEDS),) \
 		$(if $(CANDIDATE_SEED),--candidate-seed $(CANDIDATE_SEED),) \
 		$(if $(CANDIDATE_MAX_VARIANT_REGRESSIONS),--candidate-max-variant-regressions $(CANDIDATE_MAX_VARIANT_REGRESSIONS),) \
+		$(if $(CANDIDATE_ATTRIBUTION_TOP_K),--candidate-attribution-top-k $(CANDIDATE_ATTRIBUTION_TOP_K),) \
+		$(if $(CANDIDATE_PAIRED_REPEATS),--candidate-paired-repeats $(CANDIDATE_PAIRED_REPEATS),) \
+		$(if $(CANDIDATE_REPEAT_SEED_STRIDE),--candidate-repeat-seed-stride $(CANDIDATE_REPEAT_SEED_STRIDE),) \
 		$(if $(CANDIDATE_RUN_PLAN_PROFILE),--candidate-run-plan-profile $(CANDIDATE_RUN_PLAN_PROFILE),) \
 		$(if $(CANDIDATE_CAMPAIGN_PLAN_PROFILE),--candidate-campaign-plan-profile $(CANDIDATE_CAMPAIGN_PLAN_PROFILE),) \
 		$(if $(filter 1,$(CANDIDATE_ROUND_EVALUATION)),--candidate-round-evaluation,) \
@@ -316,6 +319,7 @@ feedback-campaign: require-rtl
 		$(if $(filter 0,$(CANDIDATE_MATCHED_BASELINE)),--no-candidate-matched-baseline,) \
 		$(if $(CANDIDATE_MAX_REGRESSED_METRICS),--candidate-max-regressed-metrics $(CANDIDATE_MAX_REGRESSED_METRICS),) \
 		$(if $(CANDIDATE_MIN_IMPROVED_METRICS),--candidate-min-improved-metrics $(CANDIDATE_MIN_IMPROVED_METRICS),) \
+		$(if $(CANDIDATE_MAX_FLAKY_METRICS),--candidate-max-flaky-metrics $(CANDIDATE_MAX_FLAKY_METRICS),) \
 		$(if $(CANDIDATE_ACCEPTED_STATUSES),--candidate-accepted-statuses $(CANDIDATE_ACCEPTED_STATUSES),) \
 		--iters $(LIBAFL_ITERS) \
 		--max-seeds $(LIBAFL_MAX_SEEDS) \
@@ -337,6 +341,10 @@ real-candidate-feedback-campaign: CAMPAIGN_PLAN_PROFILE=campaign_with_evaluation
 real-candidate-feedback-campaign: CAMPAIGN_EVALUATION_ENABLE=1
 real-candidate-feedback-campaign: HARNESS_CANDIDATE_BACKEND=real
 real-candidate-feedback-campaign: CANDIDATE_MATCHED_BASELINE=1
+real-candidate-feedback-campaign: CANDIDATE_PAIRED_REPEATS=3
+real-candidate-feedback-campaign: CANDIDATE_REPEAT_SEED_STRIDE=1
+real-candidate-feedback-campaign: CANDIDATE_ATTRIBUTION_TOP_K=3
+real-candidate-feedback-campaign: CANDIDATE_MAX_FLAKY_METRICS=0
 real-candidate-feedback-campaign: CANDIDATE_MIN_IMPROVED_METRICS=0
 real-candidate-feedback-campaign: feedback-campaign
 
