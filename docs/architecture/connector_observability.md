@@ -841,6 +841,18 @@ uv run make -C libafl_bfm_fuzz \
 不会运行真实回归，因此 proposed action 会停在 review/validation 框架内；接入真实
 candidate backend 后，final decision 才可能进入 `accepted_for_review`。
 
+`harness_optimization_metric_delta` 会同时保留原始 metric comparison 和接受门禁视图。
+`failed_record_count`、`hanging_span_count`、`orphan_span_count`、`orphan_final_count`、
+`missing_span_id_count`、`malformed_event_line_count`、scoreboard failure 计数、
+`uncovered_line_count`、`covered_line_count`、`coverage_percent` 属于 `quality_gate` 指标，会计入
+`gateable_improved_metric_count` / `gateable_regressed_metric_count`，并参与
+`max_regressed_metric_count`、`min_improved_metric_count` 判断。`directive_count`、
+`case_count`、`record_count`、`round_count` 和 action/runtime 计数属于
+informational 指标：它们仍写入 comparison，用于解释成本、规模或诊断行为变化，
+但不会单独导致 candidate 被接受或拒绝。例如 coverage feedback tuning 让
+`directive_count` 下降时，报告会记录 `direction=changed` 和
+`gates_acceptance=false`，而不是把更少 directive 判为质量回归。
+
 真实 candidate regression backend 需要从 Python 侧显式注入：
 
 ```python

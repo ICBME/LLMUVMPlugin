@@ -217,7 +217,10 @@
    `mutation_directive_update` 转换成 sandbox 初始 directives，把其它安全 action 物化到
    action overlay，然后复用 campaign/run 编排执行 candidate campaign；candidate evaluation
    输出 baseline/candidate metrics 和 acceptance thresholds，final decision 按
-   `max_regressed_metric_count`、`min_improved_metric_count` 和 accepted status 阈值判断。
+   gateable metric 的 `max_regressed_metric_count`、`min_improved_metric_count`
+   和 accepted status 阈值判断。质量门禁指标包括 failure、trace health 和 coverage
+   指标；`directive_count`、`case_count`、`record_count` 与 runtime/action 计数保留为
+   informational comparison，不再因数量下降或上升单独触发 candidate rejection。
    Harness optimization 第四阶段已完成：safe action 物化由 action adapter 层负责，
    默认 adapter 支持 `replay_probe`、`scoreboard_check`、`coverage_feedback_tuning`、
    `stimulus_generation_hint` 和 `documentation_note` 的 sandbox config 输出；candidate

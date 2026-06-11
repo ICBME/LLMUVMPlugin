@@ -46,15 +46,26 @@ SAFE_SANDBOX_ACTION_TYPES = (
 LOWER_IS_BETTER_METRICS = {
     "failed_record_count",
     "hanging_span_count",
+    "malformed_event_line_count",
+    "missing_span_id_count",
+    "orphan_final_count",
     "orphan_span_count",
+    "scoreboard_check_enforced_failure_count",
+    "scoreboard_check_failed_count",
     "uncovered_line_count",
 }
 
 HIGHER_IS_BETTER_METRICS = {
     "covered_line_count",
     "coverage_percent",
+}
+
+INFORMATIONAL_METRICS = {
     "case_count",
     "directive_count",
+    "llm_sample_count",
+    "record_count",
+    "round_count",
 }
 
 SCOREBOARD_CHECK_MODES = {
@@ -1089,10 +1100,14 @@ def build_harness_optimization_metric_delta(
     for name in sorted(set(baseline) | set(candidate)):
         base_value = baseline.get(name)
         candidate_value = candidate.get(name)
+        role = metric_role(name)
+        gates_acceptance = metric_gates_acceptance(name)
         if base_value is None or candidate_value is None:
             comparisons.append(
                 {
                     "metric": name,
+                    "role": role,
+                    "gates_acceptance": gates_acceptance,
                     "baseline": base_value,
                     "candidate": candidate_value,
                     "delta": None,
@@ -1104,6 +1119,8 @@ def build_harness_optimization_metric_delta(
         comparisons.append(
             {
                 "metric": name,
+                "role": role,
+                "gates_acceptance": gates_acceptance,
                 "baseline": base_value,
                 "candidate": candidate_value,
                 "delta": delta,
@@ -1113,6 +1130,26 @@ def build_harness_optimization_metric_delta(
     improved = sum(1 for item in comparisons if item["direction"] == "improved")
     regressed = sum(1 for item in comparisons if item["direction"] == "regressed")
     unchanged = sum(1 for item in comparisons if item["direction"] == "unchanged")
+    gateable_improved = sum(
+        1
+        for item in comparisons
+        if item["gates_acceptance"] and item["direction"] == "improved"
+    )
+    gateable_regressed = sum(
+        1
+        for item in comparisons
+        if item["gates_acceptance"] and item["direction"] == "regressed"
+    )
+    gateable_unchanged = sum(
+        1
+        for item in comparisons
+        if item["gates_acceptance"] and item["direction"] == "unchanged"
+    )
+    informational_changed = sum(
+        1
+        for item in comparisons
+        if not item["gates_acceptance"] and item["direction"] == "changed"
+    )
     return {
         "schema_version": 1,
         "kind": METRIC_DELTA_KIND,
@@ -1126,6 +1163,16 @@ def build_harness_optimization_metric_delta(
             "improved_metric_count": improved,
             "regressed_metric_count": regressed,
             "unchanged_metric_count": unchanged,
+            "gateable_metric_count": sum(
+                1 for item in comparisons if item["gates_acceptance"]
+            ),
+            "gateable_improved_metric_count": gateable_improved,
+            "gateable_regressed_metric_count": gateable_regressed,
+            "gateable_unchanged_metric_count": gateable_unchanged,
+            "informational_metric_count": sum(
+                1 for item in comparisons if not item["gates_acceptance"]
+            ),
+            "informational_changed_metric_count": informational_changed,
             "not_comparable_metric_count": sum(
                 1 for item in comparisons if item["direction"] == "not_comparable"
             ),
@@ -1146,8 +1193,16 @@ def build_harness_optimization_final_decision(
     patch_summary = mapping(patch.get("summary"))
     candidate_status = candidate_evaluation.get("status")
     thresholds = final_decision_thresholds(candidate_evaluation, metric_delta)
-    regressed_metric_count = int_value(delta_summary.get("regressed_metric_count"))
-    improved_metric_count = int_value(delta_summary.get("improved_metric_count"))
+    regressed_metric_count = summary_metric_count(
+        delta_summary,
+        "gateable_regressed_metric_count",
+        "regressed_metric_count",
+    )
+    improved_metric_count = summary_metric_count(
+        delta_summary,
+        "gateable_improved_metric_count",
+        "improved_metric_count",
+    )
     if schema_decision.get("decision") != "accepted":
         decision = "rejected"
         reason = "schema_decision_rejected"
@@ -1202,6 +1257,11 @@ def build_harness_optimization_final_decision(
             ),
             "regressed_metric_count": int_value(
                 delta_summary.get("regressed_metric_count")
+            ),
+            "gateable_improved_metric_count": improved_metric_count,
+            "gateable_regressed_metric_count": regressed_metric_count,
+            "informational_changed_metric_count": int_value(
+                delta_summary.get("informational_changed_metric_count")
             ),
             "acceptance_thresholds": thresholds,
         },
@@ -1692,6 +1752,28 @@ def metric_direction(name: str, delta: float | int) -> str:
     if name in HIGHER_IS_BETTER_METRICS:
         return "improved" if delta > 0 else "regressed"
     return "changed"
+
+
+def metric_gates_acceptance(name: str) -> bool:
+    return name in LOWER_IS_BETTER_METRICS or name in HIGHER_IS_BETTER_METRICS
+
+
+def metric_role(name: str) -> str:
+    if metric_gates_acceptance(name):
+        return "quality_gate"
+    if name in INFORMATIONAL_METRICS:
+        return "informational"
+    return "informational"
+
+
+def summary_metric_count(
+    summary: dict[str, Any],
+    preferred_key: str,
+    fallback_key: str,
+) -> int:
+    if preferred_key in summary:
+        return int_value(summary.get(preferred_key))
+    return int_value(summary.get(fallback_key))
 
 
 def number_value(value: Any) -> float | int | None:

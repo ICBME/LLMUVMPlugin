@@ -35,6 +35,8 @@ from fuzz_pipeline import (  # noqa: E402
     HarnessOptimizationAdapter,
     NoopHarnessOptimizerBackend,
     build_harness_optimization_decision,
+    build_harness_optimization_final_decision,
+    build_harness_optimization_metric_delta,
     harness_optimization_paths,
 )
 from fuzz_pipeline.coverage_feedback import (  # noqa: E402
@@ -1087,6 +1089,68 @@ def test_harness_optimization_sandbox_apply_validates_candidate() -> None:
     assert final_decision["kind"] == FINAL_DECISION_KIND
     assert final_decision["decision"] == "accepted_for_review"
     assert final_decision["application_status"] == "not_applied"
+
+
+def test_harness_metric_delta_treats_directive_count_as_informational() -> None:
+    task = {"target": "demo", "run_id": "run-1"}
+    proposal = {
+        "schema_version": 1,
+        "kind": PROPOSAL_KIND,
+        "proposal_id": "proposal-directive-trim",
+        "status": "proposed",
+    }
+    schema_decision = {"decision": "accepted"}
+    patch = {
+        "status": "applied",
+        "candidate_id": "run-1_proposal-directive-trim",
+        "sandbox_dir": "/tmp/candidate",
+        "summary": {"applied_action_count": 1},
+    }
+    candidate_evaluation = {
+        "status": "passed",
+        "baseline_metrics": {
+            "failed_record_count": 0,
+            "uncovered_line_count": 34,
+            "directive_count": 4,
+        },
+        "candidate_metrics": {
+            "failed_record_count": 0,
+            "uncovered_line_count": 34,
+            "directive_count": 1,
+        },
+        "acceptance_thresholds": {
+            "max_regressed_metric_count": 0,
+            "min_improved_metric_count": 0,
+            "accepted_candidate_statuses": ["passed"],
+        },
+    }
+
+    metric_delta = build_harness_optimization_metric_delta(
+        task=task,
+        candidate_evaluation=candidate_evaluation,
+    )
+    final_decision = build_harness_optimization_final_decision(
+        task=task,
+        proposal=proposal,
+        schema_decision=schema_decision,
+        patch=patch,
+        candidate_evaluation=candidate_evaluation,
+        metric_delta=metric_delta,
+    )
+    directive_comparison = next(
+        item
+        for item in metric_delta["comparisons"]
+        if item["metric"] == "directive_count"
+    )
+
+    assert directive_comparison["direction"] == "changed"
+    assert directive_comparison["role"] == "informational"
+    assert directive_comparison["gates_acceptance"] is False
+    assert metric_delta["summary"]["regressed_metric_count"] == 0
+    assert metric_delta["summary"]["gateable_regressed_metric_count"] == 0
+    assert metric_delta["summary"]["informational_changed_metric_count"] == 1
+    assert final_decision["decision"] == "accepted_for_review"
+    assert final_decision["summary"]["gateable_regressed_metric_count"] == 0
 
 
 def test_harness_optimization_sandbox_skips_unsafe_action_type() -> None:

@@ -14,6 +14,7 @@ from .harness_optimization import (
     baseline_metric_snapshot,
     list_value,
     metric_direction,
+    metric_gates_acceptance,
     number_value,
     safe_slug,
     utc_timestamp,
@@ -1477,26 +1478,43 @@ def metric_threshold_summary(
     improved = 0
     regressed = 0
     changed = 0
+    gateable_improved = 0
+    gateable_regressed = 0
+    gateable_unchanged = 0
+    informational_changed = 0
     for metric, baseline in baseline_metrics.items():
         if metric not in candidate_metrics:
             continue
         delta = candidate_metrics[metric] - baseline
         direction = metric_direction(metric, delta)
+        gates_acceptance = metric_gates_acceptance(metric)
         if direction == "improved":
             improved += 1
+            if gates_acceptance:
+                gateable_improved += 1
         elif direction == "regressed":
             regressed += 1
+            if gates_acceptance:
+                gateable_regressed += 1
         elif direction == "changed":
             changed += 1
+            if not gates_acceptance:
+                informational_changed += 1
+        elif direction == "unchanged" and gates_acceptance:
+            gateable_unchanged += 1
     return {
         "improved_metric_count": improved,
         "regressed_metric_count": regressed,
         "changed_metric_count": changed,
+        "gateable_improved_metric_count": gateable_improved,
+        "gateable_regressed_metric_count": gateable_regressed,
+        "gateable_unchanged_metric_count": gateable_unchanged,
+        "informational_changed_metric_count": informational_changed,
         "max_regressed_metric_count": thresholds.max_regressed_metric_count,
         "min_improved_metric_count": thresholds.min_improved_metric_count,
         "passes_thresholds": (
-            regressed <= thresholds.max_regressed_metric_count
-            and improved >= thresholds.min_improved_metric_count
+            gateable_regressed <= thresholds.max_regressed_metric_count
+            and gateable_improved >= thresholds.min_improved_metric_count
         ),
     }
 
@@ -1508,6 +1526,10 @@ def metric_change_summary(
     improved = 0
     regressed = 0
     changed = 0
+    gateable_improved = 0
+    gateable_regressed = 0
+    gateable_unchanged = 0
+    informational_changed = 0
     comparable = 0
     for metric, baseline in baseline_metrics.items():
         if metric not in candidate_metrics:
@@ -1515,17 +1537,30 @@ def metric_change_summary(
         comparable += 1
         delta = candidate_metrics[metric] - baseline
         direction = metric_direction(metric, delta)
+        gates_acceptance = metric_gates_acceptance(metric)
         if direction == "improved":
             improved += 1
+            if gates_acceptance:
+                gateable_improved += 1
         elif direction == "regressed":
             regressed += 1
+            if gates_acceptance:
+                gateable_regressed += 1
         elif direction == "changed":
             changed += 1
+            if not gates_acceptance:
+                informational_changed += 1
+        elif direction == "unchanged" and gates_acceptance:
+            gateable_unchanged += 1
     return {
         "comparable_metric_count": comparable,
         "improved_metric_count": improved,
         "regressed_metric_count": regressed,
         "changed_metric_count": changed,
+        "gateable_improved_metric_count": gateable_improved,
+        "gateable_regressed_metric_count": gateable_regressed,
+        "gateable_unchanged_metric_count": gateable_unchanged,
+        "informational_changed_metric_count": informational_changed,
     }
 
 
