@@ -9,7 +9,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "libafl_bfm_fuzz" / "py"))
 
 from fuzz_pipeline import (  # noqa: E402
+    CANDIDATE_EVALUATION_KIND,
+    CANDIDATE_MANIFEST_KIND,
     DECISION_KIND,
+    FINAL_DECISION_KIND,
+    METRIC_DELTA_KIND,
+    PATCH_KIND,
     PROPOSAL_KIND,
     TASK_KIND,
     HarnessOptimizationAdapter,
@@ -121,6 +126,209 @@ def test_harness_optimization_backend_error_becomes_rejected_decision() -> None:
     assert proposal["error"]["type"] == "RuntimeError"
     assert decision["decision"] == "rejected"
     assert decision["validation"]["errors"][0]["path"] == "status"
+
+
+class PassingCandidateEvaluationBackend:
+    def run(
+        self,
+        task: dict,
+        proposal: dict,
+        patch: dict,
+        candidate_manifest: dict,
+    ) -> dict:
+        return {
+            "schema_version": 1,
+            "kind": CANDIDATE_EVALUATION_KIND,
+            "target": task.get("target"),
+            "run_id": task.get("run_id"),
+            "proposal_id": proposal.get("proposal_id"),
+            "candidate_id": candidate_manifest.get("candidate_id"),
+            "status": "passed",
+            "baseline_metrics": {
+                "failed_record_count": 1,
+                "hanging_span_count": 0,
+            },
+            "candidate_metrics": {
+                "failed_record_count": 0,
+                "hanging_span_count": 0,
+            },
+        }
+
+
+class InvalidCandidateEvaluationBackend:
+    def run(
+        self,
+        task: dict,
+        proposal: dict,
+        patch: dict,
+        candidate_manifest: dict,
+    ) -> str:
+        return "invalid"
+
+
+def test_harness_optimization_sandbox_apply_validates_candidate() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        campaign_evaluation, campaign_manifest, manifest_path = _source_payloads(root)
+        evaluation_path = root / "campaign_evaluation.json"
+        paths = harness_optimization_paths(evaluation_path)
+        adapter = HarnessOptimizationAdapter(
+            target="demo",
+            paths=paths,
+            campaign_evaluation_path=evaluation_path,
+            campaign_manifest_path=manifest_path,
+            cwd=root,
+            candidate_evaluation_backend=PassingCandidateEvaluationBackend(),
+        )
+        task = adapter.run_task(campaign_evaluation, campaign_manifest)
+        proposal = {
+            "schema_version": 1,
+            "kind": PROPOSAL_KIND,
+            "proposal_id": "proposal-safe",
+            "status": "proposed",
+            "actions": [
+                {
+                    "action_id": "scoreboard-1",
+                    "action_type": "scoreboard_check",
+                    "payload": {"check": "case result must match reference"},
+                    "evidence_refs": [{"span_id": "span-dut"}],
+                }
+            ],
+            "evidence_refs": [{"span_id": "span-dut"}],
+        }
+        decision = adapter.run_decision(task, proposal)
+
+        apply_result = adapter.run_apply(task, proposal, decision)
+        patch = apply_result["harness_optimization_patch"]
+        candidate_manifest = apply_result["harness_optimization_candidate_manifest"]
+        candidate_evaluation = adapter.run_candidate_evaluation(
+            task,
+            proposal,
+            patch,
+            candidate_manifest,
+        )
+        metric_delta = adapter.run_metric_delta(task, candidate_evaluation)
+        final_decision = adapter.run_final_decision(
+            task,
+            proposal,
+            decision,
+            patch,
+            candidate_evaluation,
+            metric_delta,
+        )
+        artifact_path = Path(patch["applied_actions"][0]["artifact_path"])
+        artifact_exists = artifact_path.exists()
+        artifact_in_sandbox = paths.sandbox_dir in artifact_path.parents
+
+    assert patch["kind"] == PATCH_KIND
+    assert patch["status"] == "applied"
+    assert patch["safety"]["mainline_modified"] is False
+    assert candidate_manifest["kind"] == CANDIDATE_MANIFEST_KIND
+    assert artifact_exists
+    assert artifact_in_sandbox
+    assert candidate_evaluation["kind"] == CANDIDATE_EVALUATION_KIND
+    assert metric_delta["kind"] == METRIC_DELTA_KIND
+    assert metric_delta["summary"]["improved_metric_count"] == 1
+    assert final_decision["kind"] == FINAL_DECISION_KIND
+    assert final_decision["decision"] == "accepted_for_review"
+    assert final_decision["application_status"] == "not_applied"
+
+
+def test_harness_optimization_sandbox_skips_unsafe_action_type() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        campaign_evaluation, campaign_manifest, manifest_path = _source_payloads(root)
+        evaluation_path = root / "campaign_evaluation.json"
+        paths = harness_optimization_paths(evaluation_path)
+        adapter = HarnessOptimizationAdapter(
+            target="demo",
+            paths=paths,
+            campaign_evaluation_path=evaluation_path,
+            campaign_manifest_path=manifest_path,
+            cwd=root,
+        )
+        task = adapter.run_task(campaign_evaluation, campaign_manifest)
+        proposal = {
+            "schema_version": 1,
+            "kind": PROPOSAL_KIND,
+            "proposal_id": "proposal-unsafe",
+            "status": "proposed",
+            "actions": [
+                {
+                    "action_id": "patch-ref-model",
+                    "action_type": "ref_model_patch",
+                    "payload": {"patch": "diff --git ..."},
+                    "evidence_refs": [{"span_id": "span-dut"}],
+                }
+            ],
+            "evidence_refs": [{"span_id": "span-dut"}],
+        }
+        decision = adapter.run_decision(task, proposal)
+
+        apply_result = adapter.run_apply(task, proposal, decision)
+        patch = apply_result["harness_optimization_patch"]
+        candidate_manifest = apply_result["harness_optimization_candidate_manifest"]
+
+    assert decision["decision"] == "accepted"
+    assert patch["status"] == "skipped"
+    assert patch["summary"]["applied_action_count"] == 0
+    assert patch["summary"]["unsafe_skipped_count"] == 1
+    assert candidate_manifest["candidate_artifacts"] == []
+
+
+def test_harness_optimization_invalid_candidate_evaluation_is_rejected() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        campaign_evaluation, campaign_manifest, manifest_path = _source_payloads(root)
+        evaluation_path = root / "campaign_evaluation.json"
+        paths = harness_optimization_paths(evaluation_path)
+        adapter = HarnessOptimizationAdapter(
+            target="demo",
+            paths=paths,
+            campaign_evaluation_path=evaluation_path,
+            campaign_manifest_path=manifest_path,
+            cwd=root,
+            candidate_evaluation_backend=InvalidCandidateEvaluationBackend(),
+        )
+        task = adapter.run_task(campaign_evaluation, campaign_manifest)
+        proposal = {
+            "schema_version": 1,
+            "kind": PROPOSAL_KIND,
+            "proposal_id": "proposal-invalid-candidate",
+            "status": "proposed",
+            "actions": [
+                {
+                    "action_id": "scoreboard-1",
+                    "action_type": "scoreboard_check",
+                    "evidence_refs": [{"span_id": "span-dut"}],
+                }
+            ],
+            "evidence_refs": [{"span_id": "span-dut"}],
+        }
+        decision = adapter.run_decision(task, proposal)
+        apply_result = adapter.run_apply(task, proposal, decision)
+        patch = apply_result["harness_optimization_patch"]
+        candidate_manifest = apply_result["harness_optimization_candidate_manifest"]
+        candidate_evaluation = adapter.run_candidate_evaluation(
+            task,
+            proposal,
+            patch,
+            candidate_manifest,
+        )
+        metric_delta = adapter.run_metric_delta(task, candidate_evaluation)
+        final_decision = adapter.run_final_decision(
+            task,
+            proposal,
+            decision,
+            patch,
+            candidate_evaluation,
+            metric_delta,
+        )
+
+    assert candidate_evaluation["status"] == "error"
+    assert candidate_evaluation["error"]["type"] == "TypeError"
+    assert final_decision["decision"] == "rejected"
+    assert final_decision["reason"] == "candidate_validation_failed"
 
 
 def _source_payloads(root: Path) -> tuple[dict, dict, Path]:

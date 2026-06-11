@@ -63,7 +63,7 @@
   contract、静态依赖校验、runtime result readiness 和 stage policy 执行。
 - `run_profiles.py`：默认 run/campaign profile，使用 stage name 列表描述
   `feedback_fuzz`、`no_feedback`、round evaluation、campaign evaluation 和
-  phase-one harness optimization DAG。
+  harness optimization phase-one/phase-two DAG。
 - `run_stage_registry.py`：把 profile 中的 stage name 解析为具体 `RunStage`，并提供
   自定义 stage 注册入口。
 - `run_adapters.py`：corpus generator、UVM replay 和 coverage report 的可替换 backend
@@ -71,7 +71,8 @@
 - `run_evaluation.py`：默认 round/campaign evaluation report adapter，以及可替换的
   `EvaluationBackends`。
 - `harness_optimization.py`：从 campaign evaluation、harness evaluation、LLM dataset 和
-  campaign rollup 生成 phase-one optimization task/proposal/decision artifacts。
+  campaign rollup 生成 optimization task/proposal/schema decision，并支持显式 profile 下的
+  sandbox apply、candidate evaluation、metric delta 和 final decision artifacts。
 - `run_orchestrator.py`：`FuzzRunOrchestrator`，负责顶层 corpus generation /
   validation、coverage replay、Verilator coverage report、coverage feedback、feedback
   replay、round manifest 和 round evaluation 的 profile 编排。

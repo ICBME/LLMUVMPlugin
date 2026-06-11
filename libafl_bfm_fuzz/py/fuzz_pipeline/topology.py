@@ -197,6 +197,11 @@ RUN_ORCHESTRATION_TOPOLOGY = PipelineTopology(
         ComponentNode("harness_optimization_task", "artifact", "Structured harness optimization task"),
         ComponentNode("harness_optimization_proposal", "artifact", "Optimizer proposal before application"),
         ComponentNode("harness_optimization_decision", "artifact", "Schema-level accept/reject decision"),
+        ComponentNode("harness_optimization_patch", "artifact", "Sandbox-only candidate artifact application manifest"),
+        ComponentNode("harness_optimization_candidate_manifest", "artifact", "Candidate harness artifacts generated in sandbox"),
+        ComponentNode("harness_optimization_candidate_evaluation", "artifact", "Candidate validation report"),
+        ComponentNode("harness_optimization_metric_delta", "artifact", "Baseline versus candidate metric delta report"),
+        ComponentNode("harness_optimization_final_decision", "artifact", "Final review decision after candidate validation"),
     ),
     connectors=(
         ConnectorEdge(
@@ -301,6 +306,49 @@ RUN_ORCHESTRATION_TOPOLOGY = PipelineTopology(
                 "harness_optimization_proposal",
             ),
             output_roles=("harness_optimization_decision",),
+        ),
+        ConnectorEdge(
+            "harness_optimization_decision_to_candidate_manifest",
+            "harness_optimization_decision",
+            "harness_optimization_candidate_manifest",
+            input_roles=(
+                "harness_optimization_task",
+                "harness_optimization_proposal",
+                "harness_optimization_decision",
+            ),
+            output_roles=(
+                "harness_optimization_patch",
+                "harness_optimization_candidate_manifest",
+            ),
+        ),
+        ConnectorEdge(
+            "harness_candidate_manifest_to_evaluation",
+            "harness_optimization_candidate_manifest",
+            "harness_optimization_candidate_evaluation",
+            input_roles=(
+                "harness_optimization_patch",
+                "harness_optimization_candidate_manifest",
+            ),
+            output_roles=("harness_optimization_candidate_evaluation",),
+        ),
+        ConnectorEdge(
+            "harness_candidate_evaluation_to_metric_delta",
+            "harness_optimization_candidate_evaluation",
+            "harness_optimization_metric_delta",
+            input_roles=("harness_optimization_candidate_evaluation",),
+            output_roles=("harness_optimization_metric_delta",),
+        ),
+        ConnectorEdge(
+            "harness_metric_delta_to_final_decision",
+            "harness_optimization_metric_delta",
+            "harness_optimization_final_decision",
+            input_roles=(
+                "harness_optimization_decision",
+                "harness_optimization_patch",
+                "harness_optimization_candidate_evaluation",
+                "harness_optimization_metric_delta",
+            ),
+            output_roles=("harness_optimization_final_decision",),
         ),
     ),
 )

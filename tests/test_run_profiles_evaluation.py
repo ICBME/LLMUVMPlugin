@@ -13,7 +13,9 @@ from connector_observe import ObservationContext
 from fuzz_pipeline import (
     CampaignConfig,
     CampaignOrchestrator,
+    CANDIDATE_EVALUATION_KIND,
     EvaluationBackends,
+    FINAL_DECISION_KIND,
     FuzzRunConfig,
     PROPOSAL_KIND,
     RunPlanProfile,
@@ -455,6 +457,37 @@ class FakeHarnessOptimizerBackend:
         }
 
 
+class FakeHarnessCandidateEvaluationBackend:
+    def __init__(self) -> None:
+        self.candidate_manifest: dict | None = None
+
+    def run(
+        self,
+        task: dict,
+        proposal: dict,
+        patch: dict,
+        candidate_manifest: dict,
+    ) -> dict:
+        self.candidate_manifest = candidate_manifest
+        return {
+            "schema_version": 1,
+            "kind": CANDIDATE_EVALUATION_KIND,
+            "target": task.get("target"),
+            "run_id": task.get("run_id"),
+            "proposal_id": proposal.get("proposal_id"),
+            "candidate_id": candidate_manifest.get("candidate_id"),
+            "status": "passed",
+            "baseline_metrics": {
+                "failed_record_count": 1,
+                "hanging_span_count": 0,
+            },
+            "candidate_metrics": {
+                "failed_record_count": 0,
+                "hanging_span_count": 0,
+            },
+        }
+
+
 def test_campaign_profile_can_insert_harness_optimization_stages() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -490,6 +523,62 @@ def test_campaign_profile_can_insert_harness_optimization_stages() -> None:
     assert proposal["actions"][0]["action_type"] == "scoreboard_check"
     assert decision["decision"] == "accepted"
     assert decision["summary"]["accepted_action_count"] == 1
+
+
+def test_campaign_profile_can_run_harness_optimization_validation_stages() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        evaluation_path = root / "campaign" / "evaluation.json"
+        optimizer = FakeHarnessOptimizerBackend()
+        candidate_backend = FakeHarnessCandidateEvaluationBackend()
+        campaign = StubCampaign(
+            CampaignConfig(
+                target="demo",
+                out_dir=root / "campaign",
+                libafl_manifest=root / "Cargo.toml",
+                modes=("heuristic_feedback",),
+                campaign_plan_profile=(
+                    "campaign_with_evaluation_and_optimization_validation"
+                ),
+                campaign_evaluation_out=evaluation_path,
+            ),
+            ObservationContext(run_id="run-1"),
+            evaluation_backends=EvaluationBackends(
+                campaign_evaluation=FakeHarnessTraceCampaignEvaluationBackend(
+                    evaluation_path,
+                ),
+                harness_optimizer=optimizer,
+                harness_candidate_evaluation=candidate_backend,
+            ),
+        )
+
+        manifest = campaign.run()
+        paths = harness_optimization_paths(evaluation_path)
+        patch = json.loads(paths.patch.read_text(encoding="utf-8"))
+        candidate_manifest = json.loads(
+            paths.candidate_manifest.read_text(encoding="utf-8")
+        )
+        candidate_evaluation = json.loads(
+            paths.candidate_evaluation.read_text(encoding="utf-8")
+        )
+        metric_delta = json.loads(paths.metric_delta.read_text(encoding="utf-8"))
+        final_decision = json.loads(paths.final_decision.read_text(encoding="utf-8"))
+
+    assert candidate_backend.candidate_manifest is not None
+    assert manifest["artifacts"]["harness_optimization_patch"] == str(paths.patch)
+    assert (
+        manifest["artifacts"]["harness_optimization_candidate_manifest"]
+        == str(paths.candidate_manifest)
+    )
+    assert patch["status"] == "applied"
+    assert patch["safety"]["mainline_modified"] is False
+    assert candidate_manifest["candidate_artifacts"][0]["action_type"] == (
+        "scoreboard_check"
+    )
+    assert candidate_evaluation["status"] == "passed"
+    assert metric_delta["summary"]["improved_metric_count"] == 1
+    assert final_decision["kind"] == FINAL_DECISION_KIND
+    assert final_decision["decision"] == "accepted_for_review"
 
 
 def test_campaign_orchestrator_can_insert_custom_campaign_stage() -> None:

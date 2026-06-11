@@ -54,6 +54,10 @@
   `harness_optimization_decision`。默认 no-op optimizer backend 只生成 schema-valid
   proposal，占位 decision 做 schema-level accept/reject，并将应用状态标为
   `not_applied`。
+  第七阶段已完成 Harness LLM Optimization 第二阶段框架：新增 campaign profile
+  `campaign_with_evaluation_and_optimization_validation`，在第一阶段后追加 sandbox
+  apply、candidate evaluation、metric delta 和 final decision；安全 action 子集只转换为
+  sandbox candidate artifacts，默认不修改源码主线。
 - `CampaignOrchestrator` 已负责 campaign-level plan、manifest 和 connector 包装；
   mode/round 展开、上一轮 `round_manifest` 状态读取和每轮 `FuzzRunConfig` 构造已抽到
   `CampaignRoundScheduler`。
@@ -96,6 +100,7 @@
 - `campaign_manifest`
 - `campaign_with_evaluation`
 - `campaign_with_evaluation_and_optimization`
+- `campaign_with_evaluation_and_optimization_validation`
 
 公开扩展点：
 
@@ -107,6 +112,9 @@
 - `EvaluationBackends`：替换 round/campaign evaluation 后端。
 - `EvaluationBackends(harness_optimizer=...)`：替换 phase-one harness optimizer proposal
   backend；默认 `NoopHarnessOptimizerBackend` 不应用变更。
+- `EvaluationBackends(harness_candidate_evaluation=...)`：替换第二阶段 candidate
+  validation backend；默认 `NoopHarnessCandidateEvaluationBackend` 生成 `not_run`
+  validation report，不运行真实回归。
 - CLI/Makefile：`--run-plan-profile`、`--campaign-plan-profile`、`--round-evaluation`、
   `--evaluation-out`、`--campaign-evaluation-out` 以及对应 Makefile 变量
   `RUN_PLAN_PROFILE`、`CAMPAIGN_PLAN_PROFILE`、`ROUND_EVALUATION_ENABLE`、
@@ -164,6 +172,10 @@
    Harness optimization 第一阶段已完成：`harness_optimization.py` 从 campaign evaluation、
    harness evaluation、LLM dataset 和 campaign rollup 构造结构化 task；optimizer backend
    返回 proposal；decision artifact 只做 schema-level accept/reject，不执行 sandbox apply。
+   Harness optimization 第二阶段框架已完成：显式 validation profile 将 accepted proposal
+   转换成 sandbox-only candidate artifacts，生成 candidate manifest、candidate evaluation、
+   baseline/candidate metric delta 和 final decision；`ref_model_patch` 等潜在源码修改 action
+   先被标为 unsafe/skipped，默认 backend 不修改源码、不运行真实候选回归。
 
 5. 收紧 artifact materialization。
    已完成：每个 coverage feedback connector step 声明的 output artifact 会在 step
@@ -203,9 +215,11 @@
 - `tests/test_run_profiles_evaluation.py`：覆盖 run/campaign profile 选择、mode mismatch
   拒绝、round/campaign evaluation stage、`EvaluationBackends` 替换、自定义 campaign
   stage、非法 campaign DAG 拒绝、harness optimization campaign profile 和 fake optimizer
-  backend，以及 `CampaignRoundScheduler` 对上一轮 manifest state 的传递。
+  backend、harness optimization validation profile 和 fake candidate validation backend，
+  以及 `CampaignRoundScheduler` 对上一轮 manifest state 的传递。
 - `tests/test_harness_optimization.py`：覆盖 phase-one harness optimization task/proposal/
-  decision artifact 写出、默认 no-op proposal 和非法 proposal schema reject。
+  decision artifact 写出、默认 no-op proposal、非法 proposal schema reject、sandbox apply、
+  unsafe action skip、candidate metric delta 和 final decision。
 - `tests/test_harness_trace.py`：覆盖 connector events 到 harness execution records 的转换、
   connector/module/failure/case/directive 聚合、hanging span 检测、trace quality report、
   LLM optimization dataset 写出、通用 trace core 独立使用、可注入 metadata extractor、

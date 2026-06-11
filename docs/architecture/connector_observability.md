@@ -135,14 +135,19 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 
 `py/fuzz_pipeline/harness_optimization.py`
 
-- 定义 phase-one harness LLM optimization 的结构化 artifact：optimization task、
-  proposal 和 decision。
+- 定义 harness LLM optimization 的结构化 artifact：第一阶段包括 optimization task、
+  proposal 和 schema decision；第二阶段包括 sandbox apply、candidate evaluation、
+  metric delta 和 final decision。
 - `HarnessOptimizationAdapter` 从 campaign evaluation、harness evaluation、LLM dataset
   和 campaign rollup 构造 task；optimizer backend 只返回 proposal，不直接修改源码或
   harness artifact。
 - 默认 `NoopHarnessOptimizerBackend` 生成 schema-valid no-op proposal；
   decision stage 只做 schema-level accept/reject，并将 `application_status` 标为
-  `not_applied`，为后续 sandbox apply 和回归验证预留接口。
+  `not_applied`。
+- 第二阶段 profile 使用 sandbox-only apply：安全 action 子集会被转换为
+  `harness_optimization_sandbox` 下的候选 artifact；`ref_model_patch` 等潜在源码修改
+  先标为 unsafe/skipped。默认 `NoopHarnessCandidateEvaluationBackend` 只写
+  `not_run` validation report，真实候选回归可通过 backend 注入。
 
 `py/fuzz_pipeline/harness_rollup.py`
 
@@ -225,6 +230,10 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   `campaign_with_evaluation_and_optimization` 在 campaign evaluation 后生成
   `harness_optimization_task`、`harness_optimization_proposal` 和
   `harness_optimization_decision`。默认 campaign profile 不启用优化 stage。
+- Harness LLM Optimization 第二阶段已作为更长的显式 campaign profile 接入：
+  `campaign_with_evaluation_and_optimization_validation` 在第一阶段之后追加 sandbox
+  apply、candidate evaluation、metric delta 和 final decision。该 profile 只写 sandbox
+  artifact 与 review decision，不修改源码主线。
 - pyUVM replay 仍在 cocotb/pyUVM 生命周期内执行，但 replay context、sequence、
   driver/ref-model、scoreboard 和 coverage 的 connector 创建已统一迁移到
   `ReplayPipelineOrchestrator`；pyUVM component 只负责 phase 内调用行为，adapter 负责
@@ -331,6 +340,9 @@ run/campaign profile 层使用 `RunStage` 描述 stage contract，并用
 - `campaign_with_evaluation`：写出 manifest 后追加 `campaign_evaluation`
 - `campaign_with_evaluation_and_optimization`：追加 phase-one harness optimization
   task/proposal/decision，默认 no-op optimizer 只生成可验证占位 proposal，不应用变更
+- `campaign_with_evaluation_and_optimization_validation`：在 phase-one 后追加 sandbox
+  apply、candidate evaluation、metric delta 和 final decision；默认候选验证为 `not_run`
+  占位，可由 backend 替换
 
 扩展点：
 
@@ -342,7 +354,8 @@ run/campaign profile 层使用 `RunStage` 描述 stage contract，并用
   替换外部命令实现。
 - 评测 backend 用 `EvaluationBackends(round_evaluation=..., campaign_evaluation=...)`
   替换默认 JSON report 生成逻辑；`EvaluationBackends(harness_optimizer=...)` 可替换
-  phase-one harness optimizer proposal backend。
+  phase-one harness optimizer proposal backend；
+  `EvaluationBackends(harness_candidate_evaluation=...)` 可替换第二阶段候选验证 backend。
 
 ### 优先迁移点
 
@@ -748,6 +761,24 @@ uv run make -C libafl_bfm_fuzz \
   feedback-campaign
 ```
 
+显式启用 sandbox candidate validation：
+
+```sh
+uv run make -C libafl_bfm_fuzz \
+  TARGET=secworks_sha256 \
+  VERILOG_SOURCES="/path/to/rtl/*.v" \
+  TOPLEVEL=sha256 \
+  CAMPAIGN_PLAN_PROFILE=campaign_with_evaluation_and_optimization_validation \
+  CAMPAIGN_EVALUATION_ENABLE=1 \
+  feedback-campaign
+```
+
+该 profile 会额外写出 `harness_optimization_patch`、
+`harness_optimization_candidate_manifest`、`harness_optimization_candidate_evaluation`、
+`harness_optimization_metric_delta` 和 `harness_optimization_final_decision`。默认候选验证
+不会运行真实回归，因此 proposed action 会停在 review/validation 框架内；接入真实
+candidate backend 后，final decision 才可能进入 `accepted_for_review`。
+
 ## 事件与 monitor 示例
 
 JSONL event 中常用字段：
@@ -842,6 +873,8 @@ monitor JSON 聚合：
 - `EvaluationBackends` 可替换 round/campaign evaluation backend。
 - `EvaluationBackends(harness_optimizer=...)` 可替换 phase-one harness optimizer backend，
   生成 proposal 并由 decision artifact 做 schema accept/reject。
+- `EvaluationBackends(harness_candidate_evaluation=...)` 可替换第二阶段 candidate
+  validation backend，生成 baseline/candidate metric delta 和 final decision。
 - campaign profile 可插入自定义 campaign stage，并能拒绝缺失 `campaign_manifest`
   依赖的非法 DAG。
 - `feedback-fuzz` 单轮 manifest 写出和 `round_artifacts_to_round_manifest` 观测。

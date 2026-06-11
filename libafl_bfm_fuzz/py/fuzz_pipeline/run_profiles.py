@@ -127,6 +127,25 @@ DEFAULT_CAMPAIGN_PLAN_PROFILES: Mapping[str, RunPlanProfile] = {
             "task/proposal/decision artifacts."
         ),
     ),
+    "campaign_with_evaluation_and_optimization_validation": RunPlanProfile(
+        name="campaign_with_evaluation_and_optimization_validation",
+        stage_names=(
+            "campaign_manifest",
+            "campaign_evaluation",
+            "harness_optimization_task",
+            "harness_optimization_proposal",
+            "harness_optimization_decision",
+            "harness_optimization_apply",
+            "harness_optimization_candidate_evaluation",
+            "harness_optimization_metric_delta",
+            "harness_optimization_final_decision",
+        ),
+        description=(
+            "Write campaign evaluation, generate a harness optimization proposal, "
+            "materialize safe sandbox candidate artifacts, evaluate the candidate, "
+            "and emit metric delta plus final review decision artifacts."
+        ),
+    ),
 }
 
 

@@ -141,7 +141,7 @@ generate-corpus: require-target-config
 check:
 	$(CARGO) test --manifest-path $(LIBAFL_MANIFEST)
 	$(PYTHON) -m py_compile coverage_feedback.py validate_corpus.py py/fuzz_bfm/*.py py/fuzz_feedback/*.py py/fuzz_pipeline/*.py py/fuzz_uvm/*.py py/fuzz_examples/*.py scripts/*.py
-	$(PYTHON) -m pytest ../tests/test_run_plan.py ../tests/test_run_stage_registry.py ../tests/test_run_adapters.py ../tests/test_run_profiles_evaluation.py -q
+	$(PYTHON) -m pytest ../tests/test_run_plan.py ../tests/test_run_stage_registry.py ../tests/test_run_adapters.py ../tests/test_harness_optimization.py ../tests/test_run_profiles_evaluation.py -q
 
 check-corpus: generate-corpus
 
