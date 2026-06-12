@@ -167,6 +167,12 @@
   `not_consumed`，promotion package 会引用该汇总。若 single-action variant 已评测，
   汇总 `effect_status` 采用 standalone 结果，并额外写出 `combined_effect_status` /
   `aggregate_effect_status`，用于区分独立有效 action 和只出现在有效组合中的辅助 action。
+  第十阶段新增 promotion action pruning：promotion package 基于 standalone attribution
+  输出 `effective_actions`、`neutral_actions`、`harmful_actions`、
+  `recommended_promotion_actions`、`minimal_promotion_candidate` 和
+  `action_pruning_summary`。最小候选只保留独立有效 action；若精确 action set 已有
+  `passed`/`ok` variant 证据则可进入 `ready_for_review`，否则需要重新验证；无有效
+  action 的候选会留下空 minimal candidate 并停在 `not_recommended`。
 - CLI/Makefile：`--run-plan-profile`、`--campaign-plan-profile`、`--round-evaluation`、
   `--evaluation-out`、`--campaign-evaluation-out` 以及对应 Makefile 变量
   `RUN_PLAN_PROFILE`、`CAMPAIGN_PLAN_PROFILE`、`ROUND_EVALUATION_ENABLE`、

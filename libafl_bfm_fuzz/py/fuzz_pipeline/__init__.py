@@ -28,7 +28,9 @@ from .harness_candidate_regression import (
     CandidateRegressionSettings,
     HarnessCandidateRegressionBackend,
     JsonConfigActionAdapter,
+    build_action_pruning_summary,
     build_candidate_action_effect_report,
+    build_candidate_promotion_package,
     select_candidate_variants,
 )
 from .harness_metadata import (
@@ -222,7 +224,9 @@ __all__ = [
     "build_harness_optimization_metric_delta",
     "build_harness_optimization_patch",
     "build_harness_optimization_task",
+    "build_action_pruning_summary",
     "build_candidate_action_effect_report",
+    "build_candidate_promotion_package",
     "external_command_step",
     "campaign_trace_rollup_path",
     "harness_optimization_paths",

@@ -2025,6 +2025,18 @@ def build_candidate_promotion_package(
         stability_summary=stability_summary,
     )
     promotion_status = "ready_for_review" if summary["passes_thresholds"] else "hold"
+    action_effects = (
+        list_value(mapping(action_effect_report).get("actions"))
+        if action_effect_report
+        else []
+    )
+    pruning = build_action_pruning_summary(
+        task=task,
+        proposal=proposal,
+        candidate_manifest=candidate_manifest,
+        promotion_status=promotion_status,
+        action_effect_report=action_effect_report or {},
+    )
     return {
         "schema_version": 1,
         "kind": "libafl_bfm_fuzz.harness_candidate_promotion_package",
@@ -2040,9 +2052,13 @@ def build_candidate_promotion_package(
         "action_effect_summary": mapping(action_effect_report).get("summary")
         if action_effect_report
         else {},
-        "action_effects": list_value(mapping(action_effect_report).get("actions"))
-        if action_effect_report
-        else [],
+        "action_effects": action_effects,
+        "effective_actions": pruning["effective_actions"],
+        "neutral_actions": pruning["neutral_actions"],
+        "harmful_actions": pruning["harmful_actions"],
+        "recommended_promotion_actions": pruning["recommended_promotion_actions"],
+        "minimal_promotion_candidate": pruning["minimal_promotion_candidate"],
+        "action_pruning_summary": pruning["summary"],
         "evidence_refs": list_value(proposal.get("evidence_refs")),
         "safety": {
             "mainline_modified": False,
@@ -2052,6 +2068,182 @@ def build_candidate_promotion_package(
         "candidate_metrics": candidate_metrics,
         "baseline_metrics": baseline_metrics,
     }
+
+
+def build_action_pruning_summary(
+    *,
+    task: dict[str, Any],
+    proposal: dict[str, Any],
+    candidate_manifest: dict[str, Any],
+    promotion_status: str,
+    action_effect_report: dict[str, Any],
+) -> dict[str, Any]:
+    actions = [
+        action
+        for action in list_value(mapping(action_effect_report).get("actions"))
+        if isinstance(action, dict)
+    ]
+    effective_actions = [
+        promotion_action_effect_summary(action)
+        for action in actions
+        if preferred_action_effect_status(action) == "improved"
+    ]
+    harmful_actions = [
+        promotion_action_effect_summary(action)
+        for action in actions
+        if preferred_action_effect_status(action) == "regressed"
+    ]
+    neutral_actions = [
+        promotion_action_effect_summary(action)
+        for action in actions
+        if preferred_action_effect_status(action) not in {"improved", "regressed"}
+    ]
+    effective_action_ids = [
+        str(action["action_id"])
+        for action in effective_actions
+        if action.get("action_id") is not None
+    ]
+    recommended_actions = proposal_actions_by_id(proposal, effective_action_ids)
+    minimal_variant = find_matching_variant(
+        mapping(action_effect_report),
+        effective_action_ids,
+    )
+    minimal_validation_status = "not_recommended"
+    if effective_action_ids:
+        minimal_validation_status = (
+            "validated"
+            if minimal_variant
+            and str(minimal_variant.get("status") or "") in {"passed", "ok"}
+            else "requires_validation"
+        )
+    minimal_status = (
+        "ready_for_review"
+        if effective_action_ids
+        and minimal_validation_status == "validated"
+        else "hold"
+    )
+    minimal_candidate = {
+        "schema_version": 1,
+        "kind": "libafl_bfm_fuzz.harness_minimal_promotion_candidate",
+        "status": minimal_status,
+        "validation_status": minimal_validation_status,
+        "target": task.get("target"),
+        "run_id": task.get("run_id"),
+        "proposal_id": proposal.get("proposal_id"),
+        "candidate_id": candidate_manifest.get("candidate_id"),
+        "attribution_basis": "standalone_effect_status_preferred",
+        "source_promotion_status": promotion_status,
+        "action_ids": effective_action_ids,
+        "action_count": len(effective_action_ids),
+        "actions": recommended_actions,
+        "dropped_action_ids": [
+            str(action["action_id"])
+            for action in (*neutral_actions, *harmful_actions)
+            if action.get("action_id") is not None
+        ],
+        "harmful_action_ids": [
+            str(action["action_id"])
+            for action in harmful_actions
+            if action.get("action_id") is not None
+        ],
+        "validated_by_variant_id": (
+            minimal_variant.get("variant_id") if minimal_variant else None
+        ),
+        "requires_validation": minimal_validation_status != "validated",
+    }
+    return {
+        "summary": {
+            "attribution_basis": "standalone_effect_status_preferred",
+            "source_promotion_status": promotion_status,
+            "effective_action_count": len(effective_actions),
+            "neutral_action_count": len(neutral_actions),
+            "harmful_action_count": len(harmful_actions),
+            "recommended_action_count": len(recommended_actions),
+            "minimal_action_count": len(effective_action_ids),
+            "minimal_validation_status": minimal_validation_status,
+            "minimal_status": minimal_status,
+        },
+        "effective_actions": effective_actions,
+        "neutral_actions": neutral_actions,
+        "harmful_actions": harmful_actions,
+        "recommended_promotion_actions": recommended_actions,
+        "minimal_promotion_candidate": minimal_candidate,
+    }
+
+
+def preferred_action_effect_status(action: dict[str, Any]) -> str:
+    status = action.get("standalone_effect_status")
+    if status is None:
+        status = action.get("effect_status")
+    if status is None:
+        status = action.get("aggregate_effect_status")
+    return str(status or "neutral")
+
+
+def promotion_action_effect_summary(action: dict[str, Any]) -> dict[str, Any]:
+    supporting_variants = [
+        variant
+        for variant in list_value(action.get("supporting_variants"))
+        if isinstance(variant, dict)
+    ]
+    return {
+        "action_id": action.get("action_id"),
+        "action_type": action.get("action_type"),
+        "effect_status": action.get("effect_status"),
+        "standalone_effect_status": action.get("standalone_effect_status"),
+        "combined_effect_status": action.get("combined_effect_status"),
+        "aggregate_effect_status": action.get("aggregate_effect_status"),
+        "preferred_effect_status": preferred_action_effect_status(action),
+        "consumed": action.get("consumed"),
+        "is_runtime_action": action.get("is_runtime_action"),
+        "supporting_variant_ids": [
+            variant.get("variant_id")
+            for variant in supporting_variants
+            if variant.get("variant_id") is not None
+        ],
+    }
+
+
+def proposal_actions_by_id(
+    proposal: dict[str, Any],
+    action_ids: list[str],
+) -> list[dict[str, Any]]:
+    proposal_actions = [
+        action
+        for action in list_value(proposal.get("actions"))
+        if isinstance(action, dict)
+    ]
+    by_id = {
+        str(action.get("action_id")): action
+        for action in proposal_actions
+        if action.get("action_id") is not None
+    }
+    result = []
+    for action_id in action_ids:
+        action = by_id.get(action_id)
+        if action is not None:
+            result.append(action)
+    return result
+
+
+def find_matching_variant(
+    action_effect_report: dict[str, Any],
+    action_ids: list[str],
+) -> dict[str, Any]:
+    expected = set(action_ids)
+    if not expected:
+        return {}
+    for variant in list_value(action_effect_report.get("variants")):
+        if not isinstance(variant, dict):
+            continue
+        observed = {
+            str(action_id)
+            for action_id in list_value(variant.get("action_ids"))
+            if action_id is not None
+        }
+        if observed == expected:
+            return variant
+    return {}
 
 
 def build_candidate_action_effect_report(

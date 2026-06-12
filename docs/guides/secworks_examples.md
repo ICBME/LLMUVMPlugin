@@ -109,6 +109,42 @@ uv run make -C libafl_bfm_fuzz \
 7. mutation directives 生成。
 8. 使用 directives 生成 feedback corpus 并再次 replay。
 
+## Strict Candidate Evidence
+
+真实 candidate evidence 回归用于判断 proposed harness action 是否能在 matched no-op
+baseline 之上产生稳定、可归因的 gateable improvement。evidence profile 默认使用
+`matched_baseline=1`、`paired_repeats=3`、`attribution_mode=all_actions`、
+`candidate-min-improved-metrics=1`、`candidate-max-regressed-metrics=0` 和
+`candidate-max-flaky-metrics=0`。
+
+SHA-256 的 padding boundary candidate 是当前正例：在 matched no-op baseline 上稳定减少
+`uncovered_line_count`，final decision 为 `accepted_for_review`。action pruning 会只保留
+`boundary-message-directives`，把 probe、scoreboard record 和 feedback tuning 归为
+neutral；`minimal_promotion_candidate` 精确匹配 `action_boundary-message-directives`
+variant，因此是 `ready_for_review` / `validated`。
+
+AES 的 op/key_len/key/block 边界 candidate 是 2026-06-12 的跨目标负例：候选包含
+`mutation_directive_update`、`replay_probe`、`scoreboard_check` 和
+`coverage_feedback_tuning` 四类非 no-op action，并在真实 RTL 上完成 matched no-op +
+`paired_repeats=3` + all-actions 回归；candidate simulation 通过且没有 flaky/regressed
+gateable metric，但 `uncovered_line_count` 在三对 repeat 中保持 18 -> 18，
+`gateable_improved_metric_count=0`，final decision 为
+`candidate_metric_improvement_below_threshold` / `rejected`。per-action attribution 显示四个
+action 的 standalone effect 全部为 neutral，promotion package 因此输出空
+`minimal_promotion_candidate` 并把所有 action 放入 `neutral_actions`。
+
+这个 AES 结果不是 candidate regression 故障，而是证据系统正确拒绝了不可推广优化：
+当前 AES manifest 只暴露 `op`、`key_len`、`key`、`block` 高层 transaction 字段；剩余
+RTL line gap 主要是 MMIO readback 地址和 defensive/default 分支，现有 safe action DSL
+无法直接生成任意 readback 地址或非法内部状态。后续若要继续改善 AES，需要先扩展
+driver/manifest/action surface，而不是 promotion 这些 neutral action。
+
+AES evidence 路径需要保留 Verilator 参数：
+
+```sh
+--make-var EXTRA_ARGS=-Wno-UNOPTFLAT
+```
+
 ## Connector Observation
 
 Secworks 示例也可以导出 connector 事件、monitor 和 full topology。以 SHA-256 为例：

@@ -218,6 +218,11 @@ semantic interpretation not represented in the manifest schema.
 - Add a generic adapter for length-bucket coverpoints on variable-length hex
   fields, for example mapping `message_length` gaps to explicit representative
   cases. This would make the SHA improvement deterministic even without LLM.
+- Treat AES high-level op/key/block boundary candidates as non-promotable unless
+  they introduce a new action surface. The 2026-06-12 strict evidence run was
+  stable under matched no-op + paired repeats, but all standalone actions were
+  neutral and the remaining line gaps were MMIO readback/default RTL branches
+  outside the current AES case schema.
 - For true LLM evaluation, compare three corpora per target: baseline,
   heuristic feedback and LLM feedback, then replay all three with RTL coverage
   enabled.

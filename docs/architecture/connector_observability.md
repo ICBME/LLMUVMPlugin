@@ -917,6 +917,17 @@ single-action variants，使 action effect report 能说明每个 action 是否�
 `top_k` 仍只评测 combined candidate 和前 `candidate-attribution-top-k` /
 `candidate-max-variant-regressions` 个 variants。
 
+promotion package 会在原始 `promotion_status` 之外额外输出 action pruning 视图：
+`effective_actions`、`neutral_actions`、`harmful_actions`、
+`recommended_promotion_actions`、`minimal_promotion_candidate` 和
+`action_pruning_summary`。分类优先使用 `standalone_effect_status`，没有 single-action
+证据时才退回 combined/aggregate 结果。`minimal_promotion_candidate` 只包含独立有效
+action，并保留 `source_promotion_status` 以便和原始 combined candidate 区分；若这个最小
+action set 已有精确匹配且 `passed`/`ok` 的 variant，它会标为
+`ready_for_review` / `validated`，否则标为 `hold` / `requires_validation`。若所有 action
+都是 neutral 或 harmful，最小候选为空并标为 `not_recommended`，用于把“稳定但没有
+gateable 改进”的候选从 promotion 路径中剪掉。
+
 Python 侧仍可显式注入真实 candidate regression backend：
 
 ```python

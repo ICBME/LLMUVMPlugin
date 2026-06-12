@@ -35,6 +35,7 @@ from fuzz_pipeline import (  # noqa: E402
     HarnessOptimizationAdapter,
     NoopHarnessOptimizerBackend,
     build_candidate_action_effect_report,
+    build_candidate_promotion_package,
     build_harness_optimization_decision,
     build_harness_optimization_final_decision,
     build_harness_optimization_metric_delta,
@@ -2061,18 +2062,25 @@ def test_candidate_attribution_all_actions_keeps_each_variant() -> None:
 
 def test_action_effect_report_prefers_standalone_action_effects() -> None:
     task = {"target": "demo", "run_id": "run-1"}
-    proposal = {"proposal_id": "proposal-1"}
+    proposal = {
+        "proposal_id": "proposal-1",
+        "actions": [],
+        "evidence_refs": [{"span_id": "span-root"}],
+    }
     candidate_manifest = {"candidate_id": "candidate-1"}
     boundary_action = {
         "action_id": "boundary",
         "action_type": "mutation_directive_update",
+        "payload": {"directives": [{"name": "boundary"}]},
         "evidence_refs": [{"span_id": "span-boundary"}],
     }
     hint_action = {
         "action_id": "hint",
         "action_type": "mutation_directive_update",
+        "payload": {"directives": [{"name": "hint"}]},
         "evidence_refs": [{"span_id": "span-hint"}],
     }
+    proposal["actions"] = [boundary_action, hint_action]
     baseline_metrics = {"uncovered_line_count": 34}
     report = build_candidate_action_effect_report(
         task=task,
@@ -2106,6 +2114,17 @@ def test_action_effect_report_prefers_standalone_action_effects() -> None:
             },
         ],
     )
+    promotion = build_candidate_promotion_package(
+        task=task,
+        proposal=proposal,
+        patch={"sandbox_dir": "/tmp/candidate"},
+        candidate_manifest=candidate_manifest,
+        candidate_metrics={"uncovered_line_count": 14},
+        baseline_metrics=baseline_metrics,
+        ranking={"top_variant": {"variant_id": "combined"}},
+        thresholds=CandidateAcceptanceThresholds(min_improved_metric_count=1),
+        action_effect_report=report,
+    )
     actions = {item["action_id"]: item for item in report["actions"]}
 
     assert report["summary"]["standalone_evaluated_action_count"] == 2
@@ -2121,6 +2140,173 @@ def test_action_effect_report_prefers_standalone_action_effects() -> None:
     assert actions["hint"]["combined_effect_status"] == "improved"
     assert actions["hint"]["aggregate_effect_status"] == "improved"
     assert actions["hint"]["supporting_variants"][0]["variant_type"] == "combined_actions"
+    assert [item["action_id"] for item in promotion["effective_actions"]] == [
+        "boundary"
+    ]
+    assert [item["action_id"] for item in promotion["neutral_actions"]] == ["hint"]
+    assert promotion["harmful_actions"] == []
+    assert [
+        item["action_id"] for item in promotion["recommended_promotion_actions"]
+    ] == ["boundary"]
+    assert promotion["minimal_promotion_candidate"]["action_ids"] == ["boundary"]
+    assert (
+        promotion["minimal_promotion_candidate"]["validated_by_variant_id"]
+        == "action_boundary"
+    )
+    assert promotion["minimal_promotion_candidate"]["status"] == "ready_for_review"
+    assert promotion["minimal_promotion_candidate"]["validation_status"] == "validated"
+    assert promotion["minimal_promotion_candidate"]["requires_validation"] is False
+    assert promotion["action_pruning_summary"]["minimal_action_count"] == 1
+    assert (
+        promotion["action_pruning_summary"]["source_promotion_status"]
+        == "ready_for_review"
+    )
+
+
+def test_promotion_package_classifies_regressed_actions_as_harmful() -> None:
+    task = {"target": "demo"}
+    proposal = {
+        "proposal_id": "proposal-1",
+        "actions": [
+            {"action_id": "good", "action_type": "mutation_directive_update"},
+            {"action_id": "bad", "action_type": "mutation_directive_update"},
+        ],
+    }
+    candidate_manifest = {"candidate_id": "candidate-1"}
+    baseline_metrics = {"uncovered_line_count": 20}
+    report = build_candidate_action_effect_report(
+        task=task,
+        proposal=proposal,
+        candidate_manifest=candidate_manifest,
+        baseline_metrics=baseline_metrics,
+        variant_evaluations=[
+            {
+                "variant_id": "combined",
+                "variant_type": "combined_actions",
+                "status": "passed",
+                "action_ids": ["good", "bad"],
+                "actions": proposal["actions"],
+                "metrics": {"uncovered_line_count": 10},
+            },
+            {
+                "variant_id": "action_good",
+                "variant_type": "single_action",
+                "status": "passed",
+                "action_ids": ["good"],
+                "actions": [proposal["actions"][0]],
+                "metrics": {"uncovered_line_count": 10},
+            },
+            {
+                "variant_id": "action_bad",
+                "variant_type": "single_action",
+                "status": "passed",
+                "action_ids": ["bad"],
+                "actions": [proposal["actions"][1]],
+                "metrics": {"uncovered_line_count": 30},
+            },
+        ],
+    )
+    promotion = build_candidate_promotion_package(
+        task=task,
+        proposal=proposal,
+        patch={},
+        candidate_manifest=candidate_manifest,
+        candidate_metrics={"uncovered_line_count": 10},
+        baseline_metrics=baseline_metrics,
+        ranking={"top_variant": {"variant_id": "combined"}},
+        thresholds=CandidateAcceptanceThresholds(min_improved_metric_count=1),
+        action_effect_report=report,
+    )
+
+    assert [item["action_id"] for item in promotion["effective_actions"]] == ["good"]
+    assert [item["action_id"] for item in promotion["harmful_actions"]] == ["bad"]
+    assert promotion["neutral_actions"] == []
+    assert promotion["minimal_promotion_candidate"]["action_ids"] == ["good"]
+    assert promotion["minimal_promotion_candidate"]["status"] == "ready_for_review"
+    assert (
+        promotion["minimal_promotion_candidate"]["validated_by_variant_id"]
+        == "action_good"
+    )
+    assert promotion["action_pruning_summary"]["harmful_action_count"] == 1
+
+
+def test_promotion_package_returns_empty_minimal_candidate_for_neutral_actions() -> None:
+    task = {"target": "demo"}
+    proposal = {
+        "proposal_id": "proposal-1",
+        "actions": [
+            {"action_id": "boundary", "action_type": "mutation_directive_update"},
+            {"action_id": "probe", "action_type": "replay_probe"},
+        ],
+    }
+    candidate_manifest = {"candidate_id": "candidate-1"}
+    baseline_metrics = {"uncovered_line_count": 18}
+    report = build_candidate_action_effect_report(
+        task=task,
+        proposal=proposal,
+        candidate_manifest=candidate_manifest,
+        baseline_metrics=baseline_metrics,
+        variant_evaluations=[
+            {
+                "variant_id": "combined",
+                "variant_type": "combined_actions",
+                "status": "passed",
+                "action_ids": ["boundary", "probe"],
+                "actions": proposal["actions"],
+                "metrics": {"uncovered_line_count": 18},
+            },
+            {
+                "variant_id": "action_boundary",
+                "variant_type": "single_action",
+                "status": "passed",
+                "action_ids": ["boundary"],
+                "actions": [proposal["actions"][0]],
+                "metrics": {"uncovered_line_count": 18},
+            },
+            {
+                "variant_id": "action_probe",
+                "variant_type": "single_action",
+                "status": "passed",
+                "action_ids": ["probe"],
+                "actions": [proposal["actions"][1]],
+                "metrics": {"uncovered_line_count": 18},
+            },
+        ],
+    )
+    promotion = build_candidate_promotion_package(
+        task=task,
+        proposal=proposal,
+        patch={},
+        candidate_manifest=candidate_manifest,
+        candidate_metrics={"uncovered_line_count": 18},
+        baseline_metrics=baseline_metrics,
+        ranking={"top_variant": {"variant_id": "combined"}},
+        thresholds=CandidateAcceptanceThresholds(min_improved_metric_count=1),
+        action_effect_report=report,
+    )
+
+    assert promotion["effective_actions"] == []
+    assert [item["action_id"] for item in promotion["neutral_actions"]] == [
+        "boundary",
+        "probe",
+    ]
+    assert promotion["harmful_actions"] == []
+    assert promotion["recommended_promotion_actions"] == []
+    assert promotion["minimal_promotion_candidate"]["action_ids"] == []
+    assert promotion["minimal_promotion_candidate"]["actions"] == []
+    assert promotion["minimal_promotion_candidate"]["dropped_action_ids"] == [
+        "boundary",
+        "probe",
+    ]
+    assert promotion["minimal_promotion_candidate"]["status"] == "hold"
+    assert (
+        promotion["minimal_promotion_candidate"]["validation_status"]
+        == "not_recommended"
+    )
+    assert promotion["action_pruning_summary"]["effective_action_count"] == 0
+    assert promotion["action_pruning_summary"]["neutral_action_count"] == 2
+    assert promotion["action_pruning_summary"]["minimal_action_count"] == 0
+    assert promotion["action_pruning_summary"]["source_promotion_status"] == "hold"
 
 
 def _set_env(values: dict[str, str]) -> dict[str, str | None]:
