@@ -206,6 +206,9 @@ plugin 可以返回或注册：
 
 真实 candidate regression 会把这些插件同时用于 LLM schema hint、sandbox apply、
 candidate adapter config、per-action attribution 和 `candidate_gap_actionability_report`。
+相关 artifact 会带上 `plugin_registry`、`plugin_validation` 和 `plugin_provenance`；
+若 action type、payload-required DSL、payload validator、adapter config 三元组或
+classifier callable 不满足契约，先修插件，再解释优化结果。
 CLI 也可临时传入：
 
 ```sh

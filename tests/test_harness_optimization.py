@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT / "libafl_bfm_fuzz" / "py"))
 from connector_observe import ObservationContext  # noqa: E402
 from fuzz_bfm.bfm_base import ReplayResult  # noqa: E402
 from fuzz_bfm.corpus import FuzzCase  # noqa: E402
-from fuzz_bfm.target_config import TargetConfig  # noqa: E402
+from fuzz_bfm.target_config import TargetConfig, load_target_config  # noqa: E402
 from fuzz_pipeline import (  # noqa: E402
     CANDIDATE_EVALUATION_KIND,
     CANDIDATE_MANIFEST_KIND,
@@ -46,9 +46,11 @@ from fuzz_pipeline import (  # noqa: E402
     build_harness_optimization_metric_delta,
     harness_optimization_paths,
     select_candidate_variants,
+    validate_harness_plugin_registry,
 )
 from fuzz_pipeline.harness_candidate_regression import (  # noqa: E402
     adapt_candidate_actions,
+    classify_gap_actionability,
 )
 from fuzz_pipeline.coverage_feedback import (  # noqa: E402
     CoverageFeedbackConfig,
@@ -56,6 +58,7 @@ from fuzz_pipeline.coverage_feedback import (  # noqa: E402
 )
 from fuzz_pipeline.harness_runtime_actions import (  # noqa: E402
     COVERAGE_FEEDBACK_TUNING_CONFIG_ENV,
+    HarnessRuntimeActionManager,
     MMIO_READBACK_CONFIG_ENV,
     REPLAY_PROBE_CONFIG_ENV,
     RUNTIME_METRICS_OUT_ENV,
@@ -1005,10 +1008,16 @@ def test_harness_plugin_registry_extends_action_schema_and_adapter() -> None:
     assert task["constraints"]["safe_action_dsl"]["custom_probe"] == {
         "payload_fields": {"flag": "bool"}
     }
+    assert task["constraints"]["plugin_validation"]["valid"] is True
+    assert (
+        task["constraints"]["plugin_provenance"]["summary"]["runtime_action_count"]
+        >= 1
+    )
     assert decision["decision"] == "accepted"
     assert candidate_manifest["candidate_artifacts"][0]["action_type"] == (
         "custom_probe"
     )
+    assert candidate_manifest["safety"]["plugin_validation"]["valid"] is True
     assert adapter_results[0].artifact_role == "candidate_custom_probe_config"
     assert adapter_results[0].make_var_assignment().startswith(
         "HARNESS_CUSTOM_PROBE_CONFIG="
@@ -1026,13 +1035,33 @@ def test_harness_plugin_registry_loads_dynamic_plugin_spec() -> None:
                 [
                     "from fuzz_pipeline.harness_plugins import HarnessActionPlugin",
                     "",
-                    "def build_plugin(**kwargs):",
-                    "    return HarnessActionPlugin(",
-                    "        action_type='dynamic_note',",
-                    "        adapter_kind='demo.dynamic_note_config',",
-                    "        artifact_role='candidate_dynamic_note_config',",
-                    "        make_var='HARNESS_DYNAMIC_NOTE_CONFIG',",
+                    "def classify_demo_gap(gap, context):",
+                    "    if context.target != 'dynamic_core' or gap.get('id') != 'gap-dynamic':",
+                    "        return None",
+                    "    return {",
+                    "        **gap,",
+                    "        'actionability': 'reachable_with_dynamic_probe',",
+                    "        'actionability_reason': 'Dynamic plugin owns this target surface.',",
+                    "        'recommended_action_type': 'dynamic_probe',",
+                    "        'suggested_payload': {'enabled': True},",
+                    "    }",
+                    "",
+                    "class DemoHarnessPlugin:",
+                    "    action_plugins = (",
+                    "        HarnessActionPlugin(",
+                    "            action_type='dynamic_probe',",
+                    "            payload_required=True,",
+                    "            dsl_schema={'payload_fields': {'enabled': 'bool'}},",
+                    "            adapter_kind='demo.dynamic_probe_config',",
+                    "            artifact_role='candidate_dynamic_probe_config',",
+                    "            make_var='HARNESS_DYNAMIC_PROBE_CONFIG',",
+                    "            runtime_action=True,",
+                    "        ),",
                     "    )",
+                    "    gap_actionability_classifiers = (classify_demo_gap,)",
+                    "",
+                    "def build_plugin(**kwargs):",
+                    "    return DemoHarnessPlugin()",
                     "",
                 ]
             ),
@@ -1044,13 +1073,61 @@ def test_harness_plugin_registry_loads_dynamic_plugin_spec() -> None:
                 ["demo_harness_plugin:build_plugin"],
                 base_registry=default_harness_plugin_registry(),
             )
+            context = CandidateActionAdapterContext(
+                candidate_id="candidate-dynamic",
+                regression_dir=root / "candidate",
+            )
+            adapter_results = adapt_candidate_actions(
+                (
+                    {
+                        "action_id": "dynamic-1",
+                        "action_type": "dynamic_probe",
+                        "artifact_path": None,
+                        "evidence_refs": [],
+                        "action": {"payload": {"enabled": True}},
+                    },
+                ),
+                context,
+                adapters=None,
+                plugin_registry=registry,
+            )
+            classified = registry.classify_gap_actionability(
+                {"id": "gap-dynamic", "file": "fake_core.sv", "line": 7},
+                HarnessGapActionabilityContext(target="dynamic_core"),
+            )
         finally:
             sys.path.remove(str(root))
 
-    plugin = registry.action_plugin("dynamic_note")
+    plugin = registry.action_plugin("dynamic_probe")
     assert plugin is not None
-    assert plugin.artifact_role == "candidate_dynamic_note_config"
+    assert plugin.artifact_role == "candidate_dynamic_probe_config"
+    assert registry.validation_json()["valid"] is True
+    assert registry.to_json()["summary"]["runtime_action_count"] >= 1
+    assert classified["actionability"] == "reachable_with_dynamic_probe"
+    assert classified["recommended_action_type"] == "dynamic_probe"
+    assert adapter_results[0].artifact_role == "candidate_dynamic_probe_config"
+    assert adapter_results[0].make_var_assignment().startswith(
+        "HARNESS_DYNAMIC_PROBE_CONFIG="
+    )
     assert "demo_harness_plugin:build_plugin" in registry.plugin_specs
+
+
+def test_harness_plugin_registry_contract_validation_flags_invalid_plugin() -> None:
+    registry = default_harness_plugin_registry().with_action_plugin(
+        HarnessActionPlugin(
+            action_type="bad action",
+            payload_required=True,
+            adapter_kind="demo.partial_config",
+        )
+    )
+
+    validation = validate_harness_plugin_registry(registry)
+
+    assert validation["valid"] is False
+    messages = [item["message"] for item in validation["errors"]]
+    assert any("must contain only" in message for message in messages)
+    assert any("payload-required actions must define" in message for message in messages)
+    assert any("provided together" in message for message in messages)
 
 
 def test_replay_probe_runtime_consumes_filter_and_sample_limit() -> None:
@@ -1100,6 +1177,54 @@ def test_replay_probe_runtime_consumes_filter_and_sample_limit() -> None:
 
     assert payload["summary"]["replay_probe_sample_count"] == 1
     assert payload["summary"]["replay_probe_skipped_count"] == 2
+
+
+def test_runtime_action_manager_dispatches_lifecycle_hooks() -> None:
+    import asyncio
+
+    events: list[tuple[str, Any]] = []
+
+    class DynamicRuntime:
+        def before_case(self, *, case: FuzzCase) -> None:
+            events.append(("before_case", case.target))
+
+        async def after_execute(self, *, index: int, result: ReplayResult) -> None:
+            events.append(("after_execute", index))
+            events.append(("after_execute_result", result.actual))
+
+        def sample_after_execute(self, *, index: int, case: FuzzCase) -> None:
+            events.append(("sample_after_execute", (index, case.target)))
+
+        def finalize(self) -> None:
+            events.append(("finalize", None))
+
+    manager = HarnessRuntimeActionManager((DynamicRuntime(),))
+    case = FuzzCase("demo", {"mode": "read"}, line_no=1)
+
+    asyncio.run(manager.before_case(index=0, case=case, driver=object()))
+    asyncio.run(
+        manager.sample_after_execute(
+            index=0,
+            case=case,
+            result=ReplayResult(actual="ok"),
+            driver=object(),
+        )
+    )
+    asyncio.run(manager.finalize(driver=object()))
+
+    assert manager.hook_capabilities()["DynamicRuntime"] == [
+        "before_case",
+        "after_execute",
+        "sample_after_execute",
+        "finalize",
+    ]
+    assert events == [
+        ("before_case", "demo"),
+        ("after_execute", 0),
+        ("after_execute_result", "ok"),
+        ("sample_after_execute", (0, "demo")),
+        ("finalize", None),
+    ]
 
 
 def test_mmio_readback_runtime_consumes_registers_and_addresses() -> None:
@@ -1210,6 +1335,11 @@ def test_mmio_readback_runtime_consumes_registers_and_addresses() -> None:
 
 
 def test_gap_actionability_report_classifies_aes_mmio_gaps() -> None:
+    target_config = load_target_config("secworks_aes")
+    registry = load_harness_plugin_registry(
+        target_config.harness_optimization_plugins,
+        base_registry=default_harness_plugin_registry(),
+    )
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         baseline_summary = root / "baseline_summary.json"
@@ -1290,6 +1420,7 @@ def test_gap_actionability_report_classifies_aes_mmio_gaps() -> None:
                     "regressed_action_count": 0,
                 }
             },
+            plugin_registry=registry,
         )
 
     assert report["summary"]["uncovered_line_delta"] == -6
@@ -1323,6 +1454,26 @@ def test_gap_actionability_report_classifies_aes_mmio_gaps() -> None:
     assert gaps_by_id["gap-core-default"]["actionability"] == (
         "requires_internal_state_surface"
     )
+    assert (
+        "fuzz_examples.secworks_aes_harness_plugin:build_plugin"
+        in report["plugin_provenance"]["plugin_specs"]
+    )
+    assert report["plugin_validation"]["valid"] is True
+
+
+def test_core_gap_actionability_is_dut_agnostic_without_target_plugin() -> None:
+    classified = classify_gap_actionability(
+        {
+            "id": "gap-name0",
+            "file": "/repo/example/aes/src/rtl/aes.v",
+            "line": 253,
+            "code": "ADDR_NAME0: tmp_read_data = CORE_NAME0;",
+        },
+        target="secworks_aes",
+    )
+
+    assert classified["actionability"] == "unknown"
+    assert classified["recommended_action_type"] is None
 
 
 def test_gap_actionability_report_uses_registered_classifier() -> None:
@@ -2750,6 +2901,11 @@ def test_action_effect_report_prefers_standalone_action_effects() -> None:
     assert promotion["minimal_promotion_candidate"]["validation_status"] == "validated"
     assert promotion["minimal_promotion_candidate"]["requires_validation"] is False
     assert promotion["action_pruning_summary"]["minimal_action_count"] == 1
+    assert promotion["plugin_validation"]["valid"] is True
+    assert (
+        promotion["plugin_provenance"]["kind"]
+        == "libafl_bfm_fuzz.harness_plugin_provenance"
+    )
     assert (
         promotion["action_pruning_summary"]["source_promotion_status"]
         == "ready_for_review"

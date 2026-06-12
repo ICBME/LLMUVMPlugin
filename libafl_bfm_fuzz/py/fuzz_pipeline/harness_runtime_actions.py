@@ -151,6 +151,88 @@ class HarnessRuntimeActionManager:
             )
         return cls(tuple(runtimes))
 
+    def hook_capabilities(self) -> dict[str, list[str]]:
+        hooks: dict[str, list[str]] = {}
+        for runtime in self.runtimes:
+            available = [
+                name
+                for name in (
+                    "before_reset",
+                    "after_reset",
+                    "before_case",
+                    "after_execute",
+                    "sample_after_execute",
+                    "after_ref_model",
+                    "after_scoreboard_record",
+                    "finalize",
+                )
+                if callable(getattr(runtime, name, None))
+            ]
+            hooks[type(runtime).__name__] = available
+        return hooks
+
+    async def invoke_hook(self, *hook_names: str, **kwargs: Any) -> None:
+        for runtime in self.runtimes:
+            for hook_name in hook_names:
+                hook = getattr(runtime, hook_name, None)
+                if not callable(hook):
+                    continue
+                value = hook(**_hook_kwargs(hook, kwargs))
+                if inspect.isawaitable(value):
+                    await value
+
+    async def before_reset(self, *, driver: Any | None = None) -> None:
+        await self.invoke_hook("before_reset", driver=driver)
+
+    async def after_reset(self, *, driver: Any | None = None) -> None:
+        await self.invoke_hook("after_reset", driver=driver)
+
+    async def before_case(
+        self,
+        *,
+        index: int,
+        case: Any,
+        driver: Any,
+    ) -> None:
+        await self.invoke_hook("before_case", index=index, case=case, driver=driver)
+
+    async def after_ref_model(
+        self,
+        *,
+        index: int,
+        case: Any,
+        expected: Any,
+        driver: Any,
+    ) -> None:
+        await self.invoke_hook(
+            "after_ref_model",
+            index=index,
+            case=case,
+            expected=expected,
+            driver=driver,
+        )
+
+    async def after_scoreboard_record(
+        self,
+        *,
+        index: int,
+        case: Any,
+        result: Any,
+        record: Any,
+        driver: Any,
+    ) -> None:
+        await self.invoke_hook(
+            "after_scoreboard_record",
+            index=index,
+            case=case,
+            result=result,
+            record=record,
+            driver=driver,
+        )
+
+    async def finalize(self, *, driver: Any | None = None) -> None:
+        await self.invoke_hook("finalize", driver=driver)
+
     async def sample_after_execute(
         self,
         *,
@@ -159,13 +241,28 @@ class HarnessRuntimeActionManager:
         result: Any,
         driver: Any,
     ) -> None:
-        for runtime in self.runtimes:
-            sampler = getattr(runtime, "sample_after_execute", None)
-            if not callable(sampler):
-                continue
-            value = sampler(index=index, case=case, result=result, driver=driver)
-            if inspect.isawaitable(value):
-                await value
+        await self.invoke_hook(
+            "after_execute",
+            "sample_after_execute",
+            index=index,
+            case=case,
+            result=result,
+            driver=driver,
+        )
+
+
+def _hook_kwargs(hook: Any, kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        signature = inspect.signature(hook)
+    except (TypeError, ValueError):
+        return dict(kwargs)
+    parameters = signature.parameters
+    if any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        return dict(kwargs)
+    return {name: value for name, value in kwargs.items() if name in parameters}
 
 
 def runtime_action_plugin_specs_from_env() -> tuple[str, ...]:

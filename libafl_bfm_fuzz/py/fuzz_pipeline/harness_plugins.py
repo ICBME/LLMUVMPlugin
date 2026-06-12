@@ -7,6 +7,10 @@ import inspect
 from typing import Any, Callable, Protocol
 
 
+REGISTRY_SNAPSHOT_KIND = "libafl_bfm_fuzz.harness_plugin_registry"
+REGISTRY_PROVENANCE_KIND = "libafl_bfm_fuzz.harness_plugin_provenance"
+REGISTRY_VALIDATION_KIND = "libafl_bfm_fuzz.harness_plugin_contract_validation"
+
 PayloadValidator = Callable[[dict[str, Any], str], list[dict[str, str]]]
 GapActionabilityClassifier = Callable[
     [dict[str, Any], "HarnessGapActionabilityContext"],
@@ -187,7 +191,7 @@ class HarnessPluginRegistry:
         return {
             action_type: dict(plugin.dsl_schema)
             for action_type, plugin in self.action_plugins.items()
-            if plugin.dsl_schema
+            if isinstance(plugin.dsl_schema, Mapping) and plugin.dsl_schema
         }
 
     def action_payload_errors(
@@ -218,9 +222,12 @@ class HarnessPluginRegistry:
         return unknown_gap_actionability(gap)
 
     def to_json(self) -> dict[str, Any]:
+        summary = plugin_registry_summary(self)
         return {
             "schema_version": 1,
-            "kind": "libafl_bfm_fuzz.harness_plugin_registry",
+            "kind": REGISTRY_SNAPSHOT_KIND,
+            "snapshot_schema": harness_plugin_registry_snapshot_schema(),
+            "summary": summary,
             "plugin_specs": list(self.plugin_specs),
             "actions": [
                 {
@@ -236,10 +243,214 @@ class HarnessPluginRegistry:
                 }
                 for plugin in self.action_plugins.values()
             ],
+            "gap_actionability_classifiers": [
+                {"name": callable_name(classifier)}
+                for classifier in self.gap_actionability_classifiers
+            ],
             "gap_actionability_classifier_count": len(
                 self.gap_actionability_classifiers
             ),
+            "validation": validate_harness_plugin_registry(self),
         }
+
+    def provenance_json(self) -> dict[str, Any]:
+        return harness_plugin_provenance(self)
+
+    def validation_json(self) -> dict[str, Any]:
+        return validate_harness_plugin_registry(self)
+
+
+def plugin_registry_summary(registry: HarnessPluginRegistry) -> dict[str, int]:
+    runtime_action_count = len(registry.runtime_action_types())
+    safe_action_count = len(registry.safe_sandbox_action_types())
+    action_count = len(registry.action_plugins)
+    return {
+        "plugin_spec_count": len(registry.plugin_specs),
+        "action_count": action_count,
+        "safe_action_count": safe_action_count,
+        "unsafe_action_count": action_count - safe_action_count,
+        "runtime_action_count": runtime_action_count,
+        "dsl_payload_action_count": len(registry.dsl_payload_action_types()),
+        "gap_actionability_classifier_count": len(
+            registry.gap_actionability_classifiers
+        ),
+    }
+
+
+def harness_plugin_registry_snapshot_schema() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "kind": f"{REGISTRY_SNAPSHOT_KIND}.schema",
+        "required_fields": [
+            "schema_version",
+            "kind",
+            "summary",
+            "plugin_specs",
+            "actions",
+            "gap_actionability_classifiers",
+            "validation",
+        ],
+        "action_fields": [
+            "action_type",
+            "safe_for_sandbox",
+            "payload_required",
+            "runtime_action",
+            "adapter_kind",
+            "artifact_role",
+            "make_var",
+            "has_payload_validator",
+            "has_dsl_schema",
+        ],
+    }
+
+
+def harness_plugin_provenance(registry: HarnessPluginRegistry) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "kind": REGISTRY_PROVENANCE_KIND,
+        "plugin_specs": list(registry.plugin_specs),
+        "summary": plugin_registry_summary(registry),
+        "loaded_action_types": list(registry.allowed_action_types()),
+        "runtime_action_types": list(registry.runtime_action_types()),
+        "gap_actionability_classifiers": [
+            {"name": callable_name(classifier)}
+            for classifier in registry.gap_actionability_classifiers
+        ],
+        "validation": validate_harness_plugin_registry(registry),
+    }
+
+
+def validate_harness_plugin_registry(
+    registry: HarnessPluginRegistry,
+) -> dict[str, Any]:
+    errors: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
+    for action_type, plugin in registry.action_plugins.items():
+        path = f"actions.{action_type}"
+        if not isinstance(action_type, str) or not action_type:
+            errors.append(
+                {"path": path, "message": "action type key must be non-empty"}
+            )
+        if plugin.action_type != action_type:
+            errors.append(
+                {
+                    "path": f"{path}.action_type",
+                    "message": "action type key must match plugin.action_type",
+                }
+            )
+        if not isinstance(plugin.action_type, str) or not plugin.action_type:
+            errors.append(
+                {"path": f"{path}.action_type", "message": "must be non-empty"}
+            )
+        elif not _valid_action_type(plugin.action_type):
+            errors.append(
+                {
+                    "path": f"{path}.action_type",
+                    "message": (
+                        "must contain only letters, digits, underscore, dash, dot, "
+                        "or colon"
+                    ),
+                }
+            )
+        if plugin.payload_required:
+            if not isinstance(plugin.dsl_schema, Mapping) or not plugin.dsl_schema:
+                errors.append(
+                    {
+                        "path": f"{path}.dsl_schema",
+                        "message": "payload-required actions must define a DSL schema",
+                    }
+                )
+            if plugin.payload_validator is None:
+                warnings.append(
+                    {
+                        "path": f"{path}.payload_validator",
+                        "message": (
+                            "payload-required action has no payload validator; "
+                            "schema-only checks may be weak"
+                        ),
+                    }
+                )
+        elif plugin.dsl_schema and not isinstance(plugin.dsl_schema, Mapping):
+            errors.append(
+                {"path": f"{path}.dsl_schema", "message": "must be a mapping"}
+            )
+        if plugin.payload_validator is not None and not callable(
+            plugin.payload_validator
+        ):
+            errors.append(
+                {
+                    "path": f"{path}.payload_validator",
+                    "message": "must be callable when provided",
+                }
+            )
+        adapter_fields = {
+            "adapter_kind": plugin.adapter_kind,
+            "artifact_role": plugin.artifact_role,
+            "make_var": plugin.make_var,
+        }
+        present_adapter_fields = {
+            name: value for name, value in adapter_fields.items() if value is not None
+        }
+        if present_adapter_fields and len(present_adapter_fields) != len(adapter_fields):
+            errors.append(
+                {
+                    "path": path,
+                    "message": (
+                        "adapter_kind, artifact_role, and make_var must be "
+                        "provided together"
+                    ),
+                }
+            )
+        for name, value in present_adapter_fields.items():
+            if not isinstance(value, str) or not value.strip():
+                errors.append(
+                    {
+                        "path": f"{path}.{name}",
+                        "message": "must be a non-empty string when provided",
+                    }
+                )
+        if plugin.runtime_action and plugin.adapter_config() is None:
+            warnings.append(
+                {
+                    "path": path,
+                    "message": (
+                        "runtime action has no adapter config; candidate artifacts "
+                        "must be supplied by a custom path"
+                    ),
+                }
+            )
+    for index, classifier in enumerate(registry.gap_actionability_classifiers):
+        if not callable(classifier):
+            errors.append(
+                {
+                    "path": f"gap_actionability_classifiers.{index}",
+                    "message": "classifier must be callable",
+                }
+            )
+    return {
+        "schema_version": 1,
+        "kind": REGISTRY_VALIDATION_KIND,
+        "valid": not errors,
+        "error_count": len(errors),
+        "warning_count": len(warnings),
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
+def callable_name(value: Any) -> str:
+    module = getattr(value, "__module__", "")
+    qualname = getattr(value, "__qualname__", None) or getattr(value, "__name__", None)
+    if module and qualname:
+        return f"{module}.{qualname}"
+    if qualname:
+        return str(qualname)
+    return type(value).__name__
+
+
+def _valid_action_type(value: str) -> bool:
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.:")
+    return bool(value) and all(char in allowed for char in value)
 
 
 def unknown_gap_actionability(gap: Mapping[str, Any]) -> dict[str, Any]:

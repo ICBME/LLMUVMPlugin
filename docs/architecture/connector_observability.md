@@ -195,8 +195,8 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 - built-in registry 保留现有 `mutation_directive_update`、`replay_probe`、
   `scoreboard_check`、`coverage_feedback_tuning`、`mmio_readback`、
   `stimulus_generation_hint`、`documentation_note`、`ref_model_patch` 和 `no_op`
-  行为；candidate regression 再叠加默认 AES gap classifier，因此旧 artifact schema 和
-  CLI 行为保持兼容。
+  行为；核心 candidate regression 不再内置 DUT 专用 gap classifier，`secworks_aes`
+  这类目标规则通过 target manifest 插件显式加载。
 - 动态插件使用 `module:Object` 规格加载。对象可以返回 `HarnessActionPlugin`、
   `HarnessPluginRegistry`、插件列表，或实现 `register_harness_plugins(registry)`。
   CLI 可用 `--harness-optimization-plugin`，Make 可用
@@ -204,14 +204,20 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   `[harness_optimization].plugins = ["pkg.module:Plugin"]`。LLM 可以选择已注册 action
   和 payload，但不直接执行未验证代码；新插件代码应先作为 candidate artifact 走 sandbox
   validation 和 promotion。
+- registry snapshot 会写入 `plugin_registry`，并同步记录 `plugin_validation`、
+  `plugin_provenance` 和 registry snapshot schema。validation 会检查 action type、
+  payload-required DSL、payload validator、adapter config 三元组和 classifier callable，
+  让迁移到新 DUT 时能先审查插件契约，再解释 candidate 结果。
 
 `py/fuzz_pipeline/harness_runtime_actions.py`
 
 - 定义 safe action runtime config schema、loader、metrics writer 和
   `HarnessRuntimeActionManager`。pyUVM replay adapter 只调用 runtime manager 的
-  `sample_after_execute` hook，不再直接硬连每个 runtime action；默认 manager 仍加载
+  after-execute 采样入口，不再直接硬连每个 runtime action；默认 manager 仍加载
   `replay_probe` 与 `mmio_readback`，并可通过 `HARNESS_RUNTIME_ACTION_PLUGINS` 附加受控
-  runtime plugin。
+  runtime plugin。manager 还提供 `before_reset`、`after_reset`、`before_case`、
+  `after_execute`、`after_ref_model`、`after_scoreboard_record` 和 `finalize` 等通用
+  lifecycle hook；旧的 `sample_after_execute` 路径保持兼容。
 - `replay_probe` 由 pyUVM replay driver adapter 消费，记录 case/result 字段采样和
   Python runtime 无法直接采样的 signal request；`scoreboard_check` 由 scoreboard adapter
   消费，记录额外 check 的 pass/fail/enforced failure，并支持 result/case/record 字段
@@ -471,6 +477,8 @@ run/campaign profile 层使用 `RunStage` 描述 stage contract，并用
   或 `HarnessCandidateRegressionBackend(plugin_registry=...)` 注入；CLI/Make/target
   manifest 也能加载同一类 `module:Object` 插件，从而让 schema hint、sandbox apply、
   adapter config、action attribution 和 gap actionability 使用同一个 action surface。
+  这些 artifact 同时带有 `plugin_validation` 和 `plugin_provenance`，用于证明 action
+  surface 来自哪些插件、契约是否有效、runtime/actionability classifier 是否已注册。
 
 ### 优先迁移点
 
@@ -963,14 +971,17 @@ matched baseline/candidate campaign manifest 的 coverage summary 读取剩余 R
 并通过 registry 中的 gap actionability classifier 给出
 `reachable_with_mmio_readback`、`requires_mmio_write_surface`、
 `requires_internal_state_surface` 或 target 自定义分类；promotion package 会内联
-`gap_actionability_summary`。默认注册的 `secworks_aes` classifier 会把 `ADDR_NAME*`、
-`ADDR_VERSION`、`ADDR_CTRL`、`ADDR_STATUS` 识别为 symbolic register readback，把
-result-range 上界 false gap 识别为 explicit read address `0x34`，把 block write
-out-of-range 表达式标为需要 MMIO write surface，把内部 default/defensive 分支标为需要
-internal-state surface 或 waiver。2026-06-12 的真实 AES 回归中，matched no-op baseline
-到 candidate 的 `uncovered_line_count` 在 3 个 paired repeat 中稳定为 18 -> 13，action
-effect report 将 gateable improvement 归因到 `mmio_readback`，并把额外 directive action
-标为 neutral；promotion package 因此给出只保留 `mmio_readback` 的 minimal candidate。
+`gap_actionability_summary`。核心默认没有 DUT 专属 classifier；`secworks_aes.toml`
+通过 `fuzz_examples.secworks_aes_harness_plugin:build_plugin` 加载 AES 规则，把
+`ADDR_NAME*`、`ADDR_VERSION`、`ADDR_CTRL`、`ADDR_STATUS` 识别为 symbolic register
+readback，把 result-range 上界 false gap 识别为 explicit read address `0x34`，把
+block write out-of-range 表达式标为需要 MMIO write surface，把内部 default/defensive
+分支标为需要 internal-state surface 或 waiver。report 和 promotion package 会携带
+`plugin_registry`、`plugin_validation` 和 `plugin_provenance`，用于审查这些判断来自哪个
+插件。2026-06-12 的真实 AES 回归中，matched no-op baseline 到 candidate 的
+`uncovered_line_count` 在 3 个 paired repeat 中稳定为 18 -> 13，action effect report
+将 gateable improvement 归因到 `mmio_readback`，并把额外 directive action 标为
+neutral；promotion package 因此给出只保留 `mmio_readback` 的 minimal candidate。
 
 Python 侧仍可显式注入真实 candidate regression backend：
 

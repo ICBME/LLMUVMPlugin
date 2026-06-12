@@ -145,10 +145,13 @@ candidate regression。payload 可声明 symbolic register，例如 `ADDR_NAME0`
 `ADDR_NAME1`、`ADDR_VERSION`、`ADDR_CTRL` 和 `ADDR_STATUS`，也可声明 explicit safe read
 address，例如 `ADDR_RESULT3 + 1` 的 `0x34`；`AesMmioDriver` 会在正常 encrypt/decrypt
 transaction 之后执行额外 readback，并把 `mmio_readback_read_count` 等 runtime metrics
-写入 candidate evidence。默认注册的 AES gap actionability classifier 会让
+写入 candidate evidence。AES gap actionability classifier 不在核心默认 registry 中；
+`secworks_aes.toml` 通过
+`fuzz_examples.secworks_aes_harness_plugin:build_plugin` 显式加载目标插件，使
 `candidate_gap_actionability_report` 把 AES top-level readback gap 标为
 `reachable_with_mmio_readback`，把 block write out-of-range gap 标为需要 MMIO write
 surface，把内部 defensive/default gap 标为需要 internal-state surface 或 waiver。
+这些 report 会携带 `plugin_validation` 和 `plugin_provenance`，用于审查规则来源。
 2026-06-12 的真实 AES candidate regression 使用 matched no-op baseline、`paired_repeats=3`
 和 `attribution_mode=all_actions`，将 `uncovered_line_count` 稳定从 18 降到 13，且
 regressed/flaky gateable metric 均为 0。standalone attribution 显示 `mmio_readback`

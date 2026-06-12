@@ -38,7 +38,10 @@ from .harness_plugins import (
     HarnessActionPlugin,
     HarnessGapActionabilityContext,
     HarnessPluginRegistry,
+    harness_plugin_provenance,
+    harness_plugin_registry_snapshot_schema,
     load_harness_plugin_registry,
+    validate_harness_plugin_registry,
 )
 from .harness_metadata import (
     HarnessMetadataExtractorProtocol,
@@ -247,6 +250,8 @@ __all__ = [
     "external_command_step",
     "campaign_trace_rollup_path",
     "harness_optimization_paths",
+    "harness_plugin_provenance",
+    "harness_plugin_registry_snapshot_schema",
     "load_runtime_action_config",
     "load_harness_plugin_registry",
     "normalize_campaign_modes",
@@ -258,5 +263,6 @@ __all__ = [
     "run_coverage_feedback_pipeline",
     "run_feedback_campaign_pipeline",
     "select_candidate_variants",
+    "validate_harness_plugin_registry",
     "validate_harness_optimization_proposal",
 ]

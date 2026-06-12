@@ -188,8 +188,13 @@
   `EvaluationBackends(harness_plugin_registry=...)` 注入；CLI/Make 可通过
   `--harness-optimization-plugin` / `HARNESS_OPTIMIZATION_PLUGINS` 加载 `module:Object`
   插件，target manifest 可通过 `[harness_optimization].plugins` 声明目标专用评测插件。
-  默认 registry 保留现有 built-in actions，并在 candidate regression 中叠加 AES
-  actionability classifier，避免迁移时破坏既有 evidence schema。
+  默认 registry 只保留通用 built-in actions，不再叠加任何 DUT 专属 classifier。
+- 第十三阶段把 `secworks_aes` actionability classifier 从核心迁到
+  `fuzz_examples.secworks_aes_harness_plugin`，并通过 `secworks_aes.toml` 的
+  `[harness_optimization].plugins` 显式加载；同时 registry snapshot 增加
+  `plugin_validation`、`plugin_provenance` 和 snapshot schema，candidate action effect、
+  gap actionability 与 promotion package 都能审查插件来源和契约状态。runtime manager
+  增加通用 lifecycle hook，并保持既有 `sample_after_execute` replay/mmio 行为兼容。
 - CLI/Makefile：`--run-plan-profile`、`--campaign-plan-profile`、`--round-evaluation`、
   `--evaluation-out`、`--campaign-evaluation-out` 以及对应 Makefile 变量
   `RUN_PLAN_PROFILE`、`CAMPAIGN_PLAN_PROFILE`、`ROUND_EVALUATION_ENABLE`、

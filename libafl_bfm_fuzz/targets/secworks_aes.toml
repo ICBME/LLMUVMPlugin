@@ -8,6 +8,9 @@ ref_model = "fuzz_examples.secworks_aes:AesRefModel"
 scoreboard = "fuzz_uvm.scoreboards:ResultScoreboard"
 coverage_model = "fuzz_examples.secworks_aes:AesCoverageModel"
 
+[harness_optimization]
+plugins = ["fuzz_examples.secworks_aes_harness_plugin:build_plugin"]
+
 [signals]
 clk = "clk"
 reset_n = "reset_n"

@@ -2103,6 +2103,8 @@ def build_candidate_promotion_package(
         promotion_status=promotion_status,
         action_effect_report=action_effect_report or {},
     )
+    action_effect = mapping(action_effect_report)
+    gap_actionability = mapping(gap_actionability_report)
     return {
         "schema_version": 1,
         "kind": "libafl_bfm_fuzz.harness_candidate_promotion_package",
@@ -2115,12 +2117,17 @@ def build_candidate_promotion_package(
         "top_variant": ranking.get("top_variant"),
         "threshold_summary": summary,
         "stability_summary": stability_summary or {},
-        "action_effect_summary": mapping(action_effect_report).get("summary")
-        if action_effect_report
-        else {},
-        "gap_actionability_summary": mapping(gap_actionability_report).get("summary")
-        if gap_actionability_report
-        else {},
+        "plugin_registry": action_effect.get("plugin_registry")
+        or gap_actionability.get("plugin_registry")
+        or {},
+        "plugin_validation": action_effect.get("plugin_validation")
+        or gap_actionability.get("plugin_validation")
+        or {},
+        "plugin_provenance": action_effect.get("plugin_provenance")
+        or gap_actionability.get("plugin_provenance")
+        or {},
+        "action_effect_summary": action_effect.get("summary") or {},
+        "gap_actionability_summary": gap_actionability.get("summary") or {},
         "action_effects": action_effects,
         "effective_actions": pruning["effective_actions"],
         "neutral_actions": pruning["neutral_actions"],
@@ -2391,6 +2398,8 @@ def build_candidate_gap_actionability_report(
         "uncovered_line_delta": delta,
         "remaining_gaps": gaps,
         "plugin_registry": registry.to_json(),
+        "plugin_validation": registry.validation_json(),
+        "plugin_provenance": registry.provenance_json(),
         "summary": {
             "baseline_uncovered_line_count": baseline_uncovered,
             "candidate_uncovered_line_count": candidate_uncovered,
@@ -2452,9 +2461,7 @@ def classify_gap_actionability(
 
 
 def default_candidate_regression_plugin_registry() -> HarnessPluginRegistry:
-    return default_harness_plugin_registry().with_gap_actionability_classifier(
-        aes_gap_actionability_classifier
-    )
+    return default_harness_plugin_registry()
 
 
 def candidate_regression_plugin_registry(
@@ -2462,71 +2469,6 @@ def candidate_regression_plugin_registry(
 ) -> HarnessPluginRegistry:
     base = default_candidate_regression_plugin_registry()
     return base if plugin_registry is None else base.merge(plugin_registry)
-
-
-def aes_gap_actionability_classifier(
-    gap: dict[str, Any],
-    context: HarnessGapActionabilityContext,
-) -> dict[str, Any] | None:
-    target = context.target
-    code = str(gap.get("code") or "")
-    file_name = str(gap.get("file") or "")
-    line = int(number_value(gap.get("line")) or 0)
-    result = dict(gap)
-    if target != "secworks_aes":
-        return None
-    if file_name.endswith("/aes.v") or file_name.endswith("aes.v"):
-        readback_payload = aes_readback_payload_for_gap(code=code, line=line)
-        if readback_payload:
-            result["actionability"] = "reachable_with_mmio_readback"
-            result["actionability_reason"] = (
-                "AES top-level read address gap can be exercised by sampling "
-                "symbolic MMIO registers or explicit safe read addresses after "
-                "the normal transaction."
-            )
-            result["recommended_action_type"] = "mmio_readback"
-            result["suggested_payload"] = readback_payload
-            return result
-        if "ADDR_BLOCK" in code and "address" in code:
-            result["actionability"] = "requires_mmio_write_surface"
-            result["actionability_reason"] = (
-                "This write-side address expression needs an explicit MMIO write "
-                "surface or driver extension; readback alone cannot toggle it."
-            )
-            result["recommended_action_type"] = "mmio_write"
-            result["suggested_payload"] = {"addresses": ["0x24"]}
-            return result
-    if "default" in code or "_ctrl" in code or file_name.endswith(
-        ("aes_core.v", "aes_key_mem.v", "aes_encipher_block.v", "aes_decipher_block.v")
-    ):
-        result["actionability"] = "requires_internal_state_surface"
-        result["actionability_reason"] = (
-            "Gap appears to be an internal defensive/default branch that cannot be "
-            "reliably driven by the current transaction or MMIO readback action."
-        )
-        return result
-    return None
-
-
-def aes_readback_payload_for_gap(*, code: str, line: int) -> dict[str, Any]:
-    if "ADDR_RESULT" in code:
-        return {"addresses": ["0x34"]}
-    registers = aes_readback_registers_for_gap(code=code, line=line)
-    if registers:
-        return {"registers": registers}
-    return {}
-
-
-def aes_readback_registers_for_gap(*, code: str, line: int) -> list[str]:
-    if any(name in code for name in ("ADDR_NAME0", "ADDR_NAME1", "ADDR_VERSION")):
-        return ["ADDR_NAME0", "ADDR_NAME1", "ADDR_VERSION"]
-    if "ADDR_CTRL" in code:
-        return ["ADDR_CTRL"]
-    if "ADDR_STATUS" in code:
-        return ["ADDR_STATUS"]
-    if 253 <= line <= 257:
-        return ["ADDR_NAME0", "ADDR_NAME1", "ADDR_VERSION", "ADDR_CTRL", "ADDR_STATUS"]
-    return []
 
 
 def build_candidate_action_effect_report(
@@ -2598,6 +2540,9 @@ def build_candidate_action_effect_report(
         "run_id": task.get("run_id"),
         "proposal_id": proposal.get("proposal_id"),
         "candidate_id": candidate_manifest.get("candidate_id"),
+        "plugin_registry": registry.to_json(),
+        "plugin_validation": registry.validation_json(),
+        "plugin_provenance": registry.provenance_json(),
         "variants": variants,
         "actions": aggregate_actions,
         "summary": {
