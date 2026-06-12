@@ -127,6 +127,22 @@ DEFAULT_CAMPAIGN_PLAN_PROFILES: Mapping[str, RunPlanProfile] = {
             "task/proposal/decision artifacts."
         ),
     ),
+    "campaign_with_evaluation_and_llm_advice": RunPlanProfile(
+        name="campaign_with_evaluation_and_llm_advice",
+        stage_names=(
+            "campaign_manifest",
+            "campaign_evaluation",
+            "harness_optimization_task",
+            "harness_optimization_proposal",
+            "harness_optimization_decision",
+            "harness_optimization_advice_report",
+        ),
+        description=(
+            "Write campaign evaluation, generate a schema-reviewed harness "
+            "optimization proposal, and emit an advice-only report without "
+            "sandbox apply or candidate regression."
+        ),
+    ),
     "campaign_with_evaluation_and_optimization_validation": RunPlanProfile(
         name="campaign_with_evaluation_and_optimization_validation",
         stage_names=(

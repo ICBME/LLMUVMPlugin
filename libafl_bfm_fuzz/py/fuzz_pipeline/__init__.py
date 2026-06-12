@@ -10,17 +10,17 @@ from .campaign_orchestrator import (
     normalize_campaign_modes,
     run_feedback_campaign_pipeline,
 )
-from .harness_trace import (
+from .harness_evidence.trace import (
     HarnessTraceBuilder,
     HarnessTraceOutputs,
     HarnessTraceResult,
 )
-from .harness_analysis import HarnessAnalyzer, UvmFuzzHarnessAnalyzer
-from .harness_llm_tasks import (
+from .harness_evidence.analysis import HarnessAnalyzer, UvmFuzzHarnessAnalyzer
+from .harness_evidence.llm_tasks import (
     HarnessLlmDatasetBuilder,
     HarnessLlmDatasetBuilderProtocol,
 )
-from .harness_candidate_regression import (
+from .harness_evidence.candidate_regression import (
     CandidateAcceptanceThresholds,
     CandidateActionAdapter,
     CandidateActionAdapterContext,
@@ -35,7 +35,7 @@ from .harness_candidate_regression import (
     build_gap_actionability_minimal_candidate_proposal,
     select_candidate_variants,
 )
-from .harness_plugins import (
+from .harness_evidence.plugins import (
     HarnessActionPlugin,
     HarnessGapActionabilityContext,
     HarnessPluginRegistry,
@@ -46,11 +46,11 @@ from .harness_plugins import (
     require_valid_harness_plugin_registry,
     validate_harness_plugin_registry,
 )
-from .harness_metadata import (
+from .harness_evidence.metadata import (
     HarnessMetadataExtractorProtocol,
     UvmFuzzMetadataExtractor,
 )
-from .harness_runtime_actions import (
+from .harness_evidence.runtime_actions import (
     CoverageFeedbackTuningRuntime,
     HarnessRuntimeActionManager,
     MmioReadbackRuntime,
@@ -60,7 +60,7 @@ from .harness_runtime_actions import (
     ScoreboardCheckRuntime,
     load_runtime_action_config,
 )
-from .harness_optimization import (
+from .harness_evidence.optimization import (
     CANDIDATE_EVALUATION_KIND,
     CANDIDATE_MANIFEST_KIND,
     DECISION_KIND,
@@ -69,6 +69,7 @@ from .harness_optimization import (
     PATCH_KIND,
     PROPOSAL_KIND,
     TASK_KIND,
+    ADVICE_REPORT_KIND,
     HarnessCandidateEvaluationBackend,
     HarnessOptimizationAdapter,
     HarnessOptimizationPaths,
@@ -79,6 +80,8 @@ from .harness_optimization import (
     NoopHarnessCandidateEvaluationBackend,
     NoopHarnessOptimizerBackend,
     OpenAICompatibleChatTransport,
+    PromptOnlyHarnessOptimizerBackend,
+    build_harness_optimization_advice_report,
     build_harness_optimization_decision,
     build_harness_optimization_final_decision,
     build_harness_optimization_metric_delta,
@@ -88,8 +91,8 @@ from .harness_optimization import (
     harness_optimization_paths,
     validate_harness_optimization_proposal,
 )
-from .harness_records import HarnessRecordProjector, HarnessRecordProjectorProtocol
-from .harness_rollup import CampaignTraceRollupBuilder, campaign_trace_rollup_path
+from .harness_evidence.records import HarnessRecordProjector, HarnessRecordProjectorProtocol
+from .harness_evidence.rollup import CampaignTraceRollupBuilder, campaign_trace_rollup_path
 from .orchestrator import (
     PipelineContext,
     PipelineOrchestrator,
@@ -162,6 +165,7 @@ __all__ = [
     "CandidateActionAdapterContext",
     "CandidateActionAdapterResult",
     "CandidateRegressionSettings",
+    "ADVICE_REPORT_KIND",
     "ConnectorEdge",
     "COVERAGE_FEEDBACK_TOPOLOGY",
     "CorpusGeneratorAdapter",
@@ -208,6 +212,7 @@ __all__ = [
     "NoopHarnessCandidateEvaluationBackend",
     "ObservationRuntime",
     "OpenAICompatibleChatTransport",
+    "PromptOnlyHarnessOptimizerBackend",
     "PipelineContext",
     "PipelineOrchestrator",
     "PipelineTopology",
@@ -240,6 +245,7 @@ __all__ = [
     "PATCH_KIND",
     "PROPOSAL_KIND",
     "TASK_KIND",
+    "build_harness_optimization_advice_report",
     "build_harness_optimization_decision",
     "build_harness_optimization_final_decision",
     "build_harness_optimization_metric_delta",

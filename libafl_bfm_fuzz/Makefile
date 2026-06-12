@@ -120,7 +120,7 @@ GHDL_ARGS := --ieee=synopsys
 COCOTB_HDL_TIMEUNIT = 1ns
 COCOTB_HDL_TIMEPRECISION = 1ps
 
-.PHONY: generate-corpus check check-corpus check-uvm check-all coverage-run coverage-report coverage-feedback llm-coverage-feedback feedback-fuzz llm-feedback-fuzz feedback-campaign real-candidate-smoke-campaign real-candidate-evidence-campaign real-candidate-feedback-campaign llm-feedback-campaign require-target-config require-rtl
+.PHONY: generate-corpus check check-corpus check-uvm check-all coverage-run coverage-report coverage-feedback llm-coverage-feedback feedback-fuzz llm-feedback-fuzz feedback-campaign llm-harness-advice-campaign prompt-only-harness-advice-campaign real-candidate-smoke-campaign real-candidate-evidence-campaign real-candidate-feedback-campaign llm-feedback-campaign require-target-config require-rtl
 
 COCOTB_MAKEFILES := $(shell cocotb-config --makefiles 2>/dev/null)
 ifneq ($(COCOTB_MAKEFILES),)
@@ -377,6 +377,18 @@ real-candidate-evidence-campaign: CANDIDATE_MIN_IMPROVED_METRICS=1
 real-candidate-evidence-campaign: feedback-campaign
 
 real-candidate-feedback-campaign: real-candidate-evidence-campaign
+
+llm-harness-advice-campaign: CAMPAIGN_PLAN_PROFILE=campaign_with_evaluation_and_llm_advice
+llm-harness-advice-campaign: CAMPAIGN_EVALUATION_ENABLE=1
+llm-harness-advice-campaign: HARNESS_OPTIMIZER_BACKEND=llm
+llm-harness-advice-campaign: HARNESS_CANDIDATE_BACKEND=
+llm-harness-advice-campaign: feedback-campaign
+
+prompt-only-harness-advice-campaign: CAMPAIGN_PLAN_PROFILE=campaign_with_evaluation_and_llm_advice
+prompt-only-harness-advice-campaign: CAMPAIGN_EVALUATION_ENABLE=1
+prompt-only-harness-advice-campaign: HARNESS_OPTIMIZER_BACKEND=prompt-only
+prompt-only-harness-advice-campaign: HARNESS_CANDIDATE_BACKEND=
+prompt-only-harness-advice-campaign: feedback-campaign
 
 llm-feedback-campaign: CAMPAIGN_MODES=llm_feedback
 llm-feedback-campaign: feedback-campaign

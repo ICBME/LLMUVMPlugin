@@ -16,7 +16,7 @@ from fuzz_feedback.coverage import build_summary
 from fuzz_feedback.feedback_loop import build_gap_feedback, build_mutation_feedback
 from fuzz_feedback.mutation_planner import plan_mutations_from_rtl_gaps
 
-from .harness_runtime_actions import CoverageFeedbackTuningRuntime
+from .harness_evidence.runtime_actions import CoverageFeedbackTuningRuntime
 from .orchestrator import PipelineContext, PipelineOrchestrator, StepSpec
 from .topology import FULL_FUZZ_TOPOLOGY, PipelineTopology
 

@@ -114,34 +114,38 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 - 定义 `RunEvaluationAdapter`、`CampaignEvaluationAdapter` 和 `EvaluationBackends`。
 - round/campaign evaluation 都是可替换 backend，并通过 registry stage 接入主 DAG。
 
-`py/fuzz_pipeline/harness_records.py`
+Harness evidence 相关实现现在集中在 `py/fuzz_pipeline/harness_evidence/`。旧的
+`py/fuzz_pipeline/harness*.py` 文件保留为兼容 re-export wrapper，方便已有脚本和测试继续
+使用原 import 路径；新代码应优先引用 `harness_evidence` 下的模块。
+
+`py/fuzz_pipeline/harness_evidence/records.py`
 
 - 把通用 connector final event 投影为 harness execution record。
 - 负责提取 run/round/stage、artifact evidence 等 harness 级字段，但不做评测判断。
 
-`py/fuzz_pipeline/harness_metadata.py`
+`py/fuzz_pipeline/harness_evidence/metadata.py`
 
 - 定义可注入的 `HarnessMetadataExtractorProtocol`。
 - 默认 `UvmFuzzMetadataExtractor` 负责 UVM-fuzz case/directive/corpus hash 归因规则，
   包括把 pyUVM replay `origin` 作为缺省 `directive_id`。
 
-`py/fuzz_pipeline/harness_analysis.py`
+`py/fuzz_pipeline/harness_evidence/analysis.py`
 
 - 定义可注入的 `HarnessAnalyzer` protocol。
 - 默认 `UvmFuzzHarnessAnalyzer` 负责 UVM-fuzz 业务评测，包括 connector/module、
   failure cluster、case/directive、coverage/feedback 和 optimization hints 聚合。
 
-`py/fuzz_pipeline/harness_llm_tasks.py`
+`py/fuzz_pipeline/harness_evidence/llm_tasks.py`
 
 - 负责把 execution records 和 evaluation report 转换为 LLM optimization dataset。
 - 后续可在这里扩展 task-level prompt/evidence/replay command，而不影响 trace core。
 
-`py/fuzz_pipeline/harness_optimization.py`
+`py/fuzz_pipeline/harness_evidence/optimization.py`
 
-- 定义 harness LLM optimization 的结构化 artifact：第一阶段包括 optimization task、
-  proposal 和 schema decision；第二阶段包括 sandbox apply、candidate evaluation、
-  metric delta 和 final decision；第三阶段让 candidate evaluation 可接入真实 sandbox
-  regression backend。
+- 定义 harness LLM optimization 的结构化 artifact：advice-only 闭环包括 optimization
+  task、proposal、schema decision 和 advice report；validation 闭环包括 sandbox apply、
+  candidate evaluation、metric delta 和 final decision；真实 evidence 闭环让 candidate
+  evaluation 可接入真实 sandbox regression backend。
 - `HarnessOptimizationAdapter` 从 campaign evaluation、harness evaluation、LLM dataset
   和 campaign rollup 构造 task；optimizer backend 只返回 proposal，不直接修改源码或
   harness artifact。
@@ -152,12 +156,19 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   evaluation、LLM dataset、campaign rollup 和 action effect report 组装成 optimizer
   prompt artifact，调用 OpenAI-compatible chat transport，记录 response provenance，并在
   proposal schema/safe action DSL 校验失败时生成 repair prompt 重试。
+- `PromptOnlyHarnessOptimizerBackend` 只写 optimizer prompt 和 `not_called` response
+  provenance，不调用 LLM transport；proposal 固定为 schema-valid no-op，适合先审查
+  prompt 或把 prompt 交给外部 LLM。
+- `harness_optimization_advice_report` 是 advice-only review artifact。它汇总
+  observations、recommended_actions、invalid_or_rejected_reasons、handoff 和
+  reproducibility，并明确标注 `sandbox_apply_triggered=false`、
+  `candidate_regression_triggered=false`、`mainline_apply_triggered=false`。
 - 第二阶段 profile 使用 sandbox-only apply：安全 action 子集会被转换为
   `harness_optimization_sandbox` 下的候选 artifact；`ref_model_patch` 等潜在源码修改
   先标为 unsafe/skipped。默认 `NoopHarnessCandidateEvaluationBackend` 只写
   `not_run` validation report，真实候选回归可通过 backend 注入。
 
-`py/fuzz_pipeline/harness_candidate_regression.py`
+`py/fuzz_pipeline/harness_evidence/candidate_regression.py`
 
 - 定义 `HarnessCandidateRegressionBackend`、`CandidateRegressionSettings` 和
   `CandidateAcceptanceThresholds`，并公开 `CandidateActionAdapter` /
@@ -186,7 +197,7 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   variant evaluations、action effect report、variant ranking、promotion package 和
   acceptance thresholds；final decision 只给出 review 级结论，不修改源码主线。
 
-`py/fuzz_pipeline/harness_plugins.py`
+`py/fuzz_pipeline/harness_evidence/plugins.py`
 
 - 定义 `HarnessPluginRegistry`、`HarnessActionPlugin` 和
   `HarnessGapActionabilityContext`，用于把 harness optimization 的 action surface、
@@ -211,7 +222,7 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   plugin validation gate，可用 `--no-strict-harness-plugin-validation` 或
   `HARNESS_STRICT_PLUGIN_VALIDATION=0` 放宽。
 
-`py/fuzz_pipeline/harness_runtime_actions.py`
+`py/fuzz_pipeline/harness_evidence/runtime_actions.py`
 
 - 定义 safe action runtime config schema、loader、metrics writer 和
   `HarnessRuntimeActionManager`。pyUVM replay adapter 只调用 runtime manager 的
@@ -237,14 +248,14 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   `improved`、`neutral`、`regressed` 或 `not_consumed`，写出
   `candidate_action_effect_report`。
 
-`py/fuzz_pipeline/harness_rollup.py`
+`py/fuzz_pipeline/harness_evidence/rollup.py`
 
 - 负责把 campaign manifest、harness execution records 和 harness evaluation 聚合为
   campaign-level trace rollup。
 - 输出跨 round 的 coverage trend、failure trend、case effectiveness 和 directive
   effectiveness，供后续 LLM 自动优化 harness 使用。
 
-`py/fuzz_pipeline/harness_trace.py`
+`py/fuzz_pipeline/harness_evidence/trace.py`
 
 - 保留 `HarnessTraceBuilder`、`HarnessTraceOutputs` 和 `HarnessTraceResult` 兼容入口。
 - 作为 facade 串联 trace core、record projector、业务 analyzer 和 LLM dataset builder；
@@ -318,6 +329,12 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   `campaign_with_evaluation_and_optimization` 在 campaign evaluation 后生成
   `harness_optimization_task`、`harness_optimization_proposal` 和
   `harness_optimization_decision`。默认 campaign profile 不启用优化 stage。
+- Harness LLM advice-only 闭环作为显式 campaign profile 接入：
+  `campaign_with_evaluation_and_llm_advice` 在第一阶段后追加
+  `harness_optimization_advice_report`。该 profile 只做 schema/evidence/action DSL review，
+  不进入 sandbox apply、candidate regression 或源码主线修改；Make 入口
+  `llm-harness-advice-campaign` 使用真实 LLM backend，`prompt-only-harness-advice-campaign`
+  只生成 prompt/provenance 供外部审查。
 - Harness LLM Optimization 第二阶段已作为更长的显式 campaign profile 接入：
   `campaign_with_evaluation_and_optimization_validation` 在第一阶段之后追加 sandbox
   apply、candidate evaluation、metric delta 和 final decision。该 profile 只写 sandbox
@@ -451,6 +468,9 @@ run/campaign profile 层使用 `RunStage` 描述 stage contract，并用
 - `campaign_with_evaluation`：写出 manifest 后追加 `campaign_evaluation`
 - `campaign_with_evaluation_and_optimization`：追加 phase-one harness optimization
   task/proposal/decision，默认 no-op optimizer 只生成可验证占位 proposal，不应用变更
+- `campaign_with_evaluation_and_llm_advice`：追加 phase-one 和
+  `harness_optimization_advice_report`，用于输出可审查、可复现、可交给后续真实验证的
+  LLM 优化建议；不会触发 sandbox/candidate regression
 - `campaign_with_evaluation_and_optimization_validation`：在 phase-one 后追加 sandbox
   apply、candidate evaluation、metric delta 和 final decision；默认候选验证为 `not_run`
   占位，可由 backend 替换；显式注入 `HarnessCandidateRegressionBackend` 后会运行 sandbox
@@ -660,11 +680,12 @@ optimization dataset，并把这些产物路径与摘要挂到 `harness_trace` �
 ## Harness Trace 聚合
 
 Harness Trace 聚合被拆成多层：`connector_observe.trace` 负责通用 event/quality；
-`harness_records.py` 负责 execution record 投影；`harness_metadata.py` 负责可替换的
-case/directive/corpus 归因；`harness_analysis.py` 负责 UVM-fuzz 业务评测；
-`harness_llm_tasks.py` 负责面向 LLM 的数据视图；`harness_rollup.py` 负责 campaign
-跨轮聚合。`HarnessTraceBuilder` 仍作为兼容 facade，把 connector event stream 与
-round/campaign manifest 聚合为以下派生产物：
+`harness_evidence/records.py` 负责 execution record 投影；
+`harness_evidence/metadata.py` 负责可替换的 case/directive/corpus 归因；
+`harness_evidence/analysis.py` 负责 UVM-fuzz 业务评测；
+`harness_evidence/llm_tasks.py` 负责面向 LLM 的数据视图；
+`harness_evidence/rollup.py` 负责 campaign 跨轮聚合。`HarnessTraceBuilder` 仍作为兼容
+facade，把 connector event stream 与 round/campaign manifest 聚合为以下派生产物：
 
 - `<evaluation>_harness_records.jsonl`：逐 connector 终态执行记录，每条记录包含
   run/round/stage/case、`span_id`、`case_id`、`directive_id`、`corpus_sha256`、
@@ -886,6 +907,38 @@ uv run make -C libafl_bfm_fuzz \
   CAMPAIGN_EVALUATION_ENABLE=1 \
   feedback-campaign
 ```
+
+显式启用 LLM harness advice-only 闭环：
+
+```sh
+uv run make -C libafl_bfm_fuzz llm-harness-advice-campaign \
+  TARGET=secworks_sha256 \
+  VERILOG_SOURCES="/path/to/rtl/*.v" \
+  TOPLEVEL=sha256 \
+  CAMPAIGN_ROUNDS=1 \
+  CAMPAIGN_MODES=heuristic_feedback
+```
+
+该入口等价于选择
+`CAMPAIGN_PLAN_PROFILE=campaign_with_evaluation_and_llm_advice`、
+`CAMPAIGN_EVALUATION_ENABLE=1` 和 `HARNESS_OPTIMIZER_BACKEND=llm`。它会写出
+`harness_optimization_task`、`harness_optimization_optimizer_prompt`、
+`harness_optimization_optimizer_response`、`harness_optimization_proposal`、
+`harness_optimization_decision` 和 `harness_optimization_advice_report`，但不会写出
+`harness_optimization_patch`、`harness_optimization_candidate_manifest` 或 candidate
+regression artifact。
+
+如果只想审查 prompt 或交给外部 LLM，可以使用：
+
+```sh
+uv run make -C libafl_bfm_fuzz prompt-only-harness-advice-campaign \
+  TARGET=secworks_sha256 \
+  VERILOG_SOURCES="/path/to/rtl/*.v" \
+  TOPLEVEL=sha256
+```
+
+CLI 中相同能力由 `--campaign-plan-profile campaign_with_evaluation_and_llm_advice` 搭配
+`--harness-optimizer-backend llm` 或 `--harness-optimizer-backend prompt-only` 启用。
 
 显式启用 sandbox candidate validation：
 

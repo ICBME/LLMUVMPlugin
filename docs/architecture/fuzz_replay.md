@@ -71,12 +71,16 @@
   adapter。
 - `run_evaluation.py`：默认 round/campaign evaluation report adapter，以及可替换的
   `EvaluationBackends`。
-- `harness_optimization.py`：从 campaign evaluation、harness evaluation、LLM dataset、
-  campaign rollup 和 action effect report 生成 optimization task/proposal/schema
-  decision；可显式注入真实 LLM optimizer backend 写出 prompt/response provenance，并在
-  proposal schema/safe action DSL 校验失败时 repair/retry；同时支持显式 profile 下的
-  sandbox apply、candidate evaluation、metric delta 和 final decision artifacts。
-- `harness_candidate_regression.py`：真实 candidate validation backend，将安全 proposal
+- `harness_evidence/`：集中保存 harness 采集、评测、LLM dataset、optimization proposal、
+  plugin/runtime action 和 candidate regression 逻辑；旧的 `harness*.py` 模块保留为
+  compatibility wrapper，便于已有 import 平滑迁移。
+- `harness_evidence/optimization.py`：从 campaign evaluation、harness evaluation、LLM
+  dataset、campaign rollup 和 action effect report 生成 optimization
+  task/proposal/schema decision/advice report；可显式注入真实 LLM optimizer backend 写出
+  prompt/response provenance，或使用 prompt-only backend 只生成 prompt；同时支持显式
+  validation profile 下的 sandbox apply、candidate evaluation、metric delta 和 final
+  decision artifacts。
+- `harness_evidence/candidate_regression.py`：真实 candidate validation backend，将安全 proposal
   action 子集物化成 sandbox run config；candidate action adapter 会把 `replay_probe`、
   `scoreboard_check`、`coverage_feedback_tuning` 等 safe action 转换为 sandbox overlay、
   config artifact 和 `HARNESS_*_CONFIG` make 变量，并复用现有 campaign/run 编排执行候选
@@ -86,7 +90,7 @@
   执行 paired repeated validation，按相同 seed 偏移成对重跑 matched no-op 和 candidate，
   将 repeat mean/worst/variance/flaky 写入 `candidate_paired_validation`，并用均值
   metrics 与 flaky threshold 做最终证据判断。
-- `harness_runtime_actions.py`：safe action runtime consumer，负责加载 sandbox config，
+- `harness_evidence/runtime_actions.py`：safe action runtime consumer，负责加载 sandbox config，
   在 replay driver、scoreboard 和 coverage feedback 业务层消费 `replay_probe`、
   `scoreboard_check`、`coverage_feedback_tuning`，并把执行指标写入
   `harness_runtime_metrics`。

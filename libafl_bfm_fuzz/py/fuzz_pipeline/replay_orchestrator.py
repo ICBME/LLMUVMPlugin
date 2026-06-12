@@ -8,7 +8,7 @@ from connector_observe import ObservationContext
 from connector_observe.observers import NullObserver
 from fuzz_bfm.target_config import TargetConfig
 
-from .harness import (
+from .harness_evidence.collection import (
     functional_coverage_metrics,
     observation_context_from_env,
     path_sha256,

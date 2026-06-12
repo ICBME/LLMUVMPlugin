@@ -26,6 +26,7 @@ from fuzz_pipeline import (  # noqa: E402
     HarnessCandidateRegressionBackend,
     LlmHarnessOptimizerBackend,
     NoopHarnessOptimizerBackend,
+    PromptOnlyHarnessOptimizerBackend,
     default_harness_plugin_registry,
 )
 from fuzz_pipeline.harness import close_observation  # noqa: E402
@@ -215,7 +216,7 @@ def add_feedback_campaign_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--require-real-llm", action="store_true")
     parser.add_argument(
         "--harness-optimizer-backend",
-        choices=("noop", "llm"),
+        choices=("noop", "prompt-only", "llm"),
         default=None,
         help="Harness optimizer backend for campaign optimization profiles.",
     )
@@ -596,6 +597,8 @@ def feedback_campaign_evaluation_backends(
         harness_optimizer=(
             LlmHarnessOptimizerBackend.from_env()
             if optimizer == "llm"
+            else PromptOnlyHarnessOptimizerBackend.from_env()
+            if optimizer == "prompt-only"
             else NoopHarnessOptimizerBackend()
             if optimizer == "noop"
             else None
@@ -653,7 +656,9 @@ def selected_harness_optimizer_backend(args: argparse.Namespace) -> str | None:
     value = value.strip().lower()
     if value in {"", "none"}:
         return None
-    if value not in {"noop", "llm"}:
+    if value in {"prompt_only", "prompt"}:
+        value = "prompt-only"
+    if value not in {"noop", "prompt-only", "llm"}:
         raise SystemExit(f"unknown harness optimizer backend: {value}")
     return value
 

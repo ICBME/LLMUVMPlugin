@@ -124,6 +124,7 @@
 - `campaign_manifest`
 - `campaign_with_evaluation`
 - `campaign_with_evaluation_and_optimization`
+- `campaign_with_evaluation_and_llm_advice`
 - `campaign_with_evaluation_and_optimization_validation`
 - `campaign_with_evaluation_and_optimization_real_validation`
 
@@ -138,7 +139,14 @@
 - `EvaluationBackends(harness_optimizer=...)`：替换 phase-one harness optimizer proposal
   backend；默认 `NoopHarnessOptimizerBackend` 不应用变更。需要真实 LLM 生成 proposal
   时可注入 `LlmHarnessOptimizerBackend`，它会写出 optimizer prompt/response provenance
-  artifact，并在失败时执行 schema repair/retry。
+  artifact，并在失败时执行 schema repair/retry；需要先审查 prompt 或把 prompt 交给外部
+  LLM 时可注入 `PromptOnlyHarnessOptimizerBackend`，它写出 prompt 和 `not_called`
+  response provenance，但不调用 LLM transport。
+- `campaign_with_evaluation_and_llm_advice`：advice-only profile，在
+  task/proposal/decision 后追加 `harness_optimization_advice_report`，输出 observations、
+  recommended actions、handoff 和 reproducibility，并显式声明未触发 sandbox apply、
+  candidate regression 或源码主线修改。Make 入口为 `llm-harness-advice-campaign` 和
+  `prompt-only-harness-advice-campaign`。
 - `EvaluationBackends(harness_candidate_evaluation=...)`：替换第二阶段 candidate
   validation backend；默认 `NoopHarnessCandidateEvaluationBackend` 生成 `not_run`
   validation report，不运行真实回归。
@@ -158,7 +166,7 @@
   第四阶段进一步公开 `CandidateActionAdapter` / `JsonConfigActionAdapter`，默认把
   `replay_probe`、`scoreboard_check`、`coverage_feedback_tuning` 等 safe action 物化为
   per-action config artifact，并产出 `candidate_variant_ranking` 和
-  `candidate_promotion_package`。第五阶段新增 `harness_runtime_actions.py`，让这些
+  `candidate_promotion_package`。第五阶段新增 `harness_evidence/runtime_actions.py`，让这些
   per-action config 在 candidate run 内被 replay/scoreboard/coverage feedback 真实消费，
   并把 `candidate_runtime_metrics` 合入 candidate evaluation metrics。第六阶段新增
   `candidate_variant_evaluations` 和 `candidate_action_effect_report`，用于记录 top-K 或
@@ -258,9 +266,11 @@
    execution records 包含 `span_id`、`case_id`、`directive_id` 和 `corpus_sha256`，
    harness evaluation 额外提供 hanging span、case/directive 聚合和 trace quality report；
    replacement backend 仍可完全接管这部分逻辑。
-   Harness optimization 第一阶段已完成：`harness_optimization.py` 从 campaign evaluation、
-   harness evaluation、LLM dataset 和 campaign rollup 构造结构化 task；optimizer backend
-   返回 proposal；decision artifact 只做 schema-level accept/reject，不执行 sandbox apply。
+   Harness optimization 第一阶段已完成：`harness_evidence/optimization.py` 从 campaign
+   evaluation、harness evaluation、LLM dataset 和 campaign rollup 构造结构化 task；
+   optimizer backend 返回 proposal；decision artifact 只做 schema-level accept/reject，
+   不执行 sandbox apply。advice-only profile 进一步写出 advice report，用于把 LLM 建议和
+   后续 validation handoff 分离。
    Harness optimization 第二阶段框架已完成：显式 validation profile 将 accepted proposal
    转换成 sandbox-only candidate artifacts，生成 candidate manifest、candidate evaluation、
    baseline/candidate metric delta 和 final decision；`ref_model_patch` 等潜在源码修改 action
@@ -343,12 +353,14 @@
 - `tests/test_run_profiles_evaluation.py`：覆盖 run/campaign profile 选择、mode mismatch
   拒绝、round/campaign evaluation stage、`EvaluationBackends` 替换、自定义 campaign
   stage、非法 campaign DAG 拒绝、harness optimization campaign profile 和 fake optimizer
-  backend、harness optimization validation profile 和 fake candidate validation backend、
-  real validation profile 以及 CLI real candidate backend factory，外加
+  backend、LLM advice-only profile 不触发 candidate backend、harness optimization validation
+  profile 和 fake candidate validation backend、real validation profile 以及 CLI real/prompt-only
+  backend factory，外加
   `CampaignRoundScheduler` 对上一轮 manifest state 的传递。
 - `tests/test_harness_optimization.py`：覆盖 phase-one harness optimization task/proposal/
-  decision artifact 写出、默认 no-op proposal、非法 proposal schema reject、sandbox apply、
-  unsafe action skip、candidate metric delta、final decision、真实 candidate regression
+  decision/advice report artifact 写出、默认 no-op proposal、prompt-only prompt provenance、
+  非法 proposal schema reject、sandbox apply、unsafe action skip、candidate metric delta、
+  final decision、真实 candidate regression
   backend 的 sandbox run config 物化、safe action adapter config 输出、内部 campaign
   编排调用、adapter metrics、runtime action schema/消费/指标聚合、action effect report、
   top-K/all-actions variant 独立回归、multi-candidate ranking、promotion package、阈值 reject、真实

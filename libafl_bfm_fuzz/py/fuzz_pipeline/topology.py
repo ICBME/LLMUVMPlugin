@@ -199,6 +199,7 @@ RUN_ORCHESTRATION_TOPOLOGY = PipelineTopology(
         ComponentNode("harness_optimization_optimizer_response", "artifact", "Optional LLM optimizer response provenance"),
         ComponentNode("harness_optimization_proposal", "artifact", "Optimizer proposal before application"),
         ComponentNode("harness_optimization_decision", "artifact", "Schema-level accept/reject decision"),
+        ComponentNode("harness_optimization_advice_report", "artifact", "Advice-only harness optimization review report"),
         ComponentNode("harness_optimization_patch", "artifact", "Sandbox-only candidate artifact application manifest"),
         ComponentNode("harness_optimization_candidate_manifest", "artifact", "Candidate harness artifacts generated in sandbox"),
         ComponentNode("harness_optimization_candidate_evaluation", "artifact", "Candidate validation report"),
@@ -308,6 +309,17 @@ RUN_ORCHESTRATION_TOPOLOGY = PipelineTopology(
                 "harness_optimization_proposal",
             ),
             output_roles=("harness_optimization_decision",),
+        ),
+        ConnectorEdge(
+            "harness_optimization_decision_to_advice_report",
+            "harness_optimization_decision",
+            "harness_optimization_advice_report",
+            input_roles=(
+                "harness_optimization_task",
+                "harness_optimization_proposal",
+                "harness_optimization_decision",
+            ),
+            output_roles=("harness_optimization_advice_report",),
         ),
         ConnectorEdge(
             "harness_optimization_decision_to_candidate_manifest",

@@ -16,6 +16,7 @@ from fuzz_bfm.bfm_base import ReplayResult  # noqa: E402
 from fuzz_bfm.corpus import FuzzCase  # noqa: E402
 from fuzz_bfm.target_config import TargetConfig, load_target_config  # noqa: E402
 from fuzz_pipeline import (  # noqa: E402
+    ADVICE_REPORT_KIND,
     CANDIDATE_EVALUATION_KIND,
     CANDIDATE_MANIFEST_KIND,
     CandidateAcceptanceThresholds,
@@ -39,6 +40,7 @@ from fuzz_pipeline import (  # noqa: E402
     default_harness_plugin_registry,
     load_harness_plugin_registry,
     NoopHarnessOptimizerBackend,
+    PromptOnlyHarnessOptimizerBackend,
     build_candidate_action_effect_report,
     build_candidate_gap_actionability_report,
     build_candidate_promotion_package,
@@ -322,6 +324,51 @@ def test_llm_optimizer_backend_writes_prompt_response_and_repairs() -> None:
     )
     assert proposal["llm_provenance"]["repaired"] is True
     assert decision["decision"] == "accepted"
+
+
+def test_prompt_only_optimizer_writes_prompt_response_and_advice_report() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        campaign_evaluation, campaign_manifest, manifest_path = _source_payloads(root)
+        evaluation_path = root / "campaign_evaluation.json"
+        paths = harness_optimization_paths(evaluation_path)
+        adapter = HarnessOptimizationAdapter(
+            target="demo",
+            paths=paths,
+            campaign_evaluation_path=evaluation_path,
+            campaign_manifest_path=manifest_path,
+            cwd=root,
+            optimizer_backend=PromptOnlyHarnessOptimizerBackend(
+                model="fake-model",
+                sample_limit=1,
+            ),
+        )
+
+        task = adapter.run_task(campaign_evaluation, campaign_manifest)
+        proposal = adapter.run_proposal(task)
+        decision = adapter.run_decision(task, proposal)
+        report = adapter.run_advice_report(task, proposal, decision)
+        prompt = json.loads(paths.optimizer_prompt.read_text(encoding="utf-8"))
+        response = json.loads(paths.optimizer_response.read_text(encoding="utf-8"))
+        written_report = json.loads(paths.advice_report.read_text(encoding="utf-8"))
+
+    assert proposal["status"] == "no_op"
+    assert proposal["source"] == "prompt_only"
+    assert proposal["llm_provenance"]["transport_called"] is False
+    assert prompt["kind"] == "libafl_bfm_fuzz.harness_optimizer_prompt"
+    assert len(prompt["context"]["llm_dataset_samples"]) == 1
+    assert response["status"] == "not_called"
+    assert report["kind"] == ADVICE_REPORT_KIND
+    assert report["status"] == "no_action"
+    assert report["advice_only_guard"]["sandbox_apply_triggered"] is False
+    assert report["advice_only_guard"]["candidate_regression_triggered"] is False
+    assert report["validation_scope"]["candidate_metric_validation"] is False
+    assert report["reproducibility"]["artifacts"]["optimizer_prompt"] == str(
+        paths.optimizer_prompt
+    )
+    assert written_report == report
+    assert not paths.patch.exists()
+    assert not paths.candidate_evaluation.exists()
 
 
 def test_harness_optimization_decision_rejects_invalid_safe_action_dsl() -> None:

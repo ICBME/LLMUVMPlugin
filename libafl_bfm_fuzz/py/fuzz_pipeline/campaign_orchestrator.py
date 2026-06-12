@@ -8,8 +8,8 @@ from typing import Any, Callable, Mapping
 
 from connector_observe import ObservationContext
 
-from .harness import observation_context_from_env
-from .harness_optimization import (
+from .harness_evidence.collection import observation_context_from_env
+from .harness_evidence.optimization import (
     HarnessOptimizationAdapter,
     HarnessOptimizationPaths,
     NoopHarnessCandidateEvaluationBackend,
@@ -692,6 +692,24 @@ class CampaignOrchestrator:
                     ),
                     output_roles=("harness_optimization_decision",),
                 ),
+                "harness_optimization_advice_report": lambda: RunStage(
+                    name="harness_optimization_advice_report",
+                    handler=lambda results: (
+                        self._write_harness_optimization_advice_report(results)
+                    ),
+                    requires_results=(
+                        "harness_optimization_task",
+                        "harness_optimization_proposal",
+                        "harness_optimization_decision",
+                    ),
+                    produces_results=("harness_optimization_advice_report",),
+                    input_roles=(
+                        "harness_optimization_task",
+                        "harness_optimization_proposal",
+                        "harness_optimization_decision",
+                    ),
+                    output_roles=("harness_optimization_advice_report",),
+                ),
                 "harness_optimization_apply": lambda: RunStage(
                     name="harness_optimization_apply",
                     handler=lambda results: self._write_harness_optimization_apply(
@@ -963,6 +981,60 @@ class CampaignOrchestrator:
                     "error_count",
                     0,
                 ),
+            },
+            metadata={
+                "target": self.config.target,
+                "modes": ",".join(self.config.modes),
+                "rounds": self.config.rounds,
+            },
+        )
+        return self.orchestrator.run_step(step, self.context)
+
+    def _write_harness_optimization_advice_report(
+        self,
+        stage_results: RunResults,
+    ) -> dict[str, Any]:
+        paths = self._campaign_optimization_paths()
+        self.context.artifacts[
+            "harness_optimization_advice_report"
+        ] = paths.advice_report
+        task = self._required_mapping(
+            stage_results,
+            "harness_optimization_task",
+            "harness_optimization_advice_report",
+        )
+        proposal = self._required_mapping(
+            stage_results,
+            "harness_optimization_proposal",
+            "harness_optimization_advice_report",
+        )
+        decision = self._required_mapping(
+            stage_results,
+            "harness_optimization_decision",
+            "harness_optimization_advice_report",
+        )
+        step = StepSpec(
+            name="harness_optimization_advice_report",
+            connector="harness_optimization_decision_to_advice_report",
+            handler=lambda _context: self._harness_optimization_adapter(
+                paths
+            ).run_advice_report(task, proposal, decision),
+            input_roles=(
+                "harness_optimization_task",
+                "harness_optimization_proposal",
+                "harness_optimization_decision",
+            ),
+            output_roles=("harness_optimization_advice_report",),
+            metrics=lambda value: {
+                "advice_status": value.get("status"),
+                "recommended_action_count": value.get("summary", {}).get(
+                    "recommended_action_count",
+                    0,
+                ),
+                "candidate_regression_triggered": value.get(
+                    "advice_only_guard",
+                    {},
+                ).get("candidate_regression_triggered"),
             },
             metadata={
                 "target": self.config.target,
@@ -1306,6 +1378,8 @@ class CampaignOrchestrator:
                 if Path(path).exists()
             }
         )
+        if self._campaign_plan_includes("harness_optimization_advice_report"):
+            artifacts.update(paths.advice_json())
         if self._campaign_plan_includes("harness_optimization_apply"):
             artifacts.update(paths.validation_json())
         return artifacts

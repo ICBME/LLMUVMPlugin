@@ -10,13 +10,13 @@ from typing import Any, Callable, Protocol
 from connector_observe import ObservationContext
 
 from .coverage_feedback import CoverageFeedbackResult
-from .harness_optimization import (
+from .harness_evidence.optimization import (
     HarnessCandidateEvaluationBackend,
     HarnessOptimizerBackend,
 )
-from .harness_plugins import HarnessPluginRegistry
-from .harness_trace import HarnessTraceBuilder, HarnessTraceOutputs
-from .harness_rollup import CampaignTraceRollupBuilder, campaign_trace_rollup_path
+from .harness_evidence.plugins import HarnessPluginRegistry
+from .harness_evidence.trace import HarnessTraceBuilder, HarnessTraceOutputs
+from .harness_evidence.rollup import CampaignTraceRollupBuilder, campaign_trace_rollup_path
 from .run_adapters import RunPathResolver
 
 

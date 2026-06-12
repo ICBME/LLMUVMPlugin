@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "libafl_bfm_fuzz" / "scripts"))
 
 from connector_observe import ObservationContext
 from fuzz_pipeline import (
+    ADVICE_REPORT_KIND,
     CampaignConfig,
     CampaignOrchestrator,
     CANDIDATE_EVALUATION_KIND,
@@ -22,6 +23,7 @@ from fuzz_pipeline import (
     HarnessCandidateRegressionBackend,
     LlmHarnessOptimizerBackend,
     PROPOSAL_KIND,
+    PromptOnlyHarnessOptimizerBackend,
     RunPlanProfile,
     RunStage,
     harness_optimization_paths,
@@ -531,6 +533,50 @@ def test_campaign_profile_can_insert_harness_optimization_stages() -> None:
     assert decision["summary"]["accepted_action_count"] == 1
 
 
+def test_campaign_profile_can_emit_llm_advice_without_candidate_regression() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        evaluation_path = root / "campaign" / "evaluation.json"
+        optimizer = FakeHarnessOptimizerBackend()
+        candidate_backend = FakeHarnessCandidateEvaluationBackend()
+        campaign = StubCampaign(
+            CampaignConfig(
+                target="demo",
+                out_dir=root / "campaign",
+                libafl_manifest=root / "Cargo.toml",
+                modes=("heuristic_feedback",),
+                campaign_plan_profile="campaign_with_evaluation_and_llm_advice",
+                campaign_evaluation_out=evaluation_path,
+            ),
+            ObservationContext(run_id="run-1"),
+            evaluation_backends=EvaluationBackends(
+                campaign_evaluation=FakeHarnessTraceCampaignEvaluationBackend(
+                    evaluation_path,
+                ),
+                harness_optimizer=optimizer,
+                harness_candidate_evaluation=candidate_backend,
+            ),
+        )
+
+        manifest = campaign.run()
+        paths = harness_optimization_paths(evaluation_path)
+        advice = json.loads(paths.advice_report.read_text(encoding="utf-8"))
+
+    assert optimizer.task is not None
+    assert candidate_backend.candidate_manifest is None
+    assert manifest["artifacts"]["harness_optimization_advice_report"] == str(
+        paths.advice_report
+    )
+    assert advice["kind"] == ADVICE_REPORT_KIND
+    assert advice["status"] == "ready_for_candidate_validation"
+    assert advice["summary"]["recommended_action_count"] == 1
+    assert advice["handoff"]["suggested_candidate_backend"] == "real"
+    assert advice["advice_only_guard"]["sandbox_apply_triggered"] is False
+    assert advice["advice_only_guard"]["candidate_regression_triggered"] is False
+    assert not paths.patch.exists()
+    assert not paths.candidate_evaluation.exists()
+
+
 def test_campaign_profile_can_run_harness_optimization_validation_stages() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -662,6 +708,32 @@ def test_feedback_campaign_cli_builds_real_candidate_regression_backend() -> Non
     assert settings.thresholds.min_improved_metric_count == 1
     assert settings.thresholds.max_regressed_metric_count == 0
     assert settings.thresholds.max_flaky_metric_count == 1
+
+
+def test_feedback_campaign_cli_builds_prompt_only_optimizer_backend() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        args = pipeline_cli.parse_args(
+            [
+                "feedback-campaign",
+                "--target",
+                "demo",
+                "--libafl-manifest",
+                str(root / "Cargo.toml"),
+                "--out-dir",
+                str(root / "campaign"),
+                "--campaign-plan-profile",
+                "campaign_with_evaluation_and_llm_advice",
+                "--harness-optimizer-backend",
+                "prompt-only",
+            ]
+        )
+
+        backends = pipeline_cli.feedback_campaign_evaluation_backends(args)
+
+    assert backends is not None
+    assert isinstance(backends.harness_optimizer, PromptOnlyHarnessOptimizerBackend)
+    assert backends.harness_candidate_evaluation is None
 
 
 def test_feedback_campaign_cli_loads_harness_optimization_plugins() -> None:
