@@ -151,7 +151,10 @@ transaction 之后执行额外 readback，并把 `mmio_readback_read_count` 等 
 `candidate_gap_actionability_report` 把 AES top-level readback gap 标为
 `reachable_with_mmio_readback`，把 block write out-of-range gap 标为需要 MMIO write
 surface，把内部 defensive/default gap 标为需要 internal-state surface 或 waiver。
-这些 report 会携带 `plugin_validation` 和 `plugin_provenance`，用于审查规则来源。
+这些 report 会携带 `plugin_validation`、`plugin_provenance`、registry fingerprint 和
+插件源码 hash，用于审查规则来源；同时生成
+`candidate_gap_actionability_minimal_proposal`，把可安全执行的 readback recommendation
+整理成下一轮最小候选。
 2026-06-12 的真实 AES candidate regression 使用 matched no-op baseline、`paired_repeats=3`
 和 `attribution_mode=all_actions`，将 `uncovered_line_count` 稳定从 18 降到 13，且
 regressed/flaky gateable metric 均为 0。standalone attribution 显示 `mmio_readback`

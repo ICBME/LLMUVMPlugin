@@ -206,9 +206,14 @@ plugin 可以返回或注册：
 
 真实 candidate regression 会把这些插件同时用于 LLM schema hint、sandbox apply、
 candidate adapter config、per-action attribution 和 `candidate_gap_actionability_report`。
-相关 artifact 会带上 `plugin_registry`、`plugin_validation` 和 `plugin_provenance`；
-若 action type、payload-required DSL、payload validator、adapter config 三元组或
-classifier callable 不满足契约，先修插件，再解释优化结果。
+相关 artifact 会带上 `plugin_registry`、`plugin_validation`、`plugin_provenance`、
+registry fingerprint、`source_file` 和 `source_sha256`；若 action type、payload-required
+DSL、payload validator、adapter config 三元组或 classifier callable 不满足契约，
+real candidate validation 默认会在运行前失败。需要探索未完成插件时可临时设置
+`HARNESS_STRICT_PLUGIN_VALIDATION=0`。
+当 classifier 给出已注册且 sandbox-safe 的 `recommended_action_type` 和
+`suggested_payload` 时，candidate regression 会额外写出
+`candidate_gap_actionability_minimal_proposal`，可作为下一轮最小候选的输入。
 CLI 也可临时传入：
 
 ```sh

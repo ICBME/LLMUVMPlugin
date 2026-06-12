@@ -32,6 +32,7 @@ from .harness_candidate_regression import (
     build_candidate_action_effect_report,
     build_candidate_gap_actionability_report,
     build_candidate_promotion_package,
+    build_gap_actionability_minimal_candidate_proposal,
     select_candidate_variants,
 )
 from .harness_plugins import (
@@ -39,8 +40,10 @@ from .harness_plugins import (
     HarnessGapActionabilityContext,
     HarnessPluginRegistry,
     harness_plugin_provenance,
+    harness_plugin_registry_fingerprint,
     harness_plugin_registry_snapshot_schema,
     load_harness_plugin_registry,
+    require_valid_harness_plugin_registry,
     validate_harness_plugin_registry,
 )
 from .harness_metadata import (
@@ -247,10 +250,12 @@ __all__ = [
     "build_candidate_action_effect_report",
     "build_candidate_gap_actionability_report",
     "build_candidate_promotion_package",
+    "build_gap_actionability_minimal_candidate_proposal",
     "external_command_step",
     "campaign_trace_rollup_path",
     "harness_optimization_paths",
     "harness_plugin_provenance",
+    "harness_plugin_registry_fingerprint",
     "harness_plugin_registry_snapshot_schema",
     "load_runtime_action_config",
     "load_harness_plugin_registry",
@@ -263,6 +268,7 @@ __all__ = [
     "run_coverage_feedback_pipeline",
     "run_feedback_campaign_pipeline",
     "select_candidate_variants",
+    "require_valid_harness_plugin_registry",
     "validate_harness_plugin_registry",
     "validate_harness_optimization_proposal",
 ]

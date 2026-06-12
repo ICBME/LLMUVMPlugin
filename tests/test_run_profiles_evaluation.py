@@ -658,6 +658,7 @@ def test_feedback_campaign_cli_builds_real_candidate_regression_backend() -> Non
     assert settings.paired_repeats == 2
     assert settings.repeat_seed_stride == 5
     assert settings.round_evaluation is False
+    assert settings.strict_plugin_validation is True
     assert settings.thresholds.min_improved_metric_count == 1
     assert settings.thresholds.max_regressed_metric_count == 0
     assert settings.thresholds.max_flaky_metric_count == 1
@@ -753,6 +754,84 @@ def test_feedback_campaign_cli_loads_harness_optimization_plugins() -> None:
     )
 
 
+def test_feedback_campaign_cli_strict_plugin_validation_rejects_invalid_plugin() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        plugin_module = root / "invalid_harness_plugin.py"
+        plugin_module.write_text(
+            "\n".join(
+                [
+                    "from fuzz_pipeline.harness_plugins import HarnessActionPlugin",
+                    "",
+                    "def invalid_plugin(**kwargs):",
+                    "    return HarnessActionPlugin(",
+                    "        action_type='bad action',",
+                    "        payload_required=True,",
+                    "        adapter_kind='demo.partial_config',",
+                    "    )",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        sys.path.insert(0, str(root))
+        try:
+            args = pipeline_cli.parse_args(
+                [
+                    "feedback-campaign",
+                    "--target",
+                    "demo",
+                    "--libafl-manifest",
+                    str(root / "Cargo.toml"),
+                    "--out-dir",
+                    str(root / "campaign"),
+                    "--campaign-plan-profile",
+                    "campaign_with_evaluation_and_optimization_real_validation",
+                    "--harness-candidate-backend",
+                    "real",
+                    "--harness-optimization-plugin",
+                    "invalid_harness_plugin:invalid_plugin",
+                ]
+            )
+            try:
+                pipeline_cli.feedback_campaign_evaluation_backends(args)
+            except SystemExit as exc:
+                message = str(exc)
+            else:
+                raise AssertionError("strict plugin validation should fail")
+
+            relaxed_args = pipeline_cli.parse_args(
+                [
+                    "feedback-campaign",
+                    "--target",
+                    "demo",
+                    "--libafl-manifest",
+                    str(root / "Cargo.toml"),
+                    "--out-dir",
+                    str(root / "campaign"),
+                    "--campaign-plan-profile",
+                    "campaign_with_evaluation_and_optimization_real_validation",
+                    "--harness-candidate-backend",
+                    "real",
+                    "--harness-optimization-plugin",
+                    "invalid_harness_plugin:invalid_plugin",
+                    "--no-strict-harness-plugin-validation",
+                ]
+            )
+            backends = pipeline_cli.feedback_campaign_evaluation_backends(relaxed_args)
+        finally:
+            sys.path.remove(str(root))
+
+    assert "bad action" in message
+    assert "payload-required actions must define" in message
+    assert backends is not None
+    assert isinstance(
+        backends.harness_candidate_evaluation,
+        HarnessCandidateRegressionBackend,
+    )
+    assert backends.harness_candidate_evaluation.settings.strict_plugin_validation is False
+
+
 def test_real_candidate_make_targets_encode_smoke_and_evidence_defaults() -> None:
     root = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory() as tmp:
@@ -780,6 +859,12 @@ def test_real_candidate_make_targets_encode_smoke_and_evidence_defaults() -> Non
             capture_output=True,
             check=True,
         ).stdout
+        strict = subprocess.run(
+            [*common, "HARNESS_STRICT_PLUGIN_VALIDATION=1", "feedback-campaign"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
 
     assert "--candidate-iters 100" in evidence
     assert "--candidate-max-seeds 16" in evidence
@@ -789,6 +874,7 @@ def test_real_candidate_make_targets_encode_smoke_and_evidence_defaults() -> Non
     assert "--candidate-iters 0" in smoke
     assert "--candidate-max-seeds 0" in smoke
     assert "--candidate-min-improved-metrics 0" in smoke
+    assert "--strict-harness-plugin-validation" in strict
 
 
 def test_campaign_orchestrator_can_insert_custom_campaign_stage() -> None:

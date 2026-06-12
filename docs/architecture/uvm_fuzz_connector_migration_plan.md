@@ -195,11 +195,19 @@
   `plugin_validation`、`plugin_provenance` 和 snapshot schema，candidate action effect、
   gap actionability 与 promotion package 都能审查插件来源和契约状态。runtime manager
   增加通用 lifecycle hook，并保持既有 `sample_after_execute` replay/mmio 行为兼容。
+- 第十四阶段将 plugin registry 推进为可门禁、可复现的迁移闭环：provenance 记录
+  `source_file`、`source_sha256` 和 registry fingerprint；real candidate validation
+  profile 默认开启 strict plugin validation gate，CLI/Make 可用
+  `--strict-harness-plugin-validation` / `HARNESS_STRICT_PLUGIN_VALIDATION` 控制；
+  replay/ref-model/scoreboard 路径实际触发 runtime lifecycle hook；candidate regression
+  基于 gap actionability 额外生成 `candidate_gap_actionability_minimal_proposal`，用于把
+  target plugin 给出的 recommendation 转成下一轮可验证候选。
 - CLI/Makefile：`--run-plan-profile`、`--campaign-plan-profile`、`--round-evaluation`、
   `--evaluation-out`、`--campaign-evaluation-out` 以及对应 Makefile 变量
   `RUN_PLAN_PROFILE`、`CAMPAIGN_PLAN_PROFILE`、`ROUND_EVALUATION_ENABLE`、
   `CAMPAIGN_EVALUATION_ENABLE`；harness optimization 插件入口为
-  `--harness-optimization-plugin` 与 `HARNESS_OPTIMIZATION_PLUGINS`。
+  `--harness-optimization-plugin` 与 `HARNESS_OPTIMIZATION_PLUGINS`，strict plugin gate
+  入口为 `--strict-harness-plugin-validation` 与 `HARNESS_STRICT_PLUGIN_VALIDATION`。
 
 ## 迁移任务
 

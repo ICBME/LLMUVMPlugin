@@ -149,9 +149,16 @@ class ObservableReplayDriverAdapter:
         self.runtime_actions = HarnessRuntimeActionManager.from_env()
 
     async def reset(self) -> None:
+        await self.runtime_actions.before_reset(driver=self.target_driver)
         await self.stage.reset_driver(self.target_driver)
+        await self.runtime_actions.after_reset(driver=self.target_driver)
 
     async def execute(self, case: Any, *, index: int) -> Any:
+        await self.runtime_actions.before_case(
+            index=index,
+            case=case,
+            driver=self.target_driver,
+        )
         result = await self.stage.execute_case(self.target_driver, case, index=index)
         if self.ref_model is None:
             await self.runtime_actions.sample_after_execute(
@@ -162,6 +169,12 @@ class ObservableReplayDriverAdapter:
             )
             return result
         expected = self.stage.predict_ref_model(self.ref_model, case, index=index)
+        await self.runtime_actions.after_ref_model(
+            index=index,
+            case=case,
+            expected=expected,
+            driver=self.target_driver,
+        )
         final_result = replace(result, expected=expected.expected)
         await self.runtime_actions.sample_after_execute(
             index=index,
@@ -181,15 +194,26 @@ class ObservableScoreboardAdapter:
     ):
         self.stage = stage_adapter or ReplayStageAdapter(config, orchestrator)
         self.checker = self.stage.build_scoreboard()
-        self.runtime_checks = ScoreboardCheckRuntime.from_env()
+        self.runtime_actions = HarnessRuntimeActionManager.for_scoreboard_from_env()
+        runtime_checks = self.runtime_actions.runtime_of_type(ScoreboardCheckRuntime)
+        self.runtime_checks = (
+            runtime_checks
+            if isinstance(runtime_checks, ScoreboardCheckRuntime)
+            else ScoreboardCheckRuntime.from_env()
+        )
 
     def write(self, record: ReplayRecord) -> None:
         self.stage.scoreboard_write(self.checker, record)
-        self.runtime_checks.evaluate_record(record)
+        self.runtime_actions.after_scoreboard_record_sync(
+            index=record.index,
+            case=record.case,
+            result=record.result,
+            record=record,
+        )
 
     def check(self) -> None:
         self.stage.scoreboard_check(self.checker)
-        self.runtime_checks.check()
+        self.runtime_actions.finalize_sync()
 
     def summary(self) -> dict[str, Any]:
         summary = self.stage.scoreboard_summary(self.checker)

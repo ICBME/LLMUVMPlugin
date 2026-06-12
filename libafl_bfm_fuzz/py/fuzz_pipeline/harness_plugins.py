@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+import hashlib
 from importlib import import_module
 import inspect
+import json
+from pathlib import Path
 from typing import Any, Callable, Protocol
 
 
@@ -63,6 +66,7 @@ class HarnessPluginRegistry:
     action_plugins: Mapping[str, HarnessActionPlugin] = field(default_factory=dict)
     gap_actionability_classifiers: tuple[GapActionabilityClassifier, ...] = ()
     plugin_specs: tuple[str, ...] = ()
+    plugin_sources: tuple[Mapping[str, Any], ...] = ()
 
     def with_action_plugin(
         self,
@@ -74,6 +78,7 @@ class HarnessPluginRegistry:
             action_plugins=plugins,
             gap_actionability_classifiers=self.gap_actionability_classifiers,
             plugin_specs=self.plugin_specs,
+            plugin_sources=self.plugin_sources,
         )
 
     def with_gap_actionability_classifier(
@@ -87,6 +92,7 @@ class HarnessPluginRegistry:
                 classifier,
             ),
             plugin_specs=self.plugin_specs,
+            plugin_sources=self.plugin_sources,
         )
 
     def with_plugin_spec(self, spec: str) -> "HarnessPluginRegistry":
@@ -94,6 +100,20 @@ class HarnessPluginRegistry:
             action_plugins=dict(self.action_plugins),
             gap_actionability_classifiers=self.gap_actionability_classifiers,
             plugin_specs=(*self.plugin_specs, spec),
+            plugin_sources=self.plugin_sources,
+        )
+
+    def with_plugin_source(
+        self,
+        source: Mapping[str, Any],
+    ) -> "HarnessPluginRegistry":
+        spec = str(source.get("spec") or "")
+        plugin_specs = (*self.plugin_specs, spec) if spec else self.plugin_specs
+        return HarnessPluginRegistry(
+            action_plugins=dict(self.action_plugins),
+            gap_actionability_classifiers=self.gap_actionability_classifiers,
+            plugin_specs=plugin_specs,
+            plugin_sources=(*self.plugin_sources, dict(source)),
         )
 
     def merge(self, other: "HarnessPluginRegistry") -> "HarnessPluginRegistry":
@@ -102,8 +122,11 @@ class HarnessPluginRegistry:
             registry = registry.with_action_plugin(plugin)
         for classifier in other.gap_actionability_classifiers:
             registry = registry.with_gap_actionability_classifier(classifier)
-        for spec in other.plugin_specs:
-            registry = registry.with_plugin_spec(spec)
+        for source in other.plugin_sources:
+            registry = registry.with_plugin_source(source)
+        if not other.plugin_sources:
+            for spec in other.plugin_specs:
+                registry = registry.with_plugin_spec(spec)
         return registry
 
     def with_plugin_bundle(self, bundle: Any) -> "HarnessPluginRegistry":
@@ -227,8 +250,10 @@ class HarnessPluginRegistry:
             "schema_version": 1,
             "kind": REGISTRY_SNAPSHOT_KIND,
             "snapshot_schema": harness_plugin_registry_snapshot_schema(),
+            "fingerprint": harness_plugin_registry_fingerprint(self),
             "summary": summary,
             "plugin_specs": list(self.plugin_specs),
+            "plugin_sources": [dict(source) for source in self.plugin_sources],
             "actions": [
                 {
                     "action_type": plugin.action_type,
@@ -286,6 +311,8 @@ def harness_plugin_registry_snapshot_schema() -> dict[str, Any]:
             "kind",
             "summary",
             "plugin_specs",
+            "plugin_sources",
+            "fingerprint",
             "actions",
             "gap_actionability_classifiers",
             "validation",
@@ -308,7 +335,9 @@ def harness_plugin_provenance(registry: HarnessPluginRegistry) -> dict[str, Any]
     return {
         "schema_version": 1,
         "kind": REGISTRY_PROVENANCE_KIND,
+        "fingerprint": harness_plugin_registry_fingerprint(registry),
         "plugin_specs": list(registry.plugin_specs),
+        "plugin_sources": [dict(source) for source in registry.plugin_sources],
         "summary": plugin_registry_summary(registry),
         "loaded_action_types": list(registry.allowed_action_types()),
         "runtime_action_types": list(registry.runtime_action_types()),
@@ -318,6 +347,47 @@ def harness_plugin_provenance(registry: HarnessPluginRegistry) -> dict[str, Any]
         ],
         "validation": validate_harness_plugin_registry(registry),
     }
+
+
+def harness_plugin_registry_fingerprint(registry: HarnessPluginRegistry) -> str:
+    payload = {
+        "plugin_specs": list(registry.plugin_specs),
+        "plugin_sources": [
+            _fingerprint_plugin_source(source) for source in registry.plugin_sources
+        ],
+        "actions": [
+            {
+                "action_type": plugin.action_type,
+                "safe_for_sandbox": plugin.safe_for_sandbox,
+                "payload_required": plugin.payload_required,
+                "runtime_action": plugin.runtime_action,
+                "adapter_kind": plugin.adapter_kind,
+                "artifact_role": plugin.artifact_role,
+                "make_var": plugin.make_var,
+                "payload_validator": (
+                    callable_name(plugin.payload_validator)
+                    if plugin.payload_validator is not None
+                    else None
+                ),
+                "dsl_schema": _json_safe(plugin.dsl_schema),
+            }
+            for plugin in sorted(
+                registry.action_plugins.values(),
+                key=lambda item: item.action_type,
+            )
+        ],
+        "gap_actionability_classifiers": [
+            callable_name(classifier)
+            for classifier in registry.gap_actionability_classifiers
+        ],
+    }
+    data = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(data).hexdigest()
 
 
 def validate_harness_plugin_registry(
@@ -438,6 +508,33 @@ def validate_harness_plugin_registry(
     }
 
 
+def harness_plugin_validation_error_message(
+    validation: Mapping[str, Any],
+    *,
+    context: str = "harness plugin registry",
+) -> str:
+    errors = [
+        f"{item.get('path')}: {item.get('message')}"
+        for item in _iter_plugin_values(validation.get("errors"))
+        if isinstance(item, Mapping)
+    ]
+    detail = "; ".join(errors) if errors else "unknown validation error"
+    return f"invalid {context}: {detail}"
+
+
+def require_valid_harness_plugin_registry(
+    registry: HarnessPluginRegistry,
+    *,
+    context: str = "harness plugin registry",
+) -> dict[str, Any]:
+    validation = validate_harness_plugin_registry(registry)
+    if not validation.get("valid"):
+        raise ValueError(
+            harness_plugin_validation_error_message(validation, context=context)
+        )
+    return validation
+
+
 def callable_name(value: Any) -> str:
     module = getattr(value, "__module__", "")
     qualname = getattr(value, "__qualname__", None) or getattr(value, "__name__", None)
@@ -446,6 +543,60 @@ def callable_name(value: Any) -> str:
     if qualname:
         return str(qualname)
     return type(value).__name__
+
+
+def plugin_source_for_spec(spec: str, loaded_obj: Any) -> dict[str, Any]:
+    module_name, _, object_name = spec.partition(":")
+    source_path = _source_path(loaded_obj)
+    return {
+        "spec": spec,
+        "module": module_name,
+        "object": object_name,
+        "callable": callable_name(loaded_obj),
+        "source_file": str(source_path) if source_path is not None else None,
+        "source_sha256": _source_sha256(source_path),
+    }
+
+
+def _source_path(value: Any) -> Path | None:
+    try:
+        filename = inspect.getsourcefile(value) or inspect.getfile(value)
+    except (TypeError, OSError):
+        filename = None
+    if filename is None:
+        module = inspect.getmodule(value)
+        filename = getattr(module, "__file__", None) if module is not None else None
+    if not filename:
+        return None
+    return Path(filename).resolve()
+
+
+def _source_sha256(path: Path | None) -> str | None:
+    if path is None or not path.is_file():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _fingerprint_plugin_source(source: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "spec": source.get("spec"),
+        "module": source.get("module"),
+        "object": source.get("object"),
+        "callable": source.get("callable"),
+        "source_sha256": source.get("source_sha256"),
+    }
+
+
+def _json_safe(value: Any) -> Any:
+    try:
+        json.dumps(value, sort_keys=True)
+    except TypeError:
+        if isinstance(value, Mapping):
+            return {str(key): _json_safe(item) for key, item in value.items()}
+        if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+            return [_json_safe(item) for item in value]
+        return repr(value)
+    return value
 
 
 def _valid_action_type(value: str) -> bool:
@@ -486,8 +637,11 @@ def load_harness_plugin_registry(
         spec = str(raw_spec).strip()
         if not spec:
             continue
-        plugin = build_harness_plugin(spec, registry=registry, **kwargs)
-        registry = registry.with_plugin_bundle(plugin).with_plugin_spec(spec)
+        loaded_obj = _load_object(spec)
+        plugin = _build_loaded_plugin(loaded_obj, registry=registry, **kwargs)
+        registry = registry.with_plugin_bundle(plugin).with_plugin_source(
+            plugin_source_for_spec(spec, loaded_obj)
+        )
     return registry
 
 

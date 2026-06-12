@@ -11,6 +11,7 @@ from connector_observe.trace import read_json_object
 from .campaign_orchestrator import CampaignConfig, CampaignOrchestrator
 from .harness_optimization import (
     CANDIDATE_EVALUATION_KIND,
+    PROPOSAL_KIND,
     baseline_metric_snapshot,
     default_harness_plugin_registry,
     list_value,
@@ -19,8 +20,13 @@ from .harness_optimization import (
     number_value,
     safe_slug,
     utc_timestamp,
+    validate_harness_optimization_proposal,
 )
-from .harness_plugins import HarnessGapActionabilityContext, HarnessPluginRegistry
+from .harness_plugins import (
+    HarnessGapActionabilityContext,
+    HarnessPluginRegistry,
+    require_valid_harness_plugin_registry,
+)
 from .harness_records import mapping
 from .harness_runtime_actions import (
     RUNTIME_METRICS_OUT_ENV,
@@ -115,6 +121,7 @@ class CandidateRegressionSettings:
     repeat_seed_stride: int = 1
     attribution_top_k: int | None = None
     attribution_mode: str = "top_k"
+    strict_plugin_validation: bool = False
     thresholds: CandidateAcceptanceThresholds = CandidateAcceptanceThresholds()
 
     def __post_init__(self) -> None:
@@ -145,6 +152,7 @@ class CandidateRegressionSettings:
             "repeat_seed_stride": self.repeat_seed_stride,
             "attribution_top_k": self.attribution_top_k,
             "attribution_mode": self.attribution_mode,
+            "strict_plugin_validation": self.strict_plugin_validation,
             "thresholds": self.thresholds.to_json(),
         }
 
@@ -275,6 +283,12 @@ class HarnessCandidateRegressionBackend:
         candidate_manifest: dict[str, Any],
     ) -> dict[str, Any]:
         plugin_registry = self._plugin_registry()
+        plugin_validation = plugin_registry.validation_json()
+        if self.settings.strict_plugin_validation:
+            plugin_validation = require_valid_harness_plugin_registry(
+                plugin_registry,
+                context="candidate regression plugin registry",
+            )
         source_baseline_metrics = baseline_metric_snapshot(task)
         baseline_metrics = source_baseline_metrics
         baseline_source = "task_snapshot"
@@ -287,6 +301,8 @@ class HarnessCandidateRegressionBackend:
         sandbox_dir = _required_path(candidate_manifest.get("sandbox_dir"))
         regression_dir = sandbox_dir / "candidate_regression"
         regression_dir.mkdir(parents=True, exist_ok=True)
+        plugin_provenance_path = regression_dir / "candidate_plugin_provenance.json"
+        _write_json(plugin_provenance_path, plugin_registry.provenance_json())
         baseline_manifest_path = _required_path(
             mapping(task.get("artifacts")).get("campaign_manifest")
             or mapping(task.get("sources")).get("campaign_manifest")
@@ -349,6 +365,7 @@ class HarnessCandidateRegressionBackend:
                 adapter_results=adapter_results,
                 directives_path=candidate_directives_path,
                 runtime_metrics_path=runtime_metrics_path,
+                plugin_provenance_path=plugin_provenance_path,
                 reason="no safe applied actions to validate",
             )
 
@@ -374,6 +391,7 @@ class HarnessCandidateRegressionBackend:
                     adapter_results=adapter_results,
                     directives_path=candidate_directives_path,
                     runtime_metrics_path=runtime_metrics_path,
+                    plugin_provenance_path=plugin_provenance_path,
                     error=exc,
                     error_context="matched_noop_baseline",
                     matched_baseline_summary={
@@ -409,6 +427,7 @@ class HarnessCandidateRegressionBackend:
                 adapter_results=adapter_results,
                 directives_path=candidate_directives_path,
                 runtime_metrics_path=runtime_metrics_path,
+                plugin_provenance_path=plugin_provenance_path,
                 error=exc,
                 error_context="candidate_campaign",
                 matched_baseline_artifacts=(
@@ -428,6 +447,7 @@ class HarnessCandidateRegressionBackend:
         candidate_run_artifacts = {
             "candidate_regression_config": str(run_config_path),
             "candidate_action_overlay": str(overlay_path),
+            "candidate_plugin_provenance": str(plugin_provenance_path),
             **adapter_artifacts(adapter_results),
             **_optional_artifact(
                 "candidate_mutation_directives",
@@ -582,6 +602,17 @@ class HarnessCandidateRegressionBackend:
             regression_dir / "candidate_gap_actionability_report.json"
         )
         _write_json(gap_actionability_report_path, gap_actionability_report)
+        gap_minimal_proposal = build_gap_actionability_minimal_candidate_proposal(
+            task=task,
+            proposal=proposal,
+            candidate_manifest=candidate_manifest,
+            gap_actionability_report=gap_actionability_report,
+            plugin_registry=plugin_registry,
+        )
+        gap_minimal_proposal_path = (
+            regression_dir / "candidate_gap_actionability_minimal_proposal.json"
+        )
+        _write_json(gap_minimal_proposal_path, gap_minimal_proposal)
         promotion = build_candidate_promotion_package(
             task=task,
             proposal=proposal,
@@ -594,6 +625,7 @@ class HarnessCandidateRegressionBackend:
             stability_summary=paired_validation_summary,
             action_effect_report=action_effect_report,
             gap_actionability_report=gap_actionability_report,
+            gap_actionability_minimal_proposal=gap_minimal_proposal,
         )
         promotion_path = regression_dir / "candidate_promotion_package.json"
         _write_json(promotion_path, promotion)
@@ -614,10 +646,13 @@ class HarnessCandidateRegressionBackend:
             "matched_baseline_metrics": matched_baseline_metrics,
             "candidate_metrics": candidate_metrics,
             "acceptance_thresholds": self.settings.thresholds.to_json(),
+            "plugin_validation": plugin_validation,
+            "plugin_provenance": plugin_registry.provenance_json(),
             "stability_summary": paired_validation_summary,
             "artifacts": {
                 "candidate_regression_config": str(run_config_path),
                 "candidate_action_overlay": str(overlay_path),
+                "candidate_plugin_provenance": str(plugin_provenance_path),
                 **(
                     matched_baseline.artifacts
                     if matched_baseline is not None
@@ -641,6 +676,9 @@ class HarnessCandidateRegressionBackend:
                 "candidate_action_effect_report": str(action_effect_report_path),
                 "candidate_gap_actionability_report": str(
                     gap_actionability_report_path
+                ),
+                "candidate_gap_actionability_minimal_proposal": str(
+                    gap_minimal_proposal_path
                 ),
                 "candidate_promotion_package": str(promotion_path),
                 "candidate_campaign_manifest": str(
@@ -1296,8 +1334,10 @@ class HarnessCandidateRegressionBackend:
         adapter_results: tuple[CandidateActionAdapterResult, ...],
         directives_path: Path | None,
         runtime_metrics_path: Path,
+        plugin_provenance_path: Path,
         reason: str,
     ) -> dict[str, Any]:
+        plugin_provenance = read_json_object(plugin_provenance_path)
         return {
             "schema_version": 1,
             "kind": CANDIDATE_EVALUATION_KIND,
@@ -1315,10 +1355,13 @@ class HarnessCandidateRegressionBackend:
             "matched_baseline_metrics": None,
             "candidate_metrics": dict(baseline_metrics),
             "acceptance_thresholds": self.settings.thresholds.to_json(),
+            "plugin_validation": mapping(plugin_provenance.get("validation")),
+            "plugin_provenance": plugin_provenance,
             "reason": reason,
             "artifacts": {
                 "candidate_regression_config": str(run_config_path),
                 "candidate_action_overlay": str(overlay_path),
+                "candidate_plugin_provenance": str(plugin_provenance_path),
                 **adapter_artifacts(adapter_results),
                 **_optional_artifact(
                     "candidate_mutation_directives",
@@ -1356,11 +1399,13 @@ class HarnessCandidateRegressionBackend:
         adapter_results: tuple[CandidateActionAdapterResult, ...],
         directives_path: Path | None,
         runtime_metrics_path: Path,
+        plugin_provenance_path: Path,
         error: BaseException,
         error_context: str = "candidate_campaign",
         matched_baseline_artifacts: dict[str, str] | None = None,
         matched_baseline_summary: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        plugin_provenance = read_json_object(plugin_provenance_path)
         return {
             "schema_version": 1,
             "kind": CANDIDATE_EVALUATION_KIND,
@@ -1378,6 +1423,8 @@ class HarnessCandidateRegressionBackend:
             ),
             "candidate_metrics": {},
             "acceptance_thresholds": self.settings.thresholds.to_json(),
+            "plugin_validation": mapping(plugin_provenance.get("validation")),
+            "plugin_provenance": plugin_provenance,
             "error": {
                 "type": type(error).__name__,
                 "message": str(error),
@@ -1386,6 +1433,7 @@ class HarnessCandidateRegressionBackend:
             "artifacts": {
                 "candidate_regression_config": str(run_config_path),
                 "candidate_action_overlay": str(overlay_path),
+                "candidate_plugin_provenance": str(plugin_provenance_path),
                 **(matched_baseline_artifacts or {}),
                 **adapter_artifacts(adapter_results),
                 **_optional_artifact(
@@ -2083,6 +2131,7 @@ def build_candidate_promotion_package(
     stability_summary: dict[str, Any] | None = None,
     action_effect_report: dict[str, Any] | None = None,
     gap_actionability_report: dict[str, Any] | None = None,
+    gap_actionability_minimal_proposal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     summary = metric_threshold_summary(
         baseline_metrics,
@@ -2128,6 +2177,8 @@ def build_candidate_promotion_package(
         or {},
         "action_effect_summary": action_effect.get("summary") or {},
         "gap_actionability_summary": gap_actionability.get("summary") or {},
+        "gap_actionability_minimal_proposal": gap_actionability_minimal_proposal
+        or {},
         "action_effects": action_effects,
         "effective_actions": pruning["effective_actions"],
         "neutral_actions": pruning["neutral_actions"],
@@ -2427,6 +2478,161 @@ def build_candidate_gap_actionability_report(
             ),
         },
     }
+
+
+def build_gap_actionability_minimal_candidate_proposal(
+    *,
+    task: dict[str, Any],
+    proposal: dict[str, Any],
+    candidate_manifest: dict[str, Any],
+    gap_actionability_report: dict[str, Any],
+    plugin_registry: HarnessPluginRegistry | None = None,
+) -> dict[str, Any]:
+    registry = candidate_regression_plugin_registry(plugin_registry)
+    safe_action_types = set(registry.safe_sandbox_action_types())
+    allowed_action_types = set(registry.allowed_action_types())
+    payload_required_types = set(registry.dsl_payload_action_types())
+    proposal_refs = list_value(proposal.get("evidence_refs"))
+    actions: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    action_by_key: dict[str, dict[str, Any]] = {}
+    for gap in list_value(gap_actionability_report.get("remaining_gaps")):
+        if not isinstance(gap, dict):
+            continue
+        action_type = str(gap.get("recommended_action_type") or "")
+        gap_id = str(gap.get("id") or f"gap_{len(actions) + len(skipped)}")
+        payload = mapping(gap.get("suggested_payload"))
+        evidence_refs = list_value(gap.get("evidence_refs")) or proposal_refs
+        if not action_type:
+            skipped.append(_skipped_gap_recommendation(gap, reason="no_action_type"))
+            continue
+        if action_type not in allowed_action_types:
+            skipped.append(
+                _skipped_gap_recommendation(
+                    gap,
+                    reason="action_type_not_registered",
+                    action_type=action_type,
+                )
+            )
+            continue
+        if action_type not in safe_action_types:
+            skipped.append(
+                _skipped_gap_recommendation(
+                    gap,
+                    reason="action_type_not_safe_for_sandbox",
+                    action_type=action_type,
+                )
+            )
+            continue
+        if action_type in payload_required_types and not payload:
+            skipped.append(
+                _skipped_gap_recommendation(
+                    gap,
+                    reason="missing_suggested_payload",
+                    action_type=action_type,
+                )
+            )
+            continue
+        if not evidence_refs:
+            skipped.append(
+                _skipped_gap_recommendation(
+                    gap,
+                    reason="missing_evidence_refs",
+                    action_type=action_type,
+                )
+            )
+            continue
+        payload_errors = registry.action_payload_errors(
+            action_type,
+            payload,
+            path="suggested_payload",
+        )
+        if payload_errors:
+            skipped.append(
+                {
+                    **_skipped_gap_recommendation(
+                        gap,
+                        reason="invalid_suggested_payload",
+                        action_type=action_type,
+                    ),
+                    "payload_errors": payload_errors,
+                }
+            )
+            continue
+        key = _action_payload_key(action_type, payload)
+        if key in action_by_key:
+            action = action_by_key[key]
+            action.setdefault("source_gap_ids", []).append(gap_id)
+            continue
+        action = {
+            "action_id": (
+                f"gap_{len(actions):02d}_{safe_slug(action_type)}_{safe_slug(gap_id)}"
+            ),
+            "action_type": action_type,
+            "payload": payload,
+            "rationale": gap.get("actionability_reason"),
+            "evidence_refs": evidence_refs,
+            "source_gap_ids": [gap_id],
+        }
+        actions.append(action)
+        action_by_key[key] = action
+    status = "proposed" if actions else "no_op"
+    minimal = {
+        "schema_version": 1,
+        "kind": PROPOSAL_KIND,
+        "created_at": utc_timestamp(),
+        "target": task.get("target"),
+        "run_id": task.get("run_id"),
+        "proposal_id": (
+            f"{candidate_manifest.get('candidate_id') or 'candidate'}:"
+            "gap_actionability_minimal"
+        ),
+        "status": status,
+        "source": "candidate_gap_actionability_report",
+        "source_candidate_id": candidate_manifest.get("candidate_id"),
+        "actions": actions,
+        "evidence_refs": proposal_refs,
+        "skipped_recommendations": skipped,
+        "plugin_registry": registry.to_json(),
+        "plugin_validation": registry.validation_json(),
+        "plugin_provenance": registry.provenance_json(),
+        "summary": {
+            "remaining_gap_count": len(
+                list_value(gap_actionability_report.get("remaining_gaps"))
+            ),
+            "recommended_action_count": len(actions),
+            "skipped_recommendation_count": len(skipped),
+            "status": status,
+        },
+    }
+    minimal["validation"] = validate_harness_optimization_proposal(
+        minimal,
+        task=task,
+        plugin_registry=registry,
+    )
+    return minimal
+
+
+def _skipped_gap_recommendation(
+    gap: Mapping[str, Any],
+    *,
+    reason: str,
+    action_type: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "gap_id": gap.get("id"),
+        "actionability": gap.get("actionability"),
+        "recommended_action_type": action_type or gap.get("recommended_action_type"),
+        "reason": reason,
+    }
+
+
+def _action_payload_key(action_type: str, payload: Mapping[str, Any]) -> str:
+    return json.dumps(
+        {"action_type": action_type, "payload": dict(payload)},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def latest_coverage_summary_path(campaign_manifest: dict[str, Any]) -> Path | None:

@@ -30,6 +30,9 @@ from fuzz_pipeline import (  # noqa: E402
 )
 from fuzz_pipeline.harness import close_observation  # noqa: E402
 from fuzz_pipeline.harness_plugins import load_harness_plugin_registry  # noqa: E402
+from fuzz_pipeline.harness_plugins import (  # noqa: E402
+    require_valid_harness_plugin_registry,
+)
 from fuzz_pipeline.observation import ObservationRuntime  # noqa: E402
 from fuzz_pipeline.run_orchestrator import (  # noqa: E402
     FuzzRunConfig,
@@ -229,6 +232,15 @@ def add_feedback_campaign_args(parser: argparse.ArgumentParser) -> None:
         help=(
             "Dynamic harness optimization plugin spec in module:Object form. "
             "Can be repeated; also reads HARNESS_OPTIMIZATION_PLUGINS."
+        ),
+    )
+    parser.add_argument(
+        "--strict-harness-plugin-validation",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Fail before optimization/candidate validation when the loaded "
+            "harness optimization plugin registry violates its contract."
         ),
     )
     parser.add_argument("--candidate-modes")
@@ -568,7 +580,16 @@ def feedback_campaign_evaluation_backends(
 ) -> EvaluationBackends | None:
     optimizer = selected_harness_optimizer_backend(args)
     candidate = selected_harness_candidate_backend(args)
+    candidate_settings = candidate_regression_settings_from_args(args)
     plugin_registry = harness_plugin_registry_from_args(args)
+    if plugin_registry is not None and candidate_settings.strict_plugin_validation:
+        try:
+            require_valid_harness_plugin_registry(
+                plugin_registry,
+                context="feedback-campaign harness optimization plugins",
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
     if optimizer is None and candidate is None and plugin_registry is None:
         return None
     return EvaluationBackends(
@@ -581,7 +602,7 @@ def feedback_campaign_evaluation_backends(
         ),
         harness_candidate_evaluation=(
             HarnessCandidateRegressionBackend(
-                settings=candidate_regression_settings_from_args(args),
+                settings=candidate_settings,
                 plugin_registry=plugin_registry,
             )
             if candidate == "real"
@@ -711,6 +732,11 @@ def candidate_regression_settings_from_args(
             args.candidate_matched_baseline,
             "HARNESS_CANDIDATE_MATCHED_BASELINE",
             True,
+        ),
+        strict_plugin_validation=bool_arg(
+            args.strict_harness_plugin_validation,
+            "HARNESS_STRICT_PLUGIN_VALIDATION",
+            profile_requests_real_candidate_backend(args.campaign_plan_profile),
         ),
         thresholds=CandidateAcceptanceThresholds(
             max_regressed_metric_count=int_arg(

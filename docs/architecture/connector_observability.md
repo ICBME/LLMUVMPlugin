@@ -205,9 +205,11 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   和 payload，但不直接执行未验证代码；新插件代码应先作为 candidate artifact 走 sandbox
   validation 和 promotion。
 - registry snapshot 会写入 `plugin_registry`，并同步记录 `plugin_validation`、
-  `plugin_provenance` 和 registry snapshot schema。validation 会检查 action type、
-  payload-required DSL、payload validator、adapter config 三元组和 classifier callable，
-  让迁移到新 DUT 时能先审查插件契约，再解释 candidate 结果。
+  `plugin_provenance`、registry fingerprint、source file hash 和 registry snapshot
+  schema。validation 会检查 action type、payload-required DSL、payload validator、
+  adapter config 三元组和 classifier callable；real-validation profile 默认开启 strict
+  plugin validation gate，可用 `--no-strict-harness-plugin-validation` 或
+  `HARNESS_STRICT_PLUGIN_VALIDATION=0` 放宽。
 
 `py/fuzz_pipeline/harness_runtime_actions.py`
 
@@ -215,9 +217,10 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   `HarnessRuntimeActionManager`。pyUVM replay adapter 只调用 runtime manager 的
   after-execute 采样入口，不再直接硬连每个 runtime action；默认 manager 仍加载
   `replay_probe` 与 `mmio_readback`，并可通过 `HARNESS_RUNTIME_ACTION_PLUGINS` 附加受控
-  runtime plugin。manager 还提供 `before_reset`、`after_reset`、`before_case`、
-  `after_execute`、`after_ref_model`、`after_scoreboard_record` 和 `finalize` 等通用
-  lifecycle hook；旧的 `sample_after_execute` 路径保持兼容。
+  runtime plugin。manager 还提供并已接入 replay/ref-model/scoreboard 路径的
+  `before_reset`、`after_reset`、`before_case`、`after_execute`、`after_ref_model`、
+  `after_scoreboard_record` 和 `finalize` 等通用 lifecycle hook；旧的
+  `sample_after_execute` 路径保持兼容。
 - `replay_probe` 由 pyUVM replay driver adapter 消费，记录 case/result 字段采样和
   Python runtime 无法直接采样的 signal request；`scoreboard_check` 由 scoreboard adapter
   消费，记录额外 check 的 pass/fail/enforced failure，并支持 result/case/record 字段
@@ -978,7 +981,10 @@ readback，把 result-range 上界 false gap 识别为 explicit read address `0x
 block write out-of-range 表达式标为需要 MMIO write surface，把内部 default/defensive
 分支标为需要 internal-state surface 或 waiver。report 和 promotion package 会携带
 `plugin_registry`、`plugin_validation` 和 `plugin_provenance`，用于审查这些判断来自哪个
-插件。2026-06-12 的真实 AES 回归中，matched no-op baseline 到 candidate 的
+插件、插件源码 hash 和 registry fingerprint。candidate regression 还会写出
+`candidate_gap_actionability_minimal_proposal`，把已注册且 sandbox-safe 的 gap
+recommendation 转成可直接进入下一轮 apply/regression 的 minimal proposal。2026-06-12
+的真实 AES 回归中，matched no-op baseline 到 candidate 的
 `uncovered_line_count` 在 3 个 paired repeat 中稳定为 18 -> 13，action effect report
 将 gateable improvement 归因到 `mmio_readback`，并把额外 directive action 标为
 neutral；promotion package 因此给出只保留 `mmio_readback` 的 minimal candidate。

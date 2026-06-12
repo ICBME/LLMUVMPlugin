@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import inspect
 import json
@@ -142,14 +143,24 @@ class HarnessRuntimeActionManager:
             ReplayProbeRuntime.from_env(),
             MmioReadbackRuntime.from_env(),
         ]
-        for spec in runtime_action_plugin_specs_from_env():
-            runtimes.append(
-                build_harness_plugin(
-                    spec,
-                    metrics_out=runtime_metrics_path_from_env(),
-                )
-            )
+        runtimes.extend(runtime_action_plugins_from_env())
         return cls(tuple(runtimes))
+
+    @classmethod
+    def for_scoreboard_from_env(cls) -> "HarnessRuntimeActionManager":
+        runtimes: list[Any] = [ScoreboardCheckRuntime.from_env()]
+        runtimes.extend(runtime_action_plugins_from_env())
+        return cls(tuple(runtimes))
+
+    @classmethod
+    def from_runtime_list(cls, runtimes: Iterable[Any]) -> "HarnessRuntimeActionManager":
+        return cls(tuple(runtimes))
+
+    def runtime_of_type(self, runtime_type: type[Any]) -> Any | None:
+        for runtime in self.runtimes:
+            if isinstance(runtime, runtime_type):
+                return runtime
+        return None
 
     def hook_capabilities(self) -> dict[str, list[str]]:
         hooks: dict[str, list[str]] = {}
@@ -180,6 +191,16 @@ class HarnessRuntimeActionManager:
                 value = hook(**_hook_kwargs(hook, kwargs))
                 if inspect.isawaitable(value):
                     await value
+
+    def invoke_hook_sync(self, *hook_names: str, **kwargs: Any) -> None:
+        for runtime in self.runtimes:
+            for hook_name in hook_names:
+                hook = getattr(runtime, hook_name, None)
+                if not callable(hook):
+                    continue
+                value = hook(**_hook_kwargs(hook, kwargs))
+                if inspect.isawaitable(value):
+                    _drive_awaitable_from_sync(value)
 
     async def before_reset(self, *, driver: Any | None = None) -> None:
         await self.invoke_hook("before_reset", driver=driver)
@@ -212,6 +233,24 @@ class HarnessRuntimeActionManager:
             driver=driver,
         )
 
+    def after_scoreboard_record_sync(
+        self,
+        *,
+        index: int,
+        case: Any,
+        result: Any,
+        record: Any,
+        driver: Any | None = None,
+    ) -> None:
+        self.invoke_hook_sync(
+            "after_scoreboard_record",
+            index=index,
+            case=case,
+            result=result,
+            record=record,
+            driver=driver,
+        )
+
     async def after_scoreboard_record(
         self,
         *,
@@ -229,6 +268,9 @@ class HarnessRuntimeActionManager:
             record=record,
             driver=driver,
         )
+
+    def finalize_sync(self, *, driver: Any | None = None) -> None:
+        self.invoke_hook_sync("finalize", driver=driver)
 
     async def finalize(self, *, driver: Any | None = None) -> None:
         await self.invoke_hook("finalize", driver=driver)
@@ -249,6 +291,27 @@ class HarnessRuntimeActionManager:
             result=result,
             driver=driver,
         )
+
+
+def runtime_action_plugins_from_env() -> list[Any]:
+    runtimes: list[Any] = []
+    for spec in runtime_action_plugin_specs_from_env():
+        runtimes.append(
+            build_harness_plugin(
+                spec,
+                metrics_out=runtime_metrics_path_from_env(),
+            )
+        )
+    return runtimes
+
+
+def _drive_awaitable_from_sync(value: Any) -> None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(value)
+        return
+    loop.create_task(value)
 
 
 def _hook_kwargs(hook: Any, kwargs: Mapping[str, Any]) -> dict[str, Any]:
@@ -603,6 +666,9 @@ class ScoreboardCheckRuntime:
                     action_metrics["enforced_failure_count"] += 1
         self.flush()
 
+    def after_scoreboard_record(self, *, record: Any, **kwargs: Any) -> None:
+        self.evaluate_record(record)
+
     def check(self) -> None:
         if self.enforced_failure_count:
             first = self.failures[0] if self.failures else {}
@@ -610,6 +676,9 @@ class ScoreboardCheckRuntime:
                 "Harness scoreboard_check saw "
                 f"{self.enforced_failure_count} enforced failures; first={first}"
             )
+
+    def finalize(self, **kwargs: Any) -> None:
+        self.check()
 
     def metrics(self) -> dict[str, Any]:
         configured = len(self.config.entries) if self.config is not None else 0

@@ -230,8 +230,10 @@ semantic interpretation not represented in the manifest schema.
   or waiver. This actionability mapping now comes from the harness optimization
   plugin registry and is loaded for AES through `secworks_aes.toml`; new DUTs
   should provide target-specific classifiers instead of adding core framework
-  branches. Candidate artifacts include `plugin_validation` and
-  `plugin_provenance` so the mapping source is reviewable.
+  branches. Candidate artifacts include `plugin_validation`, `plugin_provenance`,
+  source hashes, registry fingerprint, and
+  `candidate_gap_actionability_minimal_proposal` so the mapping source and next
+  minimal candidate are reviewable.
 - The follow-up AES actionability run validated this path: matched no-op
   `uncovered_line_count` 18 vs. candidate 13 across 3 paired repeats, with zero
   gateable regressions/flaky metrics. Standalone attribution marked

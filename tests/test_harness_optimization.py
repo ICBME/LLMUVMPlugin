@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -41,6 +42,7 @@ from fuzz_pipeline import (  # noqa: E402
     build_candidate_action_effect_report,
     build_candidate_gap_actionability_report,
     build_candidate_promotion_package,
+    build_gap_actionability_minimal_candidate_proposal,
     build_harness_optimization_decision,
     build_harness_optimization_final_decision,
     build_harness_optimization_metric_delta,
@@ -62,6 +64,7 @@ from fuzz_pipeline.harness_runtime_actions import (  # noqa: E402
     MMIO_READBACK_CONFIG_ENV,
     REPLAY_PROBE_CONFIG_ENV,
     RUNTIME_METRICS_OUT_ENV,
+    RUNTIME_ACTION_PLUGINS_ENV,
     SCOREBOARD_CHECK_CONFIG_ENV,
     CoverageFeedbackTuningRuntime,
     MmioReadbackRuntime,
@@ -1067,6 +1070,7 @@ def test_harness_plugin_registry_loads_dynamic_plugin_spec() -> None:
             ),
             encoding="utf-8",
         )
+        expected_source_hash = hashlib.sha256(module.read_bytes()).hexdigest()
         sys.path.insert(0, str(root))
         try:
             registry = load_harness_plugin_registry(
@@ -1102,7 +1106,15 @@ def test_harness_plugin_registry_loads_dynamic_plugin_spec() -> None:
     assert plugin is not None
     assert plugin.artifact_role == "candidate_dynamic_probe_config"
     assert registry.validation_json()["valid"] is True
-    assert registry.to_json()["summary"]["runtime_action_count"] >= 1
+    registry_snapshot = registry.to_json()
+    assert registry_snapshot["summary"]["runtime_action_count"] >= 1
+    assert len(registry_snapshot["fingerprint"]) == 64
+    assert registry_snapshot["plugin_sources"][0]["source_file"] == str(
+        module.resolve()
+    )
+    assert registry_snapshot["plugin_sources"][0]["source_sha256"] == (
+        expected_source_hash
+    )
     assert classified["actionability"] == "reachable_with_dynamic_probe"
     assert classified["recommended_action_type"] == "dynamic_probe"
     assert adapter_results[0].artifact_role == "candidate_dynamic_probe_config"
@@ -1128,6 +1140,41 @@ def test_harness_plugin_registry_contract_validation_flags_invalid_plugin() -> N
     assert any("must contain only" in message for message in messages)
     assert any("payload-required actions must define" in message for message in messages)
     assert any("provided together" in message for message in messages)
+
+
+def test_candidate_regression_strict_plugin_validation_gates_invalid_registry() -> None:
+    registry = default_harness_plugin_registry().with_action_plugin(
+        HarnessActionPlugin(
+            action_type="bad action",
+            payload_required=True,
+            adapter_kind="demo.partial_config",
+        )
+    )
+    backend = HarnessCandidateRegressionBackend(
+        settings=CandidateRegressionSettings(strict_plugin_validation=True),
+        plugin_registry=registry,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        try:
+            backend.run(
+                task={"target": "demo"},
+                proposal={"proposal_id": "proposal-bad"},
+                patch={"summary": {"applied_action_count": 1}},
+                candidate_manifest={
+                    "candidate_id": "candidate-bad",
+                    "sandbox_dir": str(root / "candidate"),
+                },
+            )
+        except ValueError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("strict plugin validation should gate backend.run")
+
+    assert "candidate regression plugin registry" in message
+    assert "bad action" in message
+    assert "payload-required actions must define" in message
 
 
 def test_replay_probe_runtime_consumes_filter_and_sample_limit() -> None:
@@ -1568,6 +1615,192 @@ def test_gap_actionability_report_uses_registered_classifier() -> None:
     assert report["plugin_registry"]["gap_actionability_classifier_count"] >= 1
 
 
+def test_fake_dut_manifest_plugin_generates_gap_minimal_candidate() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        plugin_module = root / "fake_dut_harness_plugin.py"
+        plugin_module.write_text(
+            "\n".join(
+                [
+                    "from fuzz_pipeline.harness_plugins import HarnessActionPlugin",
+                    "",
+                    "def fake_payload_errors(payload, path):",
+                    "    if isinstance(payload.get('enabled'), bool):",
+                    "        return []",
+                    "    return [{'path': f'{path}.enabled', 'message': 'expected bool'}]",
+                    "",
+                    "def fake_classifier(gap, context):",
+                    "    if context.target != 'fake_dut' or gap.get('id') != 'gap-fake':",
+                    "        return None",
+                    "    return {",
+                    "        **gap,",
+                    "        'actionability': 'reachable_with_fake_probe',",
+                    "        'actionability_reason': 'Fake DUT plugin can expose this gap.',",
+                    "        'recommended_action_type': 'fake_probe',",
+                    "        'suggested_payload': {'enabled': True},",
+                    "    }",
+                    "",
+                    "class FakeDutHarnessPlugin:",
+                    "    action_plugins = (HarnessActionPlugin(",
+                    "        action_type='fake_probe',",
+                    "        payload_required=True,",
+                    "        dsl_schema={'payload_fields': {'enabled': 'bool'}},",
+                    "        payload_validator=fake_payload_errors,",
+                    "        adapter_kind='fake.probe_config',",
+                    "        artifact_role='candidate_fake_probe_config',",
+                    "        make_var='HARNESS_FAKE_PROBE_CONFIG',",
+                    "        runtime_action=True,",
+                    "    ),)",
+                    "    gap_actionability_classifiers = (fake_classifier,)",
+                    "",
+                    "def build_plugin(**kwargs):",
+                    "    return FakeDutHarnessPlugin()",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        target_config = root / "fake_dut.toml"
+        target_config.write_text(
+            "\n".join(
+                [
+                    'name = "fake_dut"',
+                    'driver = "fake_driver:Driver"',
+                    "",
+                    "[harness_optimization]",
+                    'plugins = ["fake_dut_harness_plugin:build_plugin"]',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        baseline_summary = root / "baseline_summary.json"
+        candidate_summary = root / "candidate_summary.json"
+        baseline_summary.write_text(
+            json.dumps({"target": "fake_dut", "uncovered_line_count": 2}) + "\n",
+            encoding="utf-8",
+        )
+        candidate_summary.write_text(
+            json.dumps(
+                {
+                    "target": "fake_dut",
+                    "uncovered_line_count": 1,
+                    "rtl_gap_summary": {
+                        "top_gaps": [
+                            {
+                                "id": "gap-fake",
+                                "file": "/repo/fake_dut.sv",
+                                "line": 9,
+                                "code": "if (rare_state)",
+                            }
+                        ]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        sys.path.insert(0, str(root))
+        try:
+            config = load_target_config("fake_dut", target_config=target_config)
+            registry = load_harness_plugin_registry(
+                config.harness_optimization_plugins,
+                base_registry=default_harness_plugin_registry(),
+            )
+            report = build_candidate_gap_actionability_report(
+                task={
+                    "target": "fake_dut",
+                    "evidence_index": {"span_ids": ["span-fake"]},
+                },
+                proposal={
+                    "proposal_id": "proposal-fake",
+                    "evidence_refs": [{"span_id": "span-fake"}],
+                },
+                candidate_manifest={"candidate_id": "candidate-fake"},
+                baseline_campaign_manifest={
+                    "modes": [
+                        {
+                            "rounds": [
+                                {
+                                    "artifacts": {
+                                        "coverage_summary": str(baseline_summary)
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                },
+                candidate_campaign_manifest={
+                    "modes": [
+                        {
+                            "rounds": [
+                                {
+                                    "artifacts": {
+                                        "coverage_summary": str(candidate_summary)
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                },
+                baseline_metrics={"uncovered_line_count": 2},
+                candidate_metrics={"uncovered_line_count": 1},
+                action_effect_report={"summary": {}},
+                plugin_registry=registry,
+            )
+            minimal = build_gap_actionability_minimal_candidate_proposal(
+                task={
+                    "target": "fake_dut",
+                    "constraints": {
+                        "allowed_action_types": list(registry.allowed_action_types())
+                    },
+                    "evidence_index": {"span_ids": ["span-fake"]},
+                },
+                proposal={
+                    "proposal_id": "proposal-fake",
+                    "evidence_refs": [{"span_id": "span-fake"}],
+                },
+                candidate_manifest={"candidate_id": "candidate-fake"},
+                gap_actionability_report=report,
+                plugin_registry=registry,
+            )
+            context = CandidateActionAdapterContext(
+                candidate_id="candidate-fake",
+                regression_dir=root / "candidate",
+            )
+            adapter_results = adapt_candidate_actions(
+                tuple(
+                    {
+                        "action_id": action["action_id"],
+                        "action_type": action["action_type"],
+                        "artifact_path": None,
+                        "evidence_refs": action["evidence_refs"],
+                        "action": {"payload": action["payload"]},
+                    }
+                    for action in minimal["actions"]
+                ),
+                context,
+                adapters=None,
+                plugin_registry=registry,
+            )
+        finally:
+            sys.path.remove(str(root))
+
+    assert report["remaining_gaps"][0]["recommended_action_type"] == "fake_probe"
+    assert minimal["status"] == "proposed"
+    assert minimal["validation"]["valid"] is True
+    assert minimal["summary"]["recommended_action_count"] == 1
+    assert minimal["actions"][0]["action_type"] == "fake_probe"
+    assert minimal["actions"][0]["payload"] == {"enabled": True}
+    assert minimal["plugin_provenance"]["plugin_sources"][0]["source_file"] == str(
+        plugin_module.resolve()
+    )
+    assert adapter_results[0].artifact_role == "candidate_fake_probe_config"
+    assert adapter_results[0].make_var_assignment().startswith(
+        "HARNESS_FAKE_PROBE_CONFIG="
+    )
+
+
 def test_coverage_feedback_tuning_runtime_consumes_filters() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -1634,6 +1867,50 @@ def test_replay_and_scoreboard_runtime_actions_are_consumed() -> None:
         replay_config = root / "replay_probe.json"
         scoreboard_config = root / "scoreboard_check.json"
         metrics = root / "runtime_metrics.json"
+        hook_events = root / "hook_events.jsonl"
+        hook_module = root / "demo_runtime_hooks.py"
+        hook_module.write_text(
+            "\n".join(
+                [
+                    "import json",
+                    "import os",
+                    "",
+                    "class HookRuntime:",
+                    "    def __init__(self):",
+                    "        self.path = os.environ['HOOK_EVENTS_OUT']",
+                    "",
+                    "    def _event(self, name):",
+                    "        with open(self.path, 'a', encoding='utf-8') as handle:",
+                    "            handle.write(json.dumps({'event': name}) + '\\n')",
+                    "",
+                    "    def before_reset(self, **kwargs):",
+                    "        self._event('before_reset')",
+                    "",
+                    "    def after_reset(self, **kwargs):",
+                    "        self._event('after_reset')",
+                    "",
+                    "    def before_case(self, **kwargs):",
+                    "        self._event('before_case')",
+                    "",
+                    "    def after_ref_model(self, **kwargs):",
+                    "        self._event('after_ref_model')",
+                    "",
+                    "    def after_execute(self, **kwargs):",
+                    "        self._event('after_execute')",
+                    "",
+                    "    def after_scoreboard_record(self, **kwargs):",
+                    "        self._event('after_scoreboard_record')",
+                    "",
+                    "    def finalize(self, **kwargs):",
+                    "        self._event('finalize')",
+                    "",
+                    "def build_plugin(**kwargs):",
+                    "    return HookRuntime()",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
         replay_config.write_text(
             json.dumps(
                 {
@@ -1678,8 +1955,11 @@ def test_replay_and_scoreboard_runtime_actions_are_consumed() -> None:
                 REPLAY_PROBE_CONFIG_ENV: str(replay_config),
                 SCOREBOARD_CHECK_CONFIG_ENV: str(scoreboard_config),
                 RUNTIME_METRICS_OUT_ENV: str(metrics),
+                RUNTIME_ACTION_PLUGINS_ENV: "demo_runtime_hooks:build_plugin",
+                "HOOK_EVENTS_OUT": str(hook_events),
             }
         )
+        sys.path.insert(0, str(root))
         try:
             config = TargetConfig(
                 name="demo",
@@ -1691,6 +1971,7 @@ def test_replay_and_scoreboard_runtime_actions_are_consumed() -> None:
                 config,
                 stage_adapter=FakeReplayStage(),
             )
+            asyncio.run(replay.reset())
             result = asyncio.run(replay.execute(case, index=0))
             record = ReplayRecord(0, case, result=result)
             scoreboard = ObservableScoreboardAdapter(
@@ -1701,13 +1982,25 @@ def test_replay_and_scoreboard_runtime_actions_are_consumed() -> None:
             scoreboard.check()
             summary = scoreboard.summary()
             runtime_metrics = json.loads(metrics.read_text(encoding="utf-8"))
+            events = [
+                json.loads(line)["event"]
+                for line in hook_events.read_text(encoding="utf-8").splitlines()
+            ]
         finally:
+            sys.path.remove(str(root))
             _restore_env(old_env)
 
     assert runtime_metrics["summary"]["replay_probe_sample_count"] == 1
     assert runtime_metrics["summary"]["replay_probe_field_sample_count"] == 2
     assert runtime_metrics["summary"]["scoreboard_check_checked_count"] == 1
     assert summary["harness_scoreboard_checks"]["passed_count"] == 1
+    assert "before_reset" in events
+    assert "after_reset" in events
+    assert "before_case" in events
+    assert "after_ref_model" in events
+    assert "after_execute" in events
+    assert "after_scoreboard_record" in events
+    assert "finalize" in events
 
 
 def test_coverage_feedback_tuning_runtime_action_is_consumed() -> None:

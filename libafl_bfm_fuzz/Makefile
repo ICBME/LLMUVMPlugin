@@ -33,6 +33,7 @@ CAMPAIGN_ROUNDS ?= 2
 HARNESS_OPTIMIZER_BACKEND ?=
 HARNESS_CANDIDATE_BACKEND ?=
 HARNESS_OPTIMIZATION_PLUGINS ?=
+HARNESS_STRICT_PLUGIN_VALIDATION ?=
 CANDIDATE_MODES ?=
 CANDIDATE_ROUNDS ?=
 CANDIDATE_ITERS ?=
@@ -309,6 +310,8 @@ feedback-campaign: require-rtl
 		$(if $(HARNESS_OPTIMIZER_BACKEND),--harness-optimizer-backend $(HARNESS_OPTIMIZER_BACKEND),) \
 		$(if $(HARNESS_CANDIDATE_BACKEND),--harness-candidate-backend $(HARNESS_CANDIDATE_BACKEND),) \
 		$(foreach plugin,$(HARNESS_OPTIMIZATION_PLUGINS),--harness-optimization-plugin $(plugin) ) \
+		$(if $(filter 1,$(HARNESS_STRICT_PLUGIN_VALIDATION)),--strict-harness-plugin-validation,) \
+		$(if $(filter 0,$(HARNESS_STRICT_PLUGIN_VALIDATION)),--no-strict-harness-plugin-validation,) \
 		$(if $(CANDIDATE_MODES),--candidate-modes $(CANDIDATE_MODES),) \
 		$(if $(CANDIDATE_ROUNDS),--candidate-rounds $(CANDIDATE_ROUNDS),) \
 		$(if $(CANDIDATE_ITERS),--candidate-iters $(CANDIDATE_ITERS),) \
