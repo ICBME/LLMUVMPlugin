@@ -164,7 +164,9 @@
   `candidate_variant_evaluations` 和 `candidate_action_effect_report`，用于记录 top-K 或
   all-actions variant 独立回归结果、runtime action consumption 状态和每个 action 的效果归因；
   action effect report 会把 action 分类为 `improved`、`neutral`、`regressed` 或
-  `not_consumed`，promotion package 会引用该汇总。
+  `not_consumed`，promotion package 会引用该汇总。若 single-action variant 已评测，
+  汇总 `effect_status` 采用 standalone 结果，并额外写出 `combined_effect_status` /
+  `aggregate_effect_status`，用于区分独立有效 action 和只出现在有效组合中的辅助 action。
 - CLI/Makefile：`--run-plan-profile`、`--campaign-plan-profile`、`--round-evaluation`、
   `--evaluation-out`、`--campaign-evaluation-out` 以及对应 Makefile 变量
   `RUN_PLAN_PROFILE`、`CAMPAIGN_PLAN_PROFILE`、`ROUND_EVALUATION_ENABLE`、

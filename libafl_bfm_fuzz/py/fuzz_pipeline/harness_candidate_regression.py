@@ -2084,6 +2084,7 @@ def build_candidate_action_effect_report(
         variants.append(
             {
                 "variant_id": evaluation.get("variant_id"),
+                "variant_type": evaluation.get("variant_type"),
                 "status": evaluation.get("status"),
                 "action_ids": list_value(evaluation.get("action_ids")),
                 "metric_delta_summary": metric_change_summary(
@@ -2101,6 +2102,16 @@ def build_candidate_action_effect_report(
     }
     aggregate_actions = aggregate_action_effects(variants)
     effect_counts = action_effect_status_counts(aggregate_actions)
+    standalone_actions = [
+        action
+        for action in aggregate_actions
+        if action.get("standalone_effect_status") is not None
+    ]
+    standalone_effect_counts = action_effect_status_counts(
+        standalone_actions,
+        status_key="standalone_effect_status",
+        prefix="standalone_",
+    )
     return {
         "schema_version": 1,
         "kind": "libafl_bfm_fuzz.harness_candidate_action_effect_report",
@@ -2116,7 +2127,9 @@ def build_candidate_action_effect_report(
             "action_count": len(action_ids),
             "runtime_action_count": len(runtime_action_ids),
             "consumed_action_count": len(consumed_action_ids),
+            "standalone_evaluated_action_count": len(standalone_actions),
             **effect_counts,
+            **standalone_effect_counts,
         },
     }
 
@@ -2202,12 +2215,19 @@ def aggregate_action_effects(variants: list[dict[str, Any]]) -> list[dict[str, A
     by_action: dict[str, dict[str, Any]] = {}
     for variant in variants:
         variant_id = str(variant.get("variant_id") or "")
+        variant_type = str(variant.get("variant_type") or "")
+        variant_action_ids = [
+            str(action_id)
+            for action_id in list_value(variant.get("action_ids"))
+            if action_id is not None
+        ]
         for action in list_value(variant.get("actions")):
             if not isinstance(action, dict):
                 continue
             action_id = str(action.get("action_id") or "")
             if not action_id:
                 continue
+            action_status = str(action.get("effect_status") or "neutral")
             entry = by_action.setdefault(
                 action_id,
                 {
@@ -2215,19 +2235,33 @@ def aggregate_action_effects(variants: list[dict[str, Any]]) -> list[dict[str, A
                     "action_type": action.get("action_type"),
                     "is_runtime_action": action.get("is_runtime_action"),
                     "consumed": False,
+                    "standalone_effect_status": None,
+                    "combined_effect_status": None,
+                    "aggregate_effect_status": "neutral",
                     "effect_status": "neutral",
                     "supporting_variants": [],
                     "evidence_refs": list_value(action.get("evidence_refs")),
                 },
             )
             entry["consumed"] = bool(entry.get("consumed") or action.get("consumed"))
-            entry["effect_status"] = merge_action_effect_status(
-                str(entry.get("effect_status") or "neutral"),
-                str(action.get("effect_status") or "neutral"),
+            entry["aggregate_effect_status"] = merge_action_effect_status(
+                str(entry.get("aggregate_effect_status") or "neutral"),
+                action_status,
             )
+            if variant_type == "single_action" or variant_action_ids == [action_id]:
+                entry["standalone_effect_status"] = merge_optional_action_effect_status(
+                    entry.get("standalone_effect_status"),
+                    action_status,
+                )
+            elif variant_type == "combined_actions" or len(variant_action_ids) > 1:
+                entry["combined_effect_status"] = merge_optional_action_effect_status(
+                    entry.get("combined_effect_status"),
+                    action_status,
+                )
             entry["supporting_variants"].append(
                 {
                     "variant_id": variant_id,
+                    "variant_type": variant.get("variant_type"),
                     "status": action.get("effect_status"),
                     "consumed": action.get("consumed"),
                     "metric_delta_summary": action.get(
@@ -2235,7 +2269,21 @@ def aggregate_action_effects(variants: list[dict[str, Any]]) -> list[dict[str, A
                     ),
                 }
             )
+    for entry in by_action.values():
+        standalone_status = entry.get("standalone_effect_status")
+        entry["effect_status"] = str(
+            standalone_status
+            if standalone_status is not None
+            else entry.get("aggregate_effect_status")
+            or "neutral"
+        )
     return sorted(by_action.values(), key=lambda item: str(item.get("action_id")))
+
+
+def merge_optional_action_effect_status(current: Any, new: str) -> str:
+    if current is None:
+        return new
+    return merge_action_effect_status(str(current), new)
 
 
 def merge_action_effect_status(current: str, new: str) -> str:
@@ -2248,16 +2296,21 @@ def merge_action_effect_status(current: str, new: str) -> str:
     return new if priority.get(new, 0) > priority.get(current, 0) else current
 
 
-def action_effect_status_counts(actions: list[dict[str, Any]]) -> dict[str, int]:
+def action_effect_status_counts(
+    actions: list[dict[str, Any]],
+    *,
+    status_key: str = "effect_status",
+    prefix: str = "",
+) -> dict[str, int]:
     counts = {
-        "improved_action_count": 0,
-        "neutral_action_count": 0,
-        "regressed_action_count": 0,
-        "not_consumed_action_count": 0,
+        f"{prefix}improved_action_count": 0,
+        f"{prefix}neutral_action_count": 0,
+        f"{prefix}regressed_action_count": 0,
+        f"{prefix}not_consumed_action_count": 0,
     }
     for action in actions:
-        status = str(action.get("effect_status") or "neutral")
-        key = f"{status}_action_count"
+        status = str(action.get(status_key) or "neutral")
+        key = f"{prefix}{status}_action_count"
         if key in counts:
             counts[key] += 1
     return counts

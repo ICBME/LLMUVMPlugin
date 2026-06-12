@@ -34,6 +34,7 @@ from fuzz_pipeline import (  # noqa: E402
     TASK_KIND,
     HarnessOptimizationAdapter,
     NoopHarnessOptimizerBackend,
+    build_candidate_action_effect_report,
     build_harness_optimization_decision,
     build_harness_optimization_final_decision,
     build_harness_optimization_metric_delta,
@@ -2056,6 +2057,70 @@ def test_candidate_attribution_all_actions_keeps_each_variant() -> None:
         "action_b",
         "action_c",
     ]
+
+
+def test_action_effect_report_prefers_standalone_action_effects() -> None:
+    task = {"target": "demo", "run_id": "run-1"}
+    proposal = {"proposal_id": "proposal-1"}
+    candidate_manifest = {"candidate_id": "candidate-1"}
+    boundary_action = {
+        "action_id": "boundary",
+        "action_type": "mutation_directive_update",
+        "evidence_refs": [{"span_id": "span-boundary"}],
+    }
+    hint_action = {
+        "action_id": "hint",
+        "action_type": "mutation_directive_update",
+        "evidence_refs": [{"span_id": "span-hint"}],
+    }
+    baseline_metrics = {"uncovered_line_count": 34}
+    report = build_candidate_action_effect_report(
+        task=task,
+        proposal=proposal,
+        candidate_manifest=candidate_manifest,
+        baseline_metrics=baseline_metrics,
+        variant_evaluations=[
+            {
+                "variant_id": "combined",
+                "variant_type": "combined_actions",
+                "status": "passed",
+                "action_ids": ["boundary", "hint"],
+                "actions": [boundary_action, hint_action],
+                "metrics": {"uncovered_line_count": 14},
+            },
+            {
+                "variant_id": "action_boundary",
+                "variant_type": "single_action",
+                "status": "passed",
+                "action_ids": ["boundary"],
+                "actions": [boundary_action],
+                "metrics": {"uncovered_line_count": 14},
+            },
+            {
+                "variant_id": "action_hint",
+                "variant_type": "single_action",
+                "status": "passed",
+                "action_ids": ["hint"],
+                "actions": [hint_action],
+                "metrics": {"uncovered_line_count": 34},
+            },
+        ],
+    )
+    actions = {item["action_id"]: item for item in report["actions"]}
+
+    assert report["summary"]["standalone_evaluated_action_count"] == 2
+    assert report["summary"]["improved_action_count"] == 1
+    assert report["summary"]["neutral_action_count"] == 1
+    assert report["summary"]["standalone_improved_action_count"] == 1
+    assert report["summary"]["standalone_neutral_action_count"] == 1
+    assert actions["boundary"]["effect_status"] == "improved"
+    assert actions["boundary"]["standalone_effect_status"] == "improved"
+    assert actions["boundary"]["combined_effect_status"] == "improved"
+    assert actions["hint"]["effect_status"] == "neutral"
+    assert actions["hint"]["standalone_effect_status"] == "neutral"
+    assert actions["hint"]["combined_effect_status"] == "improved"
+    assert actions["hint"]["aggregate_effect_status"] == "improved"
+    assert actions["hint"]["supporting_variants"][0]["variant_type"] == "combined_actions"
 
 
 def _set_env(values: dict[str, str]) -> dict[str, str | None]:

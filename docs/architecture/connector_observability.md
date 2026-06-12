@@ -307,6 +307,10 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
   materialized single-action variants；默认只跑 combined candidate。variant evaluation
   会分别运行 sandbox campaign，生成 `candidate_variant_evaluations`、
   `candidate_action_effect_report` 和更新后的 ranking/promotion artifact。
+  action effect report 的顶层 `effect_status` 在有 single-action 证据时优先使用
+  `standalone_effect_status`，否则退回 combined/aggregate 证据；同时保留
+  `combined_effect_status` 和 `aggregate_effect_status`，避免把只跟随有效组合出现的
+  neutral action 误计为独立改进。
 - pyUVM replay 仍在 cocotb/pyUVM 生命周期内执行，但 replay context、sequence、
   driver/ref-model、scoreboard 和 coverage 的 connector 创建已统一迁移到
   `ReplayPipelineOrchestrator`；pyUVM component 只负责 phase 内调用行为，adapter 负责
