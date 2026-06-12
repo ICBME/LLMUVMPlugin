@@ -26,15 +26,20 @@ from fuzz_pipeline import (  # noqa: E402
     DECISION_KIND,
     EvaluationBackends,
     FINAL_DECISION_KIND,
+    HarnessActionPlugin,
     HarnessCandidateRegressionBackend,
+    HarnessGapActionabilityContext,
     LlmHarnessOptimizerBackend,
     METRIC_DELTA_KIND,
     PATCH_KIND,
     PROPOSAL_KIND,
     TASK_KIND,
     HarnessOptimizationAdapter,
+    default_harness_plugin_registry,
+    load_harness_plugin_registry,
     NoopHarnessOptimizerBackend,
     build_candidate_action_effect_report,
+    build_candidate_gap_actionability_report,
     build_candidate_promotion_package,
     build_harness_optimization_decision,
     build_harness_optimization_final_decision,
@@ -42,16 +47,21 @@ from fuzz_pipeline import (  # noqa: E402
     harness_optimization_paths,
     select_candidate_variants,
 )
+from fuzz_pipeline.harness_candidate_regression import (  # noqa: E402
+    adapt_candidate_actions,
+)
 from fuzz_pipeline.coverage_feedback import (  # noqa: E402
     CoverageFeedbackConfig,
     CoverageFeedbackPipeline,
 )
 from fuzz_pipeline.harness_runtime_actions import (  # noqa: E402
     COVERAGE_FEEDBACK_TUNING_CONFIG_ENV,
+    MMIO_READBACK_CONFIG_ENV,
     REPLAY_PROBE_CONFIG_ENV,
     RUNTIME_METRICS_OUT_ENV,
     SCOREBOARD_CHECK_CONFIG_ENV,
     CoverageFeedbackTuningRuntime,
+    MmioReadbackRuntime,
     ReplayProbeRuntime,
     extra_make_var_value,
     load_runtime_action_config,
@@ -476,6 +486,57 @@ class StubRegressionCampaign(CampaignOrchestrator):
                         ),
                     },
                 )
+            mmio_config = extra_make_var_value(
+                self.config.extra_make_vars,
+                MMIO_READBACK_CONFIG_ENV,
+            )
+            if mmio_config:
+                merge_runtime_metrics(
+                    runtime_metrics_path,
+                    "mmio_readback",
+                    {
+                        "configured_count": 1,
+                        "sample_count": 3,
+                        "read_count": 6,
+                        "skipped_count": 0,
+                        "unsupported_count": 0,
+                        "unresolved_count": 0,
+                        "unique_address_count": 2,
+                        "actions": _runtime_metric_actions(
+                            mmio_config,
+                            {
+                                "sample_count": 3,
+                                "read_count": 6,
+                                "skipped_count": 0,
+                                "unsupported_count": 0,
+                                "unresolved_count": 0,
+                            },
+                        ),
+                    },
+                )
+        summary_path = self._out_dir() / mode / "round_00" / "coverage_summary.json"
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(
+            json.dumps(
+                {
+                    "target": self.config.target,
+                    "uncovered_line_count": 0,
+                    "rtl_gap_summary": {
+                        "top_gaps": [
+                            {
+                                "id": "gap-readback",
+                                "file": "/repo/example/aes/src/rtl/aes.v",
+                                "line": 253,
+                                "code": "ADDR_NAME0: tmp_read_data = CORE_NAME0;",
+                                "primary_kind": "line",
+                            }
+                        ]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         return {
             "mode": mode,
             "rounds": [
@@ -489,7 +550,8 @@ class StubRegressionCampaign(CampaignOrchestrator):
                             {"harness_runtime_metrics": str(runtime_metrics_path)}
                             if runtime_metrics_path is not None
                             else {}
-                        )
+                        ),
+                        "coverage_summary": str(summary_path),
                     },
                     "stages": {},
                 }
@@ -763,11 +825,52 @@ def test_runtime_action_schema_validation() -> None:
             + "\n",
             encoding="utf-8",
         )
+        valid_mmio = root / "mmio_readback.json"
+        valid_mmio.write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "action_id": "mmio-1",
+                            "action_type": "mmio_readback",
+                            "payload": {
+                                "registers": ["ADDR_NAME0", "ADDR_STATUS"],
+                                "addresses": ["0x30"],
+                                "max_reads": 3,
+                                "case_filter": {"case.mode": "read"},
+                            },
+                        }
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        invalid_mmio = root / "invalid_mmio_readback.json"
+        invalid_mmio.write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "action_id": "mmio-2",
+                            "action_type": "mmio_readback",
+                            "payload": {"addresses": ["not-an-address"]},
+                        }
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
         config = load_runtime_action_config(valid, action_type="replay_probe")
         scoreboard_config = load_runtime_action_config(
             valid_scoreboard,
             action_type="scoreboard_check",
+        )
+        mmio_config = load_runtime_action_config(
+            valid_mmio,
+            action_type="mmio_readback",
         )
         try:
             load_runtime_action_config(invalid, action_type="replay_probe")
@@ -802,13 +905,152 @@ def test_runtime_action_schema_validation() -> None:
             weight_bounds_message = str(exc)
         else:
             raise AssertionError("invalid tuning weight bounds should fail schema")
+        try:
+            load_runtime_action_config(invalid_mmio, action_type="mmio_readback")
+        except ValueError as exc:
+            mmio_message = str(exc)
+        else:
+            raise AssertionError("invalid mmio_readback payload should fail schema")
 
     assert config.entries[0].payload["fields"] == ["case.mode"]
     assert scoreboard_config.entries[0].payload["mode"] == "field_range"
+    assert mmio_config.entries[0].payload["registers"] == [
+        "ADDR_NAME0",
+        "ADDR_STATUS",
+    ]
     assert "requires fields, signals, or probe" in message
     assert "max_gap_count must be a non-negative integer" in tuning_message
     assert "max_gap_count must be a non-negative integer" in fractional_message
     assert "min_weight must be <= max_weight" in weight_bounds_message
+    assert "addresses must be integers or hex strings" in mmio_message
+
+
+def test_harness_plugin_registry_extends_action_schema_and_adapter() -> None:
+    def custom_payload_errors(
+        payload: dict[str, Any],
+        path: str,
+    ) -> list[dict[str, str]]:
+        if isinstance(payload.get("flag"), bool):
+            return []
+        return [{"path": f"{path}.flag", "message": "expected bool"}]
+
+    plugin = HarnessActionPlugin(
+        action_type="custom_probe",
+        payload_required=True,
+        dsl_schema={"payload_fields": {"flag": "bool"}},
+        payload_validator=custom_payload_errors,
+        adapter_kind="demo.custom_probe_config",
+        artifact_role="candidate_custom_probe_config",
+        make_var="HARNESS_CUSTOM_PROBE_CONFIG",
+        runtime_action=True,
+    )
+    registry = default_harness_plugin_registry().with_action_plugin(plugin)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        campaign_evaluation, campaign_manifest, manifest_path = _source_payloads(root)
+        evaluation_path = root / "campaign_evaluation.json"
+        paths = harness_optimization_paths(evaluation_path)
+        adapter = HarnessOptimizationAdapter(
+            target="demo",
+            paths=paths,
+            campaign_evaluation_path=evaluation_path,
+            campaign_manifest_path=manifest_path,
+            cwd=root,
+            optimizer_backend=NoopHarnessOptimizerBackend(),
+            plugin_registry=registry,
+        )
+        task = adapter.run_task(campaign_evaluation, campaign_manifest)
+        proposal = {
+            "schema_version": 1,
+            "kind": PROPOSAL_KIND,
+            "proposal_id": "proposal-custom-plugin",
+            "status": "proposed",
+            "actions": [
+                {
+                    "action_id": "custom-1",
+                    "action_type": "custom_probe",
+                    "payload": {"flag": True},
+                    "evidence_refs": [{"span_id": "span-dut"}],
+                }
+            ],
+            "evidence_refs": [{"span_id": "span-dut"}],
+        }
+        decision = adapter.run_decision(task, proposal)
+        apply_result = adapter.run_apply(task, proposal, decision)
+        candidate_manifest = apply_result["harness_optimization_candidate_manifest"]
+        context = CandidateActionAdapterContext(
+            candidate_id="candidate-custom",
+            regression_dir=root / "candidate",
+        )
+        adapter_results = adapt_candidate_actions(
+            (
+                {
+                    "action_id": "custom-1",
+                    "action_type": "custom_probe",
+                    "artifact_path": None,
+                    "evidence_refs": [{"span_id": "span-dut"}],
+                    "action": {"payload": {"flag": True}},
+                },
+            ),
+            context,
+            adapters=None,
+            plugin_registry=registry,
+        )
+        config_payload = json.loads(
+            adapter_results[0].artifact_path.read_text(encoding="utf-8")
+        )
+
+    assert "custom_probe" in task["constraints"]["allowed_action_types"]
+    assert task["constraints"]["safe_action_dsl"]["custom_probe"] == {
+        "payload_fields": {"flag": "bool"}
+    }
+    assert decision["decision"] == "accepted"
+    assert candidate_manifest["candidate_artifacts"][0]["action_type"] == (
+        "custom_probe"
+    )
+    assert adapter_results[0].artifact_role == "candidate_custom_probe_config"
+    assert adapter_results[0].make_var_assignment().startswith(
+        "HARNESS_CUSTOM_PROBE_CONFIG="
+    )
+    assert config_payload["kind"] == "demo.custom_probe_config"
+    assert config_payload["entries"][0]["payload"] == {"flag": True}
+
+
+def test_harness_plugin_registry_loads_dynamic_plugin_spec() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        module = root / "demo_harness_plugin.py"
+        module.write_text(
+            "\n".join(
+                [
+                    "from fuzz_pipeline.harness_plugins import HarnessActionPlugin",
+                    "",
+                    "def build_plugin(**kwargs):",
+                    "    return HarnessActionPlugin(",
+                    "        action_type='dynamic_note',",
+                    "        adapter_kind='demo.dynamic_note_config',",
+                    "        artifact_role='candidate_dynamic_note_config',",
+                    "        make_var='HARNESS_DYNAMIC_NOTE_CONFIG',",
+                    "    )",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        sys.path.insert(0, str(root))
+        try:
+            registry = load_harness_plugin_registry(
+                ["demo_harness_plugin:build_plugin"],
+                base_registry=default_harness_plugin_registry(),
+            )
+        finally:
+            sys.path.remove(str(root))
+
+    plugin = registry.action_plugin("dynamic_note")
+    assert plugin is not None
+    assert plugin.artifact_role == "candidate_dynamic_note_config"
+    assert "demo_harness_plugin:build_plugin" in registry.plugin_specs
 
 
 def test_replay_probe_runtime_consumes_filter_and_sample_limit() -> None:
@@ -858,6 +1100,321 @@ def test_replay_probe_runtime_consumes_filter_and_sample_limit() -> None:
 
     assert payload["summary"]["replay_probe_sample_count"] == 1
     assert payload["summary"]["replay_probe_skipped_count"] == 2
+
+
+def test_mmio_readback_runtime_consumes_registers_and_addresses() -> None:
+    import asyncio
+
+    class FakeMmioDriver:
+        def __init__(self) -> None:
+            self.reads: list[int] = []
+
+        def resolve_mmio_address(self, name: str) -> int | None:
+            return {"ADDR_NAME0": 0x00, "ADDR_STATUS": 0x09}.get(name)
+
+        async def read_mmio_word(self, address: int) -> int:
+            self.reads.append(address)
+            return address + 0x100
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        mmio_config = root / "mmio_readback.json"
+        metrics = root / "runtime_metrics.json"
+        mmio_config.write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "action_id": "mmio-1",
+                            "action_type": "mmio_readback",
+                            "payload": {
+                                "registers": ["ADDR_NAME0", "ADDR_STATUS"],
+                                "addresses": ["0x30"],
+                                "case_filter": {"case.mode": "read"},
+                            },
+                        }
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        driver = FakeMmioDriver()
+        runtime = MmioReadbackRuntime(
+            load_runtime_action_config(mmio_config, action_type="mmio_readback"),
+            metrics_out=metrics,
+        )
+        asyncio.run(
+            runtime.sample(
+                index=0,
+                case=FuzzCase("demo", {"mode": "read"}, line_no=1),
+                driver=driver,
+            )
+        )
+        asyncio.run(
+            runtime.sample(
+                index=1,
+                case=FuzzCase("demo", {"mode": "write"}, line_no=2),
+                driver=driver,
+            )
+        )
+        payload = json.loads(metrics.read_text(encoding="utf-8"))
+
+    assert driver.reads == [0x00, 0x09, 0x30]
+    assert payload["summary"]["mmio_readback_sample_count"] == 1
+    assert payload["summary"]["mmio_readback_read_count"] == 3
+    assert payload["summary"]["mmio_readback_skipped_count"] == 1
+    assert payload["summary"]["mmio_readback_unique_address_count"] == 3
+    assert payload["sections"]["mmio_readback"]["actions"][0]["read_count"] == 3
+    assert payload["sections"]["mmio_readback"]["reads"][1]["label"] == "ADDR_STATUS"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        mmio_config = root / "many_mmio_readback.json"
+        metrics = root / "many_runtime_metrics.json"
+        mmio_config.write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "action_id": "mmio-many",
+                            "action_type": "mmio_readback",
+                            "payload": {
+                                "addresses": [
+                                    hex(address) for address in range(40)
+                                ],
+                            },
+                        }
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        runtime = MmioReadbackRuntime(
+            load_runtime_action_config(mmio_config, action_type="mmio_readback"),
+            metrics_out=metrics,
+        )
+        asyncio.run(
+            runtime.sample(
+                index=0,
+                case=FuzzCase("demo", {"mode": "read"}, line_no=1),
+                driver=FakeMmioDriver(),
+            )
+        )
+        payload = json.loads(metrics.read_text(encoding="utf-8"))
+
+    assert payload["summary"]["mmio_readback_read_count"] == 40
+    assert payload["summary"]["mmio_readback_read_preview_count"] == 32
+    assert payload["summary"]["mmio_readback_unique_address_count"] == 40
+
+
+def test_gap_actionability_report_classifies_aes_mmio_gaps() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        baseline_summary = root / "baseline_summary.json"
+        candidate_summary = root / "candidate_summary.json"
+        baseline_summary.write_text(
+            json.dumps({"target": "secworks_aes", "uncovered_line_count": 18})
+            + "\n",
+            encoding="utf-8",
+        )
+        candidate_summary.write_text(
+            json.dumps(
+                {
+                    "target": "secworks_aes",
+                    "uncovered_line_count": 12,
+                    "rtl_gap_summary": {
+                        "top_gaps": [
+                            {
+                                "id": "gap-name0",
+                                "file": "/repo/example/aes/src/rtl/aes.v",
+                                "line": 253,
+                                "code": "ADDR_NAME0: tmp_read_data = CORE_NAME0;",
+                            },
+                            {
+                                "id": "gap-block-write",
+                                "file": "/repo/example/aes/src/rtl/aes.v",
+                                "line": 246,
+                                "code": "if ((address >= ADDR_BLOCK0) && (address <= ADDR_BLOCK3))",
+                            },
+                            {
+                                "id": "gap-result-upper-bound",
+                                "file": "/repo/example/aes/src/rtl/aes.v",
+                                "line": 264,
+                                "code": "if ((address >= ADDR_RESULT0) && (address <= ADDR_RESULT3))",
+                            },
+                            {
+                                "id": "gap-core-default",
+                                "file": "/repo/example/aes/src/rtl/aes_core.v",
+                                "line": 331,
+                                "code": "default:",
+                            },
+                        ]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        baseline_manifest = {
+            "modes": [
+                {
+                    "rounds": [
+                        {"artifacts": {"coverage_summary": str(baseline_summary)}}
+                    ]
+                }
+            ]
+        }
+        candidate_manifest = {
+            "modes": [
+                {
+                    "rounds": [
+                        {"artifacts": {"coverage_summary": str(candidate_summary)}}
+                    ]
+                }
+            ]
+        }
+        report = build_candidate_gap_actionability_report(
+            task={"target": "secworks_aes"},
+            proposal={"proposal_id": "proposal-aes"},
+            candidate_manifest={"candidate_id": "candidate-aes"},
+            baseline_campaign_manifest=baseline_manifest,
+            candidate_campaign_manifest=candidate_manifest,
+            baseline_metrics={"uncovered_line_count": 18},
+            candidate_metrics={"uncovered_line_count": 12},
+            action_effect_report={
+                "summary": {
+                    "improved_action_count": 1,
+                    "neutral_action_count": 2,
+                    "regressed_action_count": 0,
+                }
+            },
+        )
+
+    assert report["summary"]["uncovered_line_delta"] == -6
+    assert report["summary"]["recommended_action_type_counts"] == {
+        "mmio_readback": 2,
+        "mmio_write": 1,
+    }
+    assert report["summary"]["blocked_by_action_surface"] is True
+    assert report["summary"]["has_mmio_readback_targets"] is True
+    gaps_by_id = {gap["id"]: gap for gap in report["remaining_gaps"]}
+    assert gaps_by_id["gap-name0"]["actionability"] == (
+        "reachable_with_mmio_readback"
+    )
+    assert gaps_by_id["gap-name0"]["suggested_payload"]["registers"] == [
+        "ADDR_NAME0",
+        "ADDR_NAME1",
+        "ADDR_VERSION",
+    ]
+    assert gaps_by_id["gap-result-upper-bound"]["actionability"] == (
+        "reachable_with_mmio_readback"
+    )
+    assert gaps_by_id["gap-result-upper-bound"]["suggested_payload"] == {
+        "addresses": ["0x34"]
+    }
+    assert gaps_by_id["gap-block-write"]["actionability"] == (
+        "requires_mmio_write_surface"
+    )
+    assert gaps_by_id["gap-block-write"]["suggested_payload"] == {
+        "addresses": ["0x24"]
+    }
+    assert gaps_by_id["gap-core-default"]["actionability"] == (
+        "requires_internal_state_surface"
+    )
+
+
+def test_gap_actionability_report_uses_registered_classifier() -> None:
+    def demo_classifier(
+        gap: dict[str, Any],
+        context: HarnessGapActionabilityContext,
+    ) -> dict[str, Any] | None:
+        if context.target != "demo_core":
+            return None
+        if gap.get("id") != "gap-demo":
+            return None
+        return {
+            **gap,
+            "actionability": "reachable_with_custom_probe",
+            "actionability_reason": "Demo plugin can sample the missing state.",
+            "recommended_action_type": "custom_probe",
+            "suggested_payload": {"flag": True},
+        }
+
+    registry = default_harness_plugin_registry().with_action_plugin(
+        HarnessActionPlugin(
+            action_type="custom_probe",
+            adapter_kind="demo.custom_probe_config",
+            artifact_role="candidate_custom_probe_config",
+            make_var="HARNESS_CUSTOM_PROBE_CONFIG",
+            runtime_action=True,
+        )
+    ).with_gap_actionability_classifier(demo_classifier)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        baseline_summary = root / "baseline_summary.json"
+        candidate_summary = root / "candidate_summary.json"
+        baseline_summary.write_text(
+            json.dumps({"target": "demo_core", "uncovered_line_count": 4}) + "\n",
+            encoding="utf-8",
+        )
+        candidate_summary.write_text(
+            json.dumps(
+                {
+                    "target": "demo_core",
+                    "uncovered_line_count": 3,
+                    "rtl_gap_summary": {
+                        "top_gaps": [
+                            {
+                                "id": "gap-demo",
+                                "file": "/repo/demo_core.sv",
+                                "line": 12,
+                                "code": "if (rare_state)",
+                            }
+                        ]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        report = build_candidate_gap_actionability_report(
+            task={"target": "demo_core"},
+            proposal={"proposal_id": "proposal-demo"},
+            candidate_manifest={"candidate_id": "candidate-demo"},
+            baseline_campaign_manifest={
+                "modes": [
+                    {
+                        "rounds": [
+                            {"artifacts": {"coverage_summary": str(baseline_summary)}}
+                        ]
+                    }
+                ]
+            },
+            candidate_campaign_manifest={
+                "modes": [
+                    {
+                        "rounds": [
+                            {"artifacts": {"coverage_summary": str(candidate_summary)}}
+                        ]
+                    }
+                ]
+            },
+            baseline_metrics={"uncovered_line_count": 4},
+            candidate_metrics={"uncovered_line_count": 3},
+            action_effect_report={"summary": {}},
+            plugin_registry=registry,
+        )
+
+    gap = report["remaining_gaps"][0]
+    assert gap["actionability"] == "reachable_with_custom_probe"
+    assert gap["recommended_action_type"] == "custom_probe"
+    assert report["summary"]["recommended_action_type_counts"] == {
+        "custom_probe": 1
+    }
+    assert report["plugin_registry"]["gap_actionability_classifier_count"] >= 1
 
 
 def test_coverage_feedback_tuning_runtime_consumes_filters() -> None:
@@ -1357,6 +1914,12 @@ def test_harness_candidate_regression_backend_runs_sandbox_campaign() -> None:
                     "payload": {"max_gap_count": 8, "prioritize": "uncovered"},
                     "evidence_refs": [{"span_id": "span-dut"}],
                 },
+                {
+                    "action_id": "mmio-1",
+                    "action_type": "mmio_readback",
+                    "payload": {"registers": ["ADDR_NAME0", "ADDR_STATUS"]},
+                    "evidence_refs": [{"span_id": "span-dut"}],
+                },
             ],
             "evidence_refs": [{"span_id": "span-dut"}],
         }
@@ -1408,6 +1971,11 @@ def test_harness_candidate_regression_backend_runs_sandbox_campaign() -> None:
                 encoding="utf-8"
             )
         )
+        mmio = json.loads(
+            Path(artifacts["candidate_mmio_readback_config"]).read_text(
+                encoding="utf-8"
+            )
+        )
         ranking = json.loads(
             Path(artifacts["candidate_variant_ranking"]).read_text(
                 encoding="utf-8"
@@ -1425,6 +1993,11 @@ def test_harness_candidate_regression_backend_runs_sandbox_campaign() -> None:
         )
         action_effect = json.loads(
             Path(artifacts["candidate_action_effect_report"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        actionability = json.loads(
+            Path(artifacts["candidate_gap_actionability_report"]).read_text(
                 encoding="utf-8"
             )
         )
@@ -1450,6 +2023,10 @@ def test_harness_candidate_regression_backend_runs_sandbox_campaign() -> None:
         for item in seen_configs[0].extra_make_vars
     )
     assert any(
+        item.startswith("HARNESS_MMIO_READBACK_CONFIG=")
+        for item in seen_configs[0].extra_make_vars
+    )
+    assert any(
         item.startswith("HARNESS_RUNTIME_METRICS_OUT=")
         for item in seen_configs[0].extra_make_vars
     )
@@ -1462,9 +2039,10 @@ def test_harness_candidate_regression_backend_runs_sandbox_campaign() -> None:
     assert candidate_evaluation["candidate_metrics"][
         "coverage_feedback_tuning_weighted_directive_count"
     ] == 1
-    assert candidate_evaluation["candidate_metrics"]["candidate_action_count"] == 4
-    assert candidate_evaluation["candidate_metrics"]["candidate_overlay_count"] == 4
-    assert candidate_evaluation["candidate_metrics"]["candidate_variant_count"] == 5
+    assert candidate_evaluation["candidate_metrics"]["mmio_readback_read_count"] == 6
+    assert candidate_evaluation["candidate_metrics"]["candidate_action_count"] == 5
+    assert candidate_evaluation["candidate_metrics"]["candidate_overlay_count"] == 5
+    assert candidate_evaluation["candidate_metrics"]["candidate_variant_count"] == 6
     assert candidate_evaluation["candidate_metrics"]["candidate_directive_count"] == 1
     assert candidate_evaluation["candidate_metrics"][
         "mutation_directive_update_count"
@@ -1474,9 +2052,10 @@ def test_harness_candidate_regression_backend_runs_sandbox_campaign() -> None:
     assert candidate_evaluation["candidate_metrics"][
         "coverage_feedback_tuning_count"
     ] == 1
+    assert candidate_evaluation["candidate_metrics"]["mmio_readback_count"] == 1
     assert overlay["selected_variant_id"] == "combined"
-    assert len(overlay["actions"]) == 4
-    assert len(overlay["adapter_results"]) == 4
+    assert len(overlay["actions"]) == 5
+    assert len(overlay["adapter_results"]) == 5
     assert run_config["safety"]["mainline_modified"] is False
     assert run_config["initial_directives"] == str(directives_path)
     assert run_config["runtime_metrics"] == artifacts["candidate_runtime_metrics"]
@@ -1484,34 +2063,48 @@ def test_harness_candidate_regression_backend_runs_sandbox_campaign() -> None:
     assert run_config["validation_settings"]["thresholds"][
         "min_improved_metric_count"
     ] == 1
-    assert run_config["adapter_metrics"]["candidate_action_count"] == 4
+    assert run_config["adapter_metrics"]["candidate_action_count"] == 5
     assert "candidate_replay_probe_config" in run_config["adapter_artifacts"]
     assert "candidate_scoreboard_check_config" in run_config["adapter_artifacts"]
     assert (
         "candidate_coverage_feedback_tuning_config"
         in run_config["adapter_artifacts"]
     )
-    assert len(run_config["extra_make_vars"]) >= 4
+    assert "candidate_mmio_readback_config" in run_config["adapter_artifacts"]
+    assert len(run_config["extra_make_vars"]) >= 5
     assert directives["directives"][0]["origin"] == "harness_optimizer"
     assert replay_probe["entries"][0]["payload"]["signals"] == ["dut.state"]
     assert scoreboard["entries"][0]["payload"]["check"].startswith("case result")
     assert tuning["entries"][0]["payload"]["max_gap_count"] == 8
+    assert mmio["entries"][0]["payload"]["registers"] == [
+        "ADDR_NAME0",
+        "ADDR_STATUS",
+    ]
     assert runtime_metrics["summary"]["replay_probe_sample_count"] == 3
+    assert runtime_metrics["summary"]["mmio_readback_read_count"] == 6
     assert ranking["top_variant"]["variant_id"] == "combined"
-    assert len(ranking["variants"]) == 5
+    assert len(ranking["variants"]) == 6
     assert promotion["promotion_status"] == "ready_for_review"
+    assert promotion["gap_actionability_summary"]["remaining_gap_count"] == 1
     assert promotion["safety"]["mainline_modified"] is False
+    assert actionability["summary"]["remaining_gap_count"] == 1
     assert len(variant_evaluations["evaluations"]) == 1
     assert variant_evaluations["evaluations"][0]["variant_id"] == "combined"
     assert action_effect["summary"]["variant_count"] == 1
-    assert action_effect["summary"]["consumed_action_count"] == 3
+    assert action_effect["summary"]["consumed_action_count"] == 4
     assert any(
         action["action_id"] == "probe-1"
         and action["consumed"] is True
         and action["runtime_metrics"]["sample_count"] == 3
         for action in action_effect["variants"][0]["actions"]
     )
-    assert candidate_evaluation["summary"]["candidate_variant_count"] == 5
+    assert any(
+        action["action_id"] == "mmio-1"
+        and action["consumed"] is True
+        and action["runtime_metrics"]["read_count"] == 6
+        for action in action_effect["variants"][0]["actions"]
+    )
+    assert candidate_evaluation["summary"]["candidate_variant_count"] == 6
     assert candidate_evaluation["summary"]["evaluated_variant_count"] == 1
     assert candidate_evaluation["summary"]["selected_variant_id"] == "combined"
     assert candidate_evaluation["summary"]["promotion_status"] == "ready_for_review"

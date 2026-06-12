@@ -13,6 +13,7 @@ PY_DIR = FUZZ_DIR / "py"
 if str(PY_DIR) not in sys.path:
     sys.path.insert(0, str(PY_DIR))
 
+from fuzz_bfm.target_config import load_target_config  # noqa: E402
 from fuzz_pipeline.campaign_orchestrator import (  # noqa: E402
     CampaignConfig,
     normalize_campaign_modes,
@@ -25,8 +26,10 @@ from fuzz_pipeline import (  # noqa: E402
     HarnessCandidateRegressionBackend,
     LlmHarnessOptimizerBackend,
     NoopHarnessOptimizerBackend,
+    default_harness_plugin_registry,
 )
 from fuzz_pipeline.harness import close_observation  # noqa: E402
+from fuzz_pipeline.harness_plugins import load_harness_plugin_registry  # noqa: E402
 from fuzz_pipeline.observation import ObservationRuntime  # noqa: E402
 from fuzz_pipeline.run_orchestrator import (  # noqa: E402
     FuzzRunConfig,
@@ -218,6 +221,15 @@ def add_feedback_campaign_args(parser: argparse.ArgumentParser) -> None:
         choices=("noop", "real"),
         default=None,
         help="Candidate validation backend for optimization validation profiles.",
+    )
+    parser.add_argument(
+        "--harness-optimization-plugin",
+        action="append",
+        default=[],
+        help=(
+            "Dynamic harness optimization plugin spec in module:Object form. "
+            "Can be repeated; also reads HARNESS_OPTIMIZATION_PLUGINS."
+        ),
     )
     parser.add_argument("--candidate-modes")
     parser.add_argument("--candidate-rounds", type=int)
@@ -556,7 +568,8 @@ def feedback_campaign_evaluation_backends(
 ) -> EvaluationBackends | None:
     optimizer = selected_harness_optimizer_backend(args)
     candidate = selected_harness_candidate_backend(args)
-    if optimizer is None and candidate is None:
+    plugin_registry = harness_plugin_registry_from_args(args)
+    if optimizer is None and candidate is None and plugin_registry is None:
         return None
     return EvaluationBackends(
         harness_optimizer=(
@@ -569,11 +582,47 @@ def feedback_campaign_evaluation_backends(
         harness_candidate_evaluation=(
             HarnessCandidateRegressionBackend(
                 settings=candidate_regression_settings_from_args(args),
+                plugin_registry=plugin_registry,
             )
             if candidate == "real"
             else None
         ),
+        harness_plugin_registry=plugin_registry,
     )
+
+
+def harness_plugin_registry_from_args(args: argparse.Namespace):
+    specs = harness_plugin_specs_from_args(args)
+    if not specs:
+        return None
+    return load_harness_plugin_registry(
+        specs,
+        base_registry=default_harness_plugin_registry(),
+        target=args.target,
+        args=args,
+    )
+
+
+def harness_plugin_specs_from_args(args: argparse.Namespace) -> tuple[str, ...]:
+    values: list[str] = []
+    try:
+        config = load_target_config(
+            args.target,
+            target_config=getattr(args, "target_config", None),
+        )
+        values.extend(config.harness_optimization_plugins)
+    except FileNotFoundError:
+        pass
+    values.extend(getattr(args, "harness_optimization_plugin", []) or [])
+    env_value = os.getenv("HARNESS_OPTIMIZATION_PLUGINS")
+    if env_value:
+        values.extend(
+            item.strip()
+            for chunk in env_value.splitlines()
+            for item in chunk.split(",")
+            if item.strip()
+        )
+    return tuple(values)
 
 
 def selected_harness_optimizer_backend(args: argparse.Namespace) -> str | None:

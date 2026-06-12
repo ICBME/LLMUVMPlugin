@@ -57,6 +57,7 @@ class TargetConfig:
     scoreboard: str | None = None
     coverage_model: str | None = None
     sequence_schema: str | None = None
+    harness_optimization_plugins: tuple[str, ...] = ()
     coverpoints: tuple[CoverpointSpec, ...] = ()
     crosses: tuple[CrossSpec, ...] = ()
     fields: tuple[FieldSpec, ...] = ()
@@ -80,6 +81,11 @@ def load_target_config(
         raise ValueError(f"{path}: target config must define driver = 'module:Class'")
     bfm_ir = data.get("bfm_ir")
     signals = _signals_from_dict(path, data.get("signals", {}))
+    harness_optimization = data.get("harness_optimization", {})
+    if harness_optimization is None:
+        harness_optimization = {}
+    if not isinstance(harness_optimization, dict):
+        raise ValueError(f"{path}: harness_optimization must be a TOML table")
     return TargetConfig(
         name=name,
         driver=driver,
@@ -97,6 +103,11 @@ def load_target_config(
         scoreboard=str(data["scoreboard"]) if "scoreboard" in data else None,
         coverage_model=str(data["coverage_model"]) if "coverage_model" in data else None,
         sequence_schema=str(data["sequence_schema"]) if "sequence_schema" in data else None,
+        harness_optimization_plugins=_string_tuple(
+            path,
+            harness_optimization.get("plugins", ()),
+            field="harness_optimization.plugins",
+        ),
         coverpoints=tuple(_coverpoint_from_dict(item) for item in data.get("coverpoint", ())),
         crosses=tuple(_cross_from_dict(item) for item in data.get("cross", ())),
         fields=tuple(_field_from_dict(item) for item in data.get("field", ())),
@@ -190,6 +201,18 @@ def _signals_from_dict(path: Path, raw_signals: Any) -> dict[str, str]:
     if not isinstance(raw_signals, dict):
         raise ValueError(f"{path}: signals must be a TOML table")
     return {str(key): str(value) for key, value in raw_signals.items()}
+
+
+def _string_tuple(path: Path, value: Any, *, field: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, list | tuple):
+        if not all(isinstance(item, str) and item for item in value):
+            raise ValueError(f"{path}: {field} must contain non-empty strings")
+        return tuple(value)
+    raise ValueError(f"{path}: {field} must be a string or list of strings")
 
 
 def _optional_int(value: Any) -> int | None:

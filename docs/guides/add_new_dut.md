@@ -187,7 +187,39 @@ UVM_FUNCTIONAL_COVERAGE_OUT=/path/to/my_dut_functional.json
 如果覆盖点需要 DUT response、错误类型或协议状态机上下文，应提供目标专用
 `coverage_model` plugin，并可实现 `sample_record(record)`。
 
-## 10. 保持目标代码外置
+## 10. 可选：Harness Optimization Plugin
+
+如果新 DUT 的剩余 RTL gap 需要目标专用解释，或需要新的 safe action surface，不要把规则写进
+framework 核心。提供一个 harness optimization plugin，并在 target manifest 中声明：
+
+```toml
+[harness_optimization]
+plugins = ["my_project.eval_plugin:MyHarnessOptimizationPlugin"]
+```
+
+plugin 可以返回或注册：
+
+- `HarnessActionPlugin`：声明 `action_type`、safe sandbox 标记、payload DSL、validator、
+  adapter artifact kind/env var，以及该 action 是否属于 runtime action。
+- gap actionability classifier：把 coverage summary 中的 top gaps 转换成
+  `actionability`、`recommended_action_type` 和 `suggested_payload`。
+
+真实 candidate regression 会把这些插件同时用于 LLM schema hint、sandbox apply、
+candidate adapter config、per-action attribution 和 `candidate_gap_actionability_report`。
+CLI 也可临时传入：
+
+```sh
+uv run make -C libafl_bfm_fuzz \
+  TARGET=my_dut \
+  TARGET_CONFIG=/path/to/my_dut.toml \
+  HARNESS_OPTIMIZATION_PLUGINS=my_project.eval_plugin:MyHarnessOptimizationPlugin \
+  real-candidate-evidence-campaign
+```
+
+LLM 应只选择已注册 action 与 payload；新插件代码本身应先走 sandbox validation 和
+promotion review，而不是让 LLM 直接修改主线代码。
+
+## 11. 保持目标代码外置
 
 新目标的专用文件应保存在目标工程或插件目录中，不放进可复用框架核心。仓库内
 `fuzz_examples` 和 `targets/secworks_*` 只作为 smoke/example target：

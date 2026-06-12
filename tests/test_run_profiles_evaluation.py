@@ -663,6 +663,96 @@ def test_feedback_campaign_cli_builds_real_candidate_regression_backend() -> Non
     assert settings.thresholds.max_flaky_metric_count == 1
 
 
+def test_feedback_campaign_cli_loads_harness_optimization_plugins() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        plugin_module = root / "demo_cli_harness_plugins.py"
+        plugin_module.write_text(
+            "\n".join(
+                [
+                    "from fuzz_pipeline.harness_plugins import HarnessActionPlugin",
+                    "",
+                    "def cli_plugin(**kwargs):",
+                    "    return HarnessActionPlugin(",
+                    "        action_type='cli_action',",
+                    "        adapter_kind='demo.cli_config',",
+                    "        artifact_role='candidate_cli_config',",
+                    "        make_var='HARNESS_CLI_CONFIG',",
+                    "    )",
+                    "",
+                    "def manifest_plugin(**kwargs):",
+                    "    return HarnessActionPlugin(",
+                    "        action_type='manifest_action',",
+                    "        adapter_kind='demo.manifest_config',",
+                    "        artifact_role='candidate_manifest_config',",
+                    "        make_var='HARNESS_MANIFEST_CONFIG',",
+                    "    )",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        target_config = root / "demo.toml"
+        target_config.write_text(
+            "\n".join(
+                [
+                    'name = "demo"',
+                    'driver = "demo_driver:Driver"',
+                    "",
+                    "[harness_optimization]",
+                    'plugins = ["demo_cli_harness_plugins:manifest_plugin"]',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        sys.path.insert(0, str(root))
+        try:
+            args = pipeline_cli.parse_args(
+                [
+                    "feedback-campaign",
+                    "--target",
+                    "demo",
+                    "--target-config",
+                    str(target_config),
+                    "--libafl-manifest",
+                    str(root / "Cargo.toml"),
+                    "--out-dir",
+                    str(root / "campaign"),
+                    "--campaign-plan-profile",
+                    "campaign_with_evaluation_and_optimization_real_validation",
+                    "--harness-optimizer-backend",
+                    "noop",
+                    "--candidate-iters",
+                    "0",
+                    "--candidate-max-seeds",
+                    "0",
+                    "--harness-optimization-plugin",
+                    "demo_cli_harness_plugins:cli_plugin",
+                ]
+            )
+            backends = pipeline_cli.feedback_campaign_evaluation_backends(args)
+        finally:
+            sys.path.remove(str(root))
+
+    assert backends is not None
+    assert backends.harness_plugin_registry is not None
+    assert backends.harness_plugin_registry.action_plugin("cli_action") is not None
+    assert (
+        backends.harness_plugin_registry.action_plugin("manifest_action") is not None
+    )
+    assert isinstance(
+        backends.harness_candidate_evaluation,
+        HarnessCandidateRegressionBackend,
+    )
+    assert (
+        backends.harness_candidate_evaluation.plugin_registry.action_plugin(
+            "manifest_action"
+        )
+        is not None
+    )
+
+
 def test_real_candidate_make_targets_encode_smoke_and_evidence_defaults() -> None:
     root = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory() as tmp:

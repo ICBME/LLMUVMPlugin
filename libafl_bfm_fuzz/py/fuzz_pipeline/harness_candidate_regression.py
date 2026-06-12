@@ -12,6 +12,7 @@ from .campaign_orchestrator import CampaignConfig, CampaignOrchestrator
 from .harness_optimization import (
     CANDIDATE_EVALUATION_KIND,
     baseline_metric_snapshot,
+    default_harness_plugin_registry,
     list_value,
     metric_direction,
     metric_gates_acceptance,
@@ -19,6 +20,7 @@ from .harness_optimization import (
     safe_slug,
     utc_timestamp,
 )
+from .harness_plugins import HarnessGapActionabilityContext, HarnessPluginRegistry
 from .harness_records import mapping
 from .harness_runtime_actions import (
     RUNTIME_METRICS_OUT_ENV,
@@ -56,6 +58,11 @@ ADAPTER_CONFIG_KINDS = {
         "candidate_coverage_feedback_tuning_config",
         "HARNESS_COVERAGE_FEEDBACK_TUNING_CONFIG",
     ),
+    "mmio_readback": (
+        "libafl_bfm_fuzz.harness_candidate_mmio_readback_config",
+        "candidate_mmio_readback_config",
+        "HARNESS_MMIO_READBACK_CONFIG",
+    ),
     "stimulus_generation_hint": (
         "libafl_bfm_fuzz.harness_candidate_stimulus_hint_config",
         "candidate_stimulus_hint_config",
@@ -72,6 +79,7 @@ RUNTIME_ACTION_TYPES = {
     "replay_probe",
     "scoreboard_check",
     "coverage_feedback_tuning",
+    "mmio_readback",
 }
 
 
@@ -200,13 +208,17 @@ class CandidateActionAdapter(Protocol):
 @dataclass(frozen=True)
 class JsonConfigActionAdapter:
     action_type: str
+    plugin_registry: HarnessPluginRegistry | None = None
 
     def adapt(
         self,
         actions: tuple[dict[str, Any], ...],
         context: CandidateActionAdapterContext,
     ) -> CandidateActionAdapterResult:
-        kind, artifact_role, make_var = adapter_config_for(self.action_type)
+        kind, artifact_role, make_var = adapter_config_for(
+            self.action_type,
+            plugin_registry=self.plugin_registry,
+        )
         entries = tuple(action_entry_for(action) for action in actions)
         artifact = {
             "schema_version": 1,
@@ -247,9 +259,13 @@ class HarnessCandidateRegressionBackend:
     campaign_plan_profiles: Mapping[str, RunPlanProfile] | None = None
     evaluation_backends: EvaluationBackends | None = None
     action_adapters: Mapping[str, CandidateActionAdapter] | None = None
+    plugin_registry: HarnessPluginRegistry | None = None
     run_orchestrator_factory: Callable[..., FuzzRunOrchestrator] = FuzzRunOrchestrator
     campaign_orchestrator_factory: CampaignOrchestratorFactory = CampaignOrchestrator
     observation_context: ObservationContext | None = None
+
+    def _plugin_registry(self) -> HarnessPluginRegistry:
+        return candidate_regression_plugin_registry(self.plugin_registry)
 
     def run(
         self,
@@ -258,6 +274,7 @@ class HarnessCandidateRegressionBackend:
         patch: dict[str, Any],
         candidate_manifest: dict[str, Any],
     ) -> dict[str, Any]:
+        plugin_registry = self._plugin_registry()
         source_baseline_metrics = baseline_metric_snapshot(task)
         baseline_metrics = source_baseline_metrics
         baseline_source = "task_snapshot"
@@ -284,6 +301,7 @@ class HarnessCandidateRegressionBackend:
             raw_actions,
             adapter_context,
             adapters=self.action_adapters,
+            plugin_registry=plugin_registry,
         )
         overlay = build_candidate_action_overlay(candidate_manifest, adapter_results)
         overlay_path = regression_dir / "candidate_action_overlay.json"
@@ -536,9 +554,34 @@ class HarnessCandidateRegressionBackend:
             candidate_manifest=candidate_manifest,
             baseline_metrics=baseline_metrics,
             variant_evaluations=variant_evaluations,
+            plugin_registry=plugin_registry,
         )
         action_effect_report_path = regression_dir / "candidate_action_effect_report.json"
         _write_json(action_effect_report_path, action_effect_report)
+        baseline_gap_manifest = (
+            read_json_object(
+                _required_path(
+                    matched_baseline.artifacts.get("matched_baseline_campaign_manifest")
+                )
+            )
+            if matched_baseline is not None
+            else baseline_manifest
+        )
+        gap_actionability_report = build_candidate_gap_actionability_report(
+            task=task,
+            proposal=proposal,
+            candidate_manifest=candidate_manifest,
+            baseline_campaign_manifest=baseline_gap_manifest,
+            candidate_campaign_manifest=candidate_campaign_manifest,
+            baseline_metrics=baseline_metrics,
+            candidate_metrics=candidate_metrics,
+            action_effect_report=action_effect_report,
+            plugin_registry=plugin_registry,
+        )
+        gap_actionability_report_path = (
+            regression_dir / "candidate_gap_actionability_report.json"
+        )
+        _write_json(gap_actionability_report_path, gap_actionability_report)
         promotion = build_candidate_promotion_package(
             task=task,
             proposal=proposal,
@@ -550,6 +593,7 @@ class HarnessCandidateRegressionBackend:
             thresholds=self.settings.thresholds,
             stability_summary=paired_validation_summary,
             action_effect_report=action_effect_report,
+            gap_actionability_report=gap_actionability_report,
         )
         promotion_path = regression_dir / "candidate_promotion_package.json"
         _write_json(promotion_path, promotion)
@@ -595,6 +639,9 @@ class HarnessCandidateRegressionBackend:
                 "candidate_variant_ranking": str(ranking_path),
                 "candidate_variant_evaluations": str(variant_evaluations_path),
                 "candidate_action_effect_report": str(action_effect_report_path),
+                "candidate_gap_actionability_report": str(
+                    gap_actionability_report_path
+                ),
                 "candidate_promotion_package": str(promotion_path),
                 "candidate_campaign_manifest": str(
                     campaign_config.campaign_manifest_out
@@ -878,6 +925,7 @@ class HarnessCandidateRegressionBackend:
             raw_actions,
             adapter_context,
             adapters=self.action_adapters,
+            plugin_registry=self._plugin_registry(),
         )
         overlay = build_candidate_action_overlay(
             {**candidate_manifest, "candidate_id": repeat_candidate_id},
@@ -1137,6 +1185,7 @@ class HarnessCandidateRegressionBackend:
             actions,
             adapter_context,
             adapters=self.action_adapters,
+            plugin_registry=self._plugin_registry(),
         )
         overlay = build_candidate_action_overlay(
             {**candidate_manifest, "candidate_id": variant_candidate_id},
@@ -1363,14 +1412,29 @@ class HarnessCandidateRegressionBackend:
         }
 
 
-def default_candidate_action_adapters() -> dict[str, CandidateActionAdapter]:
+def default_candidate_action_adapters(
+    plugin_registry: HarnessPluginRegistry | None = None,
+) -> dict[str, CandidateActionAdapter]:
+    registry = candidate_regression_plugin_registry(plugin_registry)
     return {
-        action_type: JsonConfigActionAdapter(action_type)
-        for action_type in ADAPTER_CONFIG_KINDS
+        action_type: JsonConfigActionAdapter(
+            action_type,
+            plugin_registry=registry,
+        )
+        for action_type in registry.allowed_action_types()
+        if registry.adapter_config_for(action_type) is not None
     }
 
 
-def adapter_config_for(action_type: str) -> tuple[str, str, str]:
+def adapter_config_for(
+    action_type: str,
+    *,
+    plugin_registry: HarnessPluginRegistry | None = None,
+) -> tuple[str, str, str]:
+    registry = plugin_registry or default_candidate_regression_plugin_registry()
+    plugin_config = registry.adapter_config_for(action_type)
+    if plugin_config is not None:
+        return plugin_config
     config = ADAPTER_CONFIG_KINDS.get(action_type)
     if config is not None:
         return config
@@ -1409,8 +1473,9 @@ def adapt_candidate_actions(
     context: CandidateActionAdapterContext,
     *,
     adapters: Mapping[str, CandidateActionAdapter] | None,
+    plugin_registry: HarnessPluginRegistry | None = None,
 ) -> tuple[CandidateActionAdapterResult, ...]:
-    adapter_map = default_candidate_action_adapters()
+    adapter_map = default_candidate_action_adapters(plugin_registry)
     if adapters is not None:
         adapter_map.update(adapters)
     by_type: dict[str, list[dict[str, Any]]] = {}
@@ -2017,6 +2082,7 @@ def build_candidate_promotion_package(
     thresholds: CandidateAcceptanceThresholds,
     stability_summary: dict[str, Any] | None = None,
     action_effect_report: dict[str, Any] | None = None,
+    gap_actionability_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     summary = metric_threshold_summary(
         baseline_metrics,
@@ -2051,6 +2117,9 @@ def build_candidate_promotion_package(
         "stability_summary": stability_summary or {},
         "action_effect_summary": mapping(action_effect_report).get("summary")
         if action_effect_report
+        else {},
+        "gap_actionability_summary": mapping(gap_actionability_report).get("summary")
+        if gap_actionability_report
         else {},
         "action_effects": action_effects,
         "effective_actions": pruning["effective_actions"],
@@ -2246,6 +2315,220 @@ def find_matching_variant(
     return {}
 
 
+def build_candidate_gap_actionability_report(
+    *,
+    task: dict[str, Any],
+    proposal: dict[str, Any],
+    candidate_manifest: dict[str, Any],
+    baseline_campaign_manifest: dict[str, Any],
+    candidate_campaign_manifest: dict[str, Any],
+    baseline_metrics: dict[str, float | int],
+    candidate_metrics: dict[str, float | int],
+    action_effect_report: dict[str, Any],
+    plugin_registry: HarnessPluginRegistry | None = None,
+) -> dict[str, Any]:
+    registry = candidate_regression_plugin_registry(plugin_registry)
+    baseline_summary_path = latest_coverage_summary_path(baseline_campaign_manifest)
+    candidate_summary_path = latest_coverage_summary_path(candidate_campaign_manifest)
+    candidate_summary = (
+        read_json_object(candidate_summary_path) if candidate_summary_path else {}
+    )
+    gap_context = HarnessGapActionabilityContext(
+        target=str(task.get("target") or ""),
+        task=task,
+        proposal=proposal,
+        candidate_manifest=candidate_manifest,
+        baseline_metrics=baseline_metrics,
+        candidate_metrics=candidate_metrics,
+    )
+    gaps = [
+        classify_gap_actionability(
+            gap,
+            target=str(task.get("target") or ""),
+            plugin_registry=registry,
+            context=gap_context,
+        )
+        for gap in list_value(
+            mapping(candidate_summary.get("rtl_gap_summary")).get("top_gaps")
+        )
+        if isinstance(gap, dict)
+    ]
+    action_summary = mapping(action_effect_report.get("summary"))
+    categories: dict[str, int] = {}
+    recommended_action_types: dict[str, int] = {}
+    for gap in gaps:
+        category = str(gap.get("actionability") or "unknown")
+        categories[category] = categories.get(category, 0) + 1
+        action_type = gap.get("recommended_action_type")
+        if action_type:
+            action_type_text = str(action_type)
+            recommended_action_types[action_type_text] = (
+                recommended_action_types.get(action_type_text, 0) + 1
+            )
+    baseline_uncovered = number_value(baseline_metrics.get("uncovered_line_count"))
+    candidate_uncovered = number_value(candidate_metrics.get("uncovered_line_count"))
+    delta = (
+        candidate_uncovered - baseline_uncovered
+        if baseline_uncovered is not None and candidate_uncovered is not None
+        else None
+    )
+    return {
+        "schema_version": 1,
+        "kind": "libafl_bfm_fuzz.harness_candidate_gap_actionability_report",
+        "created_at": utc_timestamp(),
+        "target": task.get("target"),
+        "run_id": task.get("run_id"),
+        "proposal_id": proposal.get("proposal_id"),
+        "candidate_id": candidate_manifest.get("candidate_id"),
+        "baseline_coverage_summary": str(baseline_summary_path)
+        if baseline_summary_path
+        else None,
+        "candidate_coverage_summary": str(candidate_summary_path)
+        if candidate_summary_path
+        else None,
+        "baseline_uncovered_line_count": baseline_uncovered,
+        "candidate_uncovered_line_count": candidate_uncovered,
+        "uncovered_line_delta": delta,
+        "remaining_gaps": gaps,
+        "plugin_registry": registry.to_json(),
+        "summary": {
+            "baseline_uncovered_line_count": baseline_uncovered,
+            "candidate_uncovered_line_count": candidate_uncovered,
+            "uncovered_line_delta": delta,
+            "remaining_gap_count": len(gaps),
+            "actionability_counts": categories,
+            "recommended_action_type_counts": recommended_action_types,
+            "effective_action_count": int(
+                number_value(action_summary.get("improved_action_count")) or 0
+            ),
+            "neutral_action_count": int(
+                number_value(action_summary.get("neutral_action_count")) or 0
+            ),
+            "harmful_action_count": int(
+                number_value(action_summary.get("regressed_action_count")) or 0
+            ),
+            "blocked_by_action_surface": any(
+                gap.get("actionability")
+                in {"requires_mmio_write_surface", "requires_internal_state_surface"}
+                for gap in gaps
+            ),
+            "has_mmio_readback_targets": any(
+                gap.get("recommended_action_type") == "mmio_readback"
+                for gap in gaps
+            ),
+        },
+    }
+
+
+def latest_coverage_summary_path(campaign_manifest: dict[str, Any]) -> Path | None:
+    result: Path | None = None
+    cwd = _campaign_cwd(campaign_manifest, None)
+    for mode in list_value(campaign_manifest.get("modes")):
+        if not isinstance(mode, dict):
+            continue
+        for round_item in list_value(mode.get("rounds")):
+            if not isinstance(round_item, dict):
+                continue
+            path = _artifact_path(
+                mapping(round_item.get("artifacts")),
+                "coverage_summary",
+                cwd,
+            )
+            if path is not None:
+                result = path
+    return result
+
+
+def classify_gap_actionability(
+    gap: dict[str, Any],
+    *,
+    target: str,
+    plugin_registry: HarnessPluginRegistry | None = None,
+    context: HarnessGapActionabilityContext | None = None,
+) -> dict[str, Any]:
+    registry = candidate_regression_plugin_registry(plugin_registry)
+    gap_context = context or HarnessGapActionabilityContext(target=target)
+    return registry.classify_gap_actionability(gap, gap_context)
+
+
+def default_candidate_regression_plugin_registry() -> HarnessPluginRegistry:
+    return default_harness_plugin_registry().with_gap_actionability_classifier(
+        aes_gap_actionability_classifier
+    )
+
+
+def candidate_regression_plugin_registry(
+    plugin_registry: HarnessPluginRegistry | None = None,
+) -> HarnessPluginRegistry:
+    base = default_candidate_regression_plugin_registry()
+    return base if plugin_registry is None else base.merge(plugin_registry)
+
+
+def aes_gap_actionability_classifier(
+    gap: dict[str, Any],
+    context: HarnessGapActionabilityContext,
+) -> dict[str, Any] | None:
+    target = context.target
+    code = str(gap.get("code") or "")
+    file_name = str(gap.get("file") or "")
+    line = int(number_value(gap.get("line")) or 0)
+    result = dict(gap)
+    if target != "secworks_aes":
+        return None
+    if file_name.endswith("/aes.v") or file_name.endswith("aes.v"):
+        readback_payload = aes_readback_payload_for_gap(code=code, line=line)
+        if readback_payload:
+            result["actionability"] = "reachable_with_mmio_readback"
+            result["actionability_reason"] = (
+                "AES top-level read address gap can be exercised by sampling "
+                "symbolic MMIO registers or explicit safe read addresses after "
+                "the normal transaction."
+            )
+            result["recommended_action_type"] = "mmio_readback"
+            result["suggested_payload"] = readback_payload
+            return result
+        if "ADDR_BLOCK" in code and "address" in code:
+            result["actionability"] = "requires_mmio_write_surface"
+            result["actionability_reason"] = (
+                "This write-side address expression needs an explicit MMIO write "
+                "surface or driver extension; readback alone cannot toggle it."
+            )
+            result["recommended_action_type"] = "mmio_write"
+            result["suggested_payload"] = {"addresses": ["0x24"]}
+            return result
+    if "default" in code or "_ctrl" in code or file_name.endswith(
+        ("aes_core.v", "aes_key_mem.v", "aes_encipher_block.v", "aes_decipher_block.v")
+    ):
+        result["actionability"] = "requires_internal_state_surface"
+        result["actionability_reason"] = (
+            "Gap appears to be an internal defensive/default branch that cannot be "
+            "reliably driven by the current transaction or MMIO readback action."
+        )
+        return result
+    return None
+
+
+def aes_readback_payload_for_gap(*, code: str, line: int) -> dict[str, Any]:
+    if "ADDR_RESULT" in code:
+        return {"addresses": ["0x34"]}
+    registers = aes_readback_registers_for_gap(code=code, line=line)
+    if registers:
+        return {"registers": registers}
+    return {}
+
+
+def aes_readback_registers_for_gap(*, code: str, line: int) -> list[str]:
+    if any(name in code for name in ("ADDR_NAME0", "ADDR_NAME1", "ADDR_VERSION")):
+        return ["ADDR_NAME0", "ADDR_NAME1", "ADDR_VERSION"]
+    if "ADDR_CTRL" in code:
+        return ["ADDR_CTRL"]
+    if "ADDR_STATUS" in code:
+        return ["ADDR_STATUS"]
+    if 253 <= line <= 257:
+        return ["ADDR_NAME0", "ADDR_NAME1", "ADDR_VERSION", "ADDR_CTRL", "ADDR_STATUS"]
+    return []
+
+
 def build_candidate_action_effect_report(
     *,
     task: dict[str, Any],
@@ -2253,7 +2536,9 @@ def build_candidate_action_effect_report(
     candidate_manifest: dict[str, Any],
     baseline_metrics: dict[str, float | int],
     variant_evaluations: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    plugin_registry: HarnessPluginRegistry | None = None,
 ) -> dict[str, Any]:
+    registry = candidate_regression_plugin_registry(plugin_registry)
     variants = []
     consumed_action_ids: set[str] = set()
     runtime_action_ids: set[str] = set()
@@ -2267,6 +2552,7 @@ def build_candidate_action_effect_report(
             evaluation=evaluation,
             runtime_payload=runtime_payload,
             baseline_metrics=baseline_metrics,
+            plugin_registry=registry,
         )
         for action in actions:
             if action.get("is_runtime_action"):
@@ -2331,7 +2617,10 @@ def build_variant_action_effects(
     evaluation: dict[str, Any],
     runtime_payload: dict[str, Any],
     baseline_metrics: dict[str, float | int],
+    plugin_registry: HarnessPluginRegistry | None = None,
 ) -> list[dict[str, Any]]:
+    registry = candidate_regression_plugin_registry(plugin_registry)
+    runtime_action_types = set(registry.runtime_action_types())
     runtime_by_action = runtime_action_metric_map(runtime_payload)
     section_metrics = runtime_section_metric_map(runtime_payload)
     actions = [
@@ -2350,7 +2639,7 @@ def build_variant_action_effects(
         metrics = dict(runtime_by_action.get((action_id, action_type), {}))
         if not metrics and type_counts.get(action_type) == 1:
             metrics = dict(section_metrics.get(action_type, {}))
-        is_runtime_action = action_type in RUNTIME_ACTION_TYPES
+        is_runtime_action = action_type in runtime_action_types
         consumed = bool(metrics) if is_runtime_action else False
         delta_summary = metric_change_summary(
             baseline_metrics,

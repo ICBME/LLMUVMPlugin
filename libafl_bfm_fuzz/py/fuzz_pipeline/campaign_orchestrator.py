@@ -1235,6 +1235,7 @@ class CampaignOrchestrator:
                 self.evaluation_backends.harness_candidate_evaluation
                 or NoopHarnessCandidateEvaluationBackend()
             ),
+            plugin_registry=self.evaluation_backends.harness_plugin_registry,
         )
 
     def _campaign_optimization_paths(self) -> HarnessOptimizationPaths:

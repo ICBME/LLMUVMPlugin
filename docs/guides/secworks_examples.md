@@ -139,6 +139,22 @@ RTL line gap 主要是 MMIO readback 地址和 defensive/default 分支，现有
 无法直接生成任意 readback 地址或非法内部状态。后续若要继续改善 AES，需要先扩展
 driver/manifest/action surface，而不是 promotion 这些 neutral action。
 
+actionability-driven optimization 阶段为 AES 增加了 `mmio_readback` safe action。该 action
+现在通过 harness optimization plugin registry 暴露给 LLM schema hint、sandbox apply 和
+candidate regression。payload 可声明 symbolic register，例如 `ADDR_NAME0`、
+`ADDR_NAME1`、`ADDR_VERSION`、`ADDR_CTRL` 和 `ADDR_STATUS`，也可声明 explicit safe read
+address，例如 `ADDR_RESULT3 + 1` 的 `0x34`；`AesMmioDriver` 会在正常 encrypt/decrypt
+transaction 之后执行额外 readback，并把 `mmio_readback_read_count` 等 runtime metrics
+写入 candidate evidence。默认注册的 AES gap actionability classifier 会让
+`candidate_gap_actionability_report` 把 AES top-level readback gap 标为
+`reachable_with_mmio_readback`，把 block write out-of-range gap 标为需要 MMIO write
+surface，把内部 defensive/default gap 标为需要 internal-state surface 或 waiver。
+2026-06-12 的真实 AES candidate regression 使用 matched no-op baseline、`paired_repeats=3`
+和 `attribution_mode=all_actions`，将 `uncovered_line_count` 稳定从 18 降到 13，且
+regressed/flaky gateable metric 均为 0。standalone attribution 显示 `mmio_readback`
+有效、边界 directive action 为 neutral，因此 `candidate_promotion_package` 的
+`minimal_promotion_candidate` 只保留 `mmio_readback` action。
+
 AES evidence 路径需要保留 Verilator 参数：
 
 ```sh

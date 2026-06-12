@@ -223,6 +223,18 @@ semantic interpretation not represented in the manifest schema.
   stable under matched no-op + paired repeats, but all standalone actions were
   neutral and the remaining line gaps were MMIO readback/default RTL branches
   outside the current AES case schema.
+- Use the `mmio_readback` actionability path for AES read-side gaps before trying
+  broader driver changes. The action can target symbolic top-level registers and
+  should be evaluated with matched no-op + paired repeats; remaining write-side
+  or internal default gaps should be reported as requiring a new action surface
+  or waiver. This actionability mapping now comes from the harness optimization
+  plugin registry, so new DUTs should provide target-specific classifiers instead
+  of adding core framework branches.
+- The follow-up AES actionability run validated this path: matched no-op
+  `uncovered_line_count` 18 vs. candidate 13 across 3 paired repeats, with zero
+  gateable regressions/flaky metrics. Standalone attribution marked
+  `mmio_readback` effective and the companion boundary directive neutral, so the
+  promotion package pruned to a minimal readback-only candidate.
 - For true LLM evaluation, compare three corpora per target: baseline,
   heuristic feedback and LLM feedback, then replay all three with RTL coverage
   enabled.

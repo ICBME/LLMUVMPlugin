@@ -14,6 +14,30 @@ ADDR_CONFIG = 0x0A
 ADDR_KEY0 = 0x10
 ADDR_BLOCK0 = 0x20
 ADDR_RESULT0 = 0x30
+AES_MMIO_REGISTERS = {
+    "ADDR_NAME0": 0x00,
+    "ADDR_NAME1": 0x01,
+    "ADDR_VERSION": 0x02,
+    "ADDR_CTRL": ADDR_CTRL,
+    "ADDR_STATUS": ADDR_STATUS,
+    "ADDR_CONFIG": ADDR_CONFIG,
+    "ADDR_KEY0": ADDR_KEY0,
+    "ADDR_KEY1": ADDR_KEY0 + 1,
+    "ADDR_KEY2": ADDR_KEY0 + 2,
+    "ADDR_KEY3": ADDR_KEY0 + 3,
+    "ADDR_KEY4": ADDR_KEY0 + 4,
+    "ADDR_KEY5": ADDR_KEY0 + 5,
+    "ADDR_KEY6": ADDR_KEY0 + 6,
+    "ADDR_KEY7": ADDR_KEY0 + 7,
+    "ADDR_BLOCK0": ADDR_BLOCK0,
+    "ADDR_BLOCK1": ADDR_BLOCK0 + 1,
+    "ADDR_BLOCK2": ADDR_BLOCK0 + 2,
+    "ADDR_BLOCK3": ADDR_BLOCK0 + 3,
+    "ADDR_RESULT0": ADDR_RESULT0,
+    "ADDR_RESULT1": ADDR_RESULT0 + 1,
+    "ADDR_RESULT2": ADDR_RESULT0 + 2,
+    "ADDR_RESULT3": ADDR_RESULT0 + 3,
+}
 
 AES_DECIPHER = 0
 AES_ENCIPHER = 1
@@ -82,6 +106,12 @@ class AesMmioDriver:
 
     async def _read_words(self, base: int, count: int) -> list[int]:
         return [await self._read_word(base + offset) for offset in range(count)]
+
+    async def read_mmio_word(self, address: int) -> int:
+        return await self._read_word(address)
+
+    def resolve_mmio_address(self, name: str) -> int | None:
+        return AES_MMIO_REGISTERS.get(str(name))
 
     async def _write_word(self, address: int, word: int) -> None:
         from cocotb.triggers import RisingEdge

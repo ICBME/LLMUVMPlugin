@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 import json
 import os
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .harness_plugins import build_harness_plugin
+
 
 REPLAY_PROBE_CONFIG_ENV = "HARNESS_REPLAY_PROBE_CONFIG"
 SCOREBOARD_CHECK_CONFIG_ENV = "HARNESS_SCOREBOARD_CHECK_CONFIG"
 COVERAGE_FEEDBACK_TUNING_CONFIG_ENV = "HARNESS_COVERAGE_FEEDBACK_TUNING_CONFIG"
+MMIO_READBACK_CONFIG_ENV = "HARNESS_MMIO_READBACK_CONFIG"
 RUNTIME_METRICS_OUT_ENV = "HARNESS_RUNTIME_METRICS_OUT"
+RUNTIME_ACTION_PLUGINS_ENV = "HARNESS_RUNTIME_ACTION_PLUGINS"
 
 
 @dataclass(frozen=True)
@@ -127,6 +132,54 @@ def runtime_metrics_summary(payload: Mapping[str, Any]) -> dict[str, int | float
     return summary
 
 
+@dataclass(frozen=True)
+class HarnessRuntimeActionManager:
+    runtimes: tuple[Any, ...]
+
+    @classmethod
+    def from_env(cls) -> "HarnessRuntimeActionManager":
+        runtimes: list[Any] = [
+            ReplayProbeRuntime.from_env(),
+            MmioReadbackRuntime.from_env(),
+        ]
+        for spec in runtime_action_plugin_specs_from_env():
+            runtimes.append(
+                build_harness_plugin(
+                    spec,
+                    metrics_out=runtime_metrics_path_from_env(),
+                )
+            )
+        return cls(tuple(runtimes))
+
+    async def sample_after_execute(
+        self,
+        *,
+        index: int,
+        case: Any,
+        result: Any,
+        driver: Any,
+    ) -> None:
+        for runtime in self.runtimes:
+            sampler = getattr(runtime, "sample_after_execute", None)
+            if not callable(sampler):
+                continue
+            value = sampler(index=index, case=case, result=result, driver=driver)
+            if inspect.isawaitable(value):
+                await value
+
+
+def runtime_action_plugin_specs_from_env() -> tuple[str, ...]:
+    value = os.getenv(RUNTIME_ACTION_PLUGINS_ENV)
+    if value is None or not value.strip():
+        return ()
+    return tuple(
+        item.strip()
+        for chunk in value.splitlines()
+        for item in chunk.split(",")
+        if item.strip()
+    )
+
+
 class ReplayProbeRuntime:
     def __init__(
         self,
@@ -207,6 +260,16 @@ class ReplayProbeRuntime:
                 )
         self.flush()
 
+    async def sample_after_execute(
+        self,
+        *,
+        index: int,
+        case: Any,
+        result: Any,
+        driver: Any,
+    ) -> None:
+        self.sample(index=index, case=case, result=result)
+
     def metrics(self) -> dict[str, Any]:
         configured = len(self.config.entries) if self.config is not None else 0
         return {
@@ -242,6 +305,142 @@ class ReplayProbeRuntime:
             self.metrics_out,
             "replay_probe",
             {**self.metrics(), "samples": list(self.samples)},
+            config_path=self.config.path,
+        )
+
+
+class MmioReadbackRuntime:
+    def __init__(
+        self,
+        config: RuntimeActionConfig | None,
+        *,
+        metrics_out: Path | None = None,
+    ):
+        self.config = config
+        self.metrics_out = metrics_out
+        self.sample_count = 0
+        self.read_count = 0
+        self.skipped_count = 0
+        self.unsupported_count = 0
+        self.unresolved_count = 0
+        self.reads: list[dict[str, Any]] = []
+        self.unique_addresses: set[int] = set()
+        self.action_metrics = _initial_action_metrics(
+            config,
+            {
+                "sample_count": 0,
+                "read_count": 0,
+                "skipped_count": 0,
+                "unsupported_count": 0,
+                "unresolved_count": 0,
+            },
+        )
+
+    @classmethod
+    def from_env(cls) -> "MmioReadbackRuntime":
+        return cls(
+            load_runtime_action_config_from_env(
+                MMIO_READBACK_CONFIG_ENV,
+                action_type="mmio_readback",
+            ),
+            metrics_out=runtime_metrics_path_from_env(),
+        )
+
+    async def sample(self, *, index: int, case: Any, driver: Any) -> None:
+        if self.config is None:
+            return
+        reader = _mmio_reader(driver)
+        resolver = _mmio_resolver(driver)
+        for entry in self.config.entries:
+            action_metrics = self._action_metrics(entry)
+            if not _mmio_filter_matches(entry.payload, case=case):
+                self.skipped_count += 1
+                action_metrics["skipped_count"] += 1
+                continue
+            if reader is None:
+                self.unsupported_count += 1
+                action_metrics["unsupported_count"] += 1
+                continue
+            addresses = _mmio_readback_addresses(entry.payload)
+            if not addresses:
+                self.unresolved_count += 1
+                action_metrics["unresolved_count"] += 1
+                continue
+            self.sample_count += 1
+            action_metrics["sample_count"] += 1
+            for label, raw_address in addresses:
+                address = _resolve_mmio_address(raw_address, resolver)
+                if address is None:
+                    self.unresolved_count += 1
+                    action_metrics["unresolved_count"] += 1
+                    continue
+                max_reads = _int_value(entry.payload.get("max_reads"))
+                if max_reads is not None and action_metrics["read_count"] >= max_reads:
+                    self.skipped_count += 1
+                    action_metrics["skipped_count"] += 1
+                    continue
+                value = await reader(address)
+                self.read_count += 1
+                self.unique_addresses.add(address)
+                action_metrics["read_count"] += 1
+                if len(self.reads) < 32:
+                    self.reads.append(
+                        {
+                            "action_id": entry.action_id,
+                            "case_index": index,
+                            "label": label,
+                            "address": address,
+                            "value": int(value),
+                        }
+                    )
+        self.flush()
+
+    async def sample_after_execute(
+        self,
+        *,
+        index: int,
+        case: Any,
+        result: Any,
+        driver: Any,
+    ) -> None:
+        await self.sample(index=index, case=case, driver=driver)
+
+    def metrics(self) -> dict[str, Any]:
+        configured = len(self.config.entries) if self.config is not None else 0
+        return {
+            "configured_count": configured,
+            "sample_count": self.sample_count,
+            "read_count": self.read_count,
+            "skipped_count": self.skipped_count,
+            "unsupported_count": self.unsupported_count,
+            "unresolved_count": self.unresolved_count,
+            "unique_address_count": len(self.unique_addresses),
+            "read_preview_count": len(self.reads),
+            "actions": _sorted_action_metrics(self.action_metrics),
+        }
+
+    def _action_metrics(self, entry: RuntimeActionEntry) -> dict[str, Any]:
+        return self.action_metrics.setdefault(
+            entry.action_id,
+            _action_metric_entry(
+                entry,
+                {
+                    "sample_count": 0,
+                    "read_count": 0,
+                    "skipped_count": 0,
+                    "unsupported_count": 0,
+                    "unresolved_count": 0,
+                },
+            ),
+        )
+
+    def flush(self) -> None:
+        if self.config is None:
+            return
+        merge_runtime_metrics(
+            self.metrics_out,
+            "mmio_readback",
+            {**self.metrics(), "reads": list(self.reads)},
             config_path=self.config.path,
         )
 
@@ -681,6 +880,30 @@ def _validate_payload(entry: RuntimeActionEntry, *, path: Path, index: int) -> N
             raise ValueError(
                 f"{path}: entries[{index}].payload.min_weight must be <= max_weight"
             )
+        return
+    if entry.action_type == "mmio_readback":
+        registers = payload.get("registers")
+        addresses = payload.get("addresses")
+        if registers is None and addresses is None:
+            raise ValueError(
+                f"{path}: entries[{index}].payload requires registers or addresses"
+            )
+        if registers is not None:
+            _string_list(registers, field="registers")
+        if addresses is not None:
+            _mmio_address_specs(addresses, field="addresses")
+        _optional_string(payload, "sample_on", path=path, index=index)
+        if "max_reads" in payload:
+            max_reads = _int_value(payload["max_reads"])
+            if max_reads is None or max_reads < 0:
+                raise ValueError(
+                    f"{path}: entries[{index}].payload.max_reads "
+                    "must be a non-negative integer"
+                )
+        if "case_filter" in payload and not isinstance(payload["case_filter"], dict):
+            raise ValueError(
+                f"{path}: entries[{index}].payload.case_filter must be an object"
+            )
 
 
 def _optional_string(
@@ -742,6 +965,77 @@ def _probe_filter_matches(payload: Mapping[str, Any], *, case: Any, result: Any)
         if _probe_value(str(field), case=case, result=result) != expected:
             return False
     return True
+
+
+def _mmio_filter_matches(payload: Mapping[str, Any], *, case: Any) -> bool:
+    filters = payload.get("case_filter")
+    if not isinstance(filters, dict) or not filters:
+        return True
+    data = getattr(case, "data", {})
+    for field, expected in filters.items():
+        key = str(field)
+        if key.startswith("case."):
+            key = key[5:]
+        if _mapping_value(data, key) != expected:
+            return False
+    return True
+
+
+def _mmio_readback_addresses(payload: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
+    result: list[tuple[str, Any]] = []
+    for register in _string_list(payload.get("registers"), field="registers"):
+        result.append((register, register))
+    for address in _mmio_address_specs(payload.get("addresses"), field="addresses"):
+        result.append((str(address), address))
+    return tuple(result)
+
+
+def _mmio_address_specs(value: Any, *, field: str) -> tuple[Any, ...]:
+    if value is None:
+        return ()
+    values = value if isinstance(value, list) else [value]
+    result = []
+    for item in values:
+        if isinstance(item, bool):
+            raise ValueError(f"{field} must contain integers or hex strings")
+        if isinstance(item, int):
+            if item < 0:
+                raise ValueError(f"{field} addresses must be non-negative")
+            result.append(item)
+            continue
+        if isinstance(item, str):
+            try:
+                parsed = int(item, 0)
+            except ValueError:
+                raise ValueError(f"{field} addresses must be integers or hex strings")
+            if parsed < 0:
+                raise ValueError(f"{field} addresses must be non-negative")
+            result.append(parsed)
+            continue
+        raise ValueError(f"{field} must contain integers or hex strings")
+    return tuple(result)
+
+
+def _mmio_reader(driver: Any) -> Any:
+    reader = getattr(driver, "read_mmio_word", None)
+    if callable(reader):
+        return reader
+    reader = getattr(driver, "_read_word", None)
+    return reader if callable(reader) else None
+
+
+def _mmio_resolver(driver: Any) -> Any:
+    resolver = getattr(driver, "resolve_mmio_address", None)
+    return resolver if callable(resolver) else None
+
+
+def _resolve_mmio_address(raw_address: Any, resolver: Any) -> int | None:
+    if isinstance(raw_address, int):
+        return raw_address
+    if isinstance(raw_address, str) and resolver is not None:
+        value = resolver(raw_address)
+        return int(value) if value is not None else None
+    return None
 
 
 def _mapping_value(values: Any, key: str) -> Any:

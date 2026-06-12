@@ -172,11 +172,29 @@
   `recommended_promotion_actions`、`minimal_promotion_candidate` 和
   `action_pruning_summary`。最小候选只保留独立有效 action；若精确 action set 已有
   `passed`/`ok` variant 证据则可进入 `ready_for_review`，否则需要重新验证；无有效
-  action 的候选会留下空 minimal candidate 并停在 `not_recommended`。
+  action 的候选会留下空 minimal candidate 并停在 `not_recommended`。第十一阶段新增
+  actionability-driven optimization：safe action DSL 增加 `mmio_readback`，replay runtime
+  可通过 target driver 的 symbolic MMIO resolver 读取寄存器；candidate regression 输出
+  `candidate_gap_actionability_report`，把剩余 RTL gap 分类为 readback 可触达、需要 MMIO
+  write surface、需要 internal-state surface/waiver 或 unknown，并把 summary 接入
+  promotion package。`secworks_aes` 的真实验证在 matched no-op + `paired_repeats=3` +
+  all-actions attribution 下稳定将 `uncovered_line_count` 从 18 降到 13，且 promotion
+  package 能把 neutral directive 剪掉，只保留有效的 `mmio_readback` minimal candidate。
+- 第十二阶段新增 harness optimization plugin registry：`HarnessPluginRegistry` 把 safe
+  action DSL、payload validator、adapter config、runtime attribution 标记和 gap
+  actionability classifier 从核心评测流程中解耦。Python API 可通过
+  `HarnessOptimizationAdapter(plugin_registry=...)`、
+  `HarnessCandidateRegressionBackend(plugin_registry=...)` 或
+  `EvaluationBackends(harness_plugin_registry=...)` 注入；CLI/Make 可通过
+  `--harness-optimization-plugin` / `HARNESS_OPTIMIZATION_PLUGINS` 加载 `module:Object`
+  插件，target manifest 可通过 `[harness_optimization].plugins` 声明目标专用评测插件。
+  默认 registry 保留现有 built-in actions，并在 candidate regression 中叠加 AES
+  actionability classifier，避免迁移时破坏既有 evidence schema。
 - CLI/Makefile：`--run-plan-profile`、`--campaign-plan-profile`、`--round-evaluation`、
   `--evaluation-out`、`--campaign-evaluation-out` 以及对应 Makefile 变量
   `RUN_PLAN_PROFILE`、`CAMPAIGN_PLAN_PROFILE`、`ROUND_EVALUATION_ENABLE`、
-  `CAMPAIGN_EVALUATION_ENABLE`。
+  `CAMPAIGN_EVALUATION_ENABLE`；harness optimization 插件入口为
+  `--harness-optimization-plugin` 与 `HARNESS_OPTIMIZATION_PLUGINS`。
 
 ## 迁移任务
 

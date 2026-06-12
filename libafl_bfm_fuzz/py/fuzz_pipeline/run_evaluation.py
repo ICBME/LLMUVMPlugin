@@ -14,6 +14,7 @@ from .harness_optimization import (
     HarnessCandidateEvaluationBackend,
     HarnessOptimizerBackend,
 )
+from .harness_plugins import HarnessPluginRegistry
 from .harness_trace import HarnessTraceBuilder, HarnessTraceOutputs
 from .harness_rollup import CampaignTraceRollupBuilder, campaign_trace_rollup_path
 from .run_adapters import RunPathResolver
@@ -41,6 +42,7 @@ class EvaluationBackends:
     campaign_evaluation: CampaignEvaluationBackend | None = None
     harness_optimizer: HarnessOptimizerBackend | None = None
     harness_candidate_evaluation: HarnessCandidateEvaluationBackend | None = None
+    harness_plugin_registry: HarnessPluginRegistry | None = None
 
 
 class EvaluationConfigView(Protocol):

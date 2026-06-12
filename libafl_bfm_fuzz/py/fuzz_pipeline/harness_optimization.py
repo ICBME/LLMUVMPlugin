@@ -10,6 +10,7 @@ from urllib import request
 
 from connector_observe.trace import read_json_object
 
+from .harness_plugins import HarnessActionPlugin, HarnessPluginRegistry
 from .harness_records import mapping
 
 
@@ -29,6 +30,7 @@ ALLOWED_ACTION_TYPES = (
     "scoreboard_check",
     "ref_model_patch",
     "coverage_feedback_tuning",
+    "mmio_readback",
     "documentation_note",
     "no_op",
 )
@@ -39,6 +41,7 @@ SAFE_SANDBOX_ACTION_TYPES = (
     "replay_probe",
     "scoreboard_check",
     "coverage_feedback_tuning",
+    "mmio_readback",
     "documentation_note",
     "no_op",
 )
@@ -79,6 +82,7 @@ DSL_PAYLOAD_ACTION_TYPES = {
     "replay_probe",
     "scoreboard_check",
     "coverage_feedback_tuning",
+    "mmio_readback",
 }
 
 
@@ -419,6 +423,7 @@ class HarnessOptimizationAdapter:
     candidate_evaluation_backend: HarnessCandidateEvaluationBackend = (
         NoopHarnessCandidateEvaluationBackend()
     )
+    plugin_registry: HarnessPluginRegistry | None = None
 
     def run_task(
         self,
@@ -432,6 +437,7 @@ class HarnessOptimizationAdapter:
             campaign_manifest_path=self.campaign_manifest_path,
             target=self.target,
             cwd=self.cwd,
+            plugin_registry=self.plugin_registry,
         )
         write_json(self.paths.task, task)
         return task
@@ -484,6 +490,7 @@ class HarnessOptimizationAdapter:
         decision = build_harness_optimization_decision(
             task=task,
             proposal=proposal,
+            plugin_registry=self.plugin_registry,
         )
         write_json(self.paths.decision, decision)
         return decision
@@ -499,6 +506,7 @@ class HarnessOptimizationAdapter:
             proposal=proposal,
             decision=decision,
             paths=self.paths,
+            plugin_registry=self.plugin_registry,
         )
         write_json(self.paths.patch, patch)
         write_json(self.paths.candidate_manifest, candidate_manifest)
@@ -579,7 +587,9 @@ def build_harness_optimization_task(
     campaign_manifest_path: Path,
     target: str,
     cwd: Path,
+    plugin_registry: HarnessPluginRegistry | None = None,
 ) -> dict[str, Any]:
+    registry = plugin_registry or default_harness_plugin_registry()
     harness_trace = mapping(campaign_evaluation.get("harness_trace"))
     trace_artifacts = mapping(harness_trace.get("artifacts"))
     harness_evaluation_path = _resolved_path(
@@ -646,8 +656,10 @@ def build_harness_optimization_task(
         "action_effect_report": action_effect_report if action_effect_report else {},
         "evidence_index": evidence_index,
         "constraints": {
-            "allowed_action_types": list(ALLOWED_ACTION_TYPES),
-            "safe_sandbox_action_types": list(SAFE_SANDBOX_ACTION_TYPES),
+            "allowed_action_types": list(registry.allowed_action_types()),
+            "safe_sandbox_action_types": list(registry.safe_sandbox_action_types()),
+            "safe_action_dsl": registry.safe_action_dsl_schema(),
+            "plugin_registry": registry.to_json(),
             "requires_evidence_refs": True,
             "application_mode": "proposal_only_by_default",
             "default_validation": "schema_only",
@@ -736,12 +748,21 @@ def optimizer_proposal_schema_hint(task: dict[str, Any]) -> dict[str, Any]:
             constraints.get("safe_sandbox_action_types")
         )
         or list(SAFE_SANDBOX_ACTION_TYPES),
-        "safe_action_dsl": safe_action_dsl_schema(),
+        "safe_action_dsl": mapping(constraints.get("safe_action_dsl"))
+        or safe_action_dsl_schema(),
         "evidence_ref_fields": ["span_id", "case_id", "directive_id", "connector"],
     }
 
 
-def safe_action_dsl_schema() -> dict[str, Any]:
+def safe_action_dsl_schema(
+    plugin_registry: HarnessPluginRegistry | None = None,
+) -> dict[str, Any]:
+    if plugin_registry is not None:
+        return plugin_registry.safe_action_dsl_schema()
+    return builtin_safe_action_dsl_schema()
+
+
+def builtin_safe_action_dsl_schema() -> dict[str, Any]:
     return {
         "replay_probe": {
             "payload_fields": {
@@ -776,6 +797,16 @@ def safe_action_dsl_schema() -> dict[str, Any]:
                 "min_weight": "optional directive weight floor",
                 "max_weight": "optional directive weight ceiling",
             },
+        },
+        "mmio_readback": {
+            "payload_fields": {
+                "registers": "string or list of symbolic register names",
+                "addresses": "integer, hex string, or list of addresses",
+                "sample_on": "optional sampling point string",
+                "max_reads": "optional non-negative integer per run",
+                "case_filter": "optional object matching case fields",
+            },
+            "requires_any": ["registers", "addresses"],
         },
     }
 
@@ -932,8 +963,13 @@ def build_harness_optimization_decision(
     *,
     task: dict[str, Any],
     proposal: dict[str, Any],
+    plugin_registry: HarnessPluginRegistry | None = None,
 ) -> dict[str, Any]:
-    validation = validate_harness_optimization_proposal(proposal, task=task)
+    validation = validate_harness_optimization_proposal(
+        proposal,
+        task=task,
+        plugin_registry=plugin_registry,
+    )
     decision = "accepted" if validation["valid"] else "rejected"
     return {
         "schema_version": 1,
@@ -967,7 +1003,11 @@ def build_harness_optimization_patch(
     proposal: dict[str, Any],
     decision: dict[str, Any],
     paths: HarnessOptimizationPaths,
+    plugin_registry: HarnessPluginRegistry | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    registry = plugin_registry or default_harness_plugin_registry()
+    safe_action_types = set(registry.safe_sandbox_action_types())
+    unsafe_action_types = set(registry.unsafe_action_types())
     candidate_id = candidate_id_for(task, proposal)
     sandbox_dir = paths.sandbox_dir / candidate_id
     sandbox_dir.mkdir(parents=True, exist_ok=True)
@@ -995,7 +1035,7 @@ def build_harness_optimization_patch(
                 )
                 continue
             action_type = str(action.get("action_type") or "")
-            if action_type not in SAFE_SANDBOX_ACTION_TYPES:
+            if action_type not in safe_action_types:
                 skipped_actions.append(
                     skipped_action(action, reason="unsafe_action_type")
                 )
@@ -1045,10 +1085,9 @@ def build_harness_optimization_patch(
         "safety": {
             "policy": "sandbox_artifacts_only",
             "mainline_modified": False,
-            "safe_action_types": list(SAFE_SANDBOX_ACTION_TYPES),
-            "unsafe_action_types": sorted(
-                set(ALLOWED_ACTION_TYPES) - set(SAFE_SANDBOX_ACTION_TYPES)
-            ),
+            "safe_action_types": sorted(safe_action_types),
+            "unsafe_action_types": sorted(unsafe_action_types),
+            "plugin_registry": registry.to_json(),
         },
         "applied_actions": applied_actions,
         "skipped_actions": skipped_actions,
@@ -1278,7 +1317,9 @@ def validate_harness_optimization_proposal(
     proposal: dict[str, Any],
     *,
     task: dict[str, Any],
+    plugin_registry: HarnessPluginRegistry | None = None,
 ) -> dict[str, Any]:
+    registry = plugin_registry or default_harness_plugin_registry()
     errors: list[dict[str, Any]] = []
     if proposal.get("kind") != PROPOSAL_KIND:
         errors.append({"path": "kind", "message": f"expected {PROPOSAL_KIND!r}"})
@@ -1308,7 +1349,8 @@ def validate_harness_optimization_proposal(
         list_value(mapping(task.get("constraints")).get("allowed_action_types"))
     )
     if not allowed:
-        allowed = set(ALLOWED_ACTION_TYPES)
+        allowed = set(registry.allowed_action_types())
+    dsl_payload_action_types = set(registry.dsl_payload_action_types())
     evidence_index = mapping(task.get("evidence_index"))
     proposal_refs = list_value(proposal.get("evidence_refs"))
     for index, action in enumerate(actions):
@@ -1334,7 +1376,7 @@ def validate_harness_optimization_proposal(
                 }
             )
         payload = action.get("payload")
-        if action_type in DSL_PAYLOAD_ACTION_TYPES and not isinstance(payload, dict):
+        if action_type in dsl_payload_action_types and not isinstance(payload, dict):
             errors.append(
                 {
                     "path": f"actions[{index}].payload",
@@ -1354,6 +1396,7 @@ def validate_harness_optimization_proposal(
                     str(action_type),
                     payload,
                     path=f"actions[{index}].payload",
+                    plugin_registry=registry,
                 )
             )
         action_refs = list_value(action.get("evidence_refs")) or proposal_refs
@@ -1387,13 +1430,18 @@ def action_payload_errors(
     payload: dict[str, Any],
     *,
     path: str,
+    plugin_registry: HarnessPluginRegistry | None = None,
 ) -> list[dict[str, str]]:
+    if plugin_registry is not None:
+        return plugin_registry.action_payload_errors(action_type, payload, path=path)
     if action_type == "replay_probe":
         return replay_probe_payload_errors(payload, path=path)
     if action_type == "scoreboard_check":
         return scoreboard_check_payload_errors(payload, path=path)
     if action_type == "coverage_feedback_tuning":
         return coverage_feedback_tuning_payload_errors(payload, path=path)
+    if action_type == "mmio_readback":
+        return mmio_readback_payload_errors(payload, path=path)
     return []
 
 
@@ -1519,10 +1567,63 @@ def coverage_feedback_tuning_payload_errors(
     return errors
 
 
+def mmio_readback_payload_errors(
+    payload: dict[str, Any],
+    *,
+    path: str,
+) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    registers = payload.get("registers")
+    addresses = payload.get("addresses")
+    if registers is None and addresses is None:
+        errors.append(
+            {"path": path, "message": "mmio_readback requires registers or addresses"}
+        )
+    if registers is not None and not is_string_or_string_list(registers):
+        errors.append(
+            {"path": f"{path}.registers", "message": "expected string or list"}
+        )
+    if addresses is not None and not is_address_or_address_list(addresses):
+        errors.append(
+            {
+                "path": f"{path}.addresses",
+                "message": "expected integer, hex string, or list",
+            }
+        )
+    if "sample_on" in payload and not isinstance(payload["sample_on"], str):
+        errors.append({"path": f"{path}.sample_on", "message": "expected string"})
+    if "max_reads" in payload and not non_negative_int(payload["max_reads"]):
+        errors.append(
+            {"path": f"{path}.max_reads", "message": "expected non-negative integer"}
+        )
+    if "case_filter" in payload and not isinstance(payload["case_filter"], dict):
+        errors.append({"path": f"{path}.case_filter", "message": "expected object"})
+    return errors
+
+
 def is_string_or_string_list(value: Any) -> bool:
     return isinstance(value, str) or (
         isinstance(value, list) and all(isinstance(item, str) for item in value)
     )
+
+
+def is_address_or_address_list(value: Any) -> bool:
+    if isinstance(value, list):
+        return all(is_address_value(item) for item in value)
+    return is_address_value(value)
+
+
+def is_address_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value >= 0
+    if isinstance(value, str):
+        try:
+            return int(value, 0) >= 0
+        except ValueError:
+            return False
+    return False
 
 
 def non_negative_int(value: Any) -> bool:
@@ -1538,6 +1639,98 @@ def non_negative_int(value: Any) -> bool:
 def positive_number(value: Any) -> bool:
     number = number_value(value)
     return number is not None and number > 0
+
+
+def default_harness_plugin_registry() -> HarnessPluginRegistry:
+    schema = builtin_safe_action_dsl_schema()
+    return HarnessPluginRegistry(
+        action_plugins={
+            "mutation_directive_update": HarnessActionPlugin(
+                action_type="mutation_directive_update",
+                adapter_kind=(
+                    "libafl_bfm_fuzz.harness_candidate_mutation_directive_updates"
+                ),
+                artifact_role="candidate_mutation_directive_updates",
+                make_var="HARNESS_MUTATION_DIRECTIVE_UPDATE_CONFIG",
+            ),
+            "stimulus_generation_hint": HarnessActionPlugin(
+                action_type="stimulus_generation_hint",
+                adapter_kind="libafl_bfm_fuzz.harness_candidate_stimulus_hint_config",
+                artifact_role="candidate_stimulus_hint_config",
+                make_var="HARNESS_STIMULUS_HINT_CONFIG",
+            ),
+            "replay_probe": HarnessActionPlugin(
+                action_type="replay_probe",
+                payload_required=True,
+                dsl_schema=schema["replay_probe"],
+                payload_validator=lambda payload, path: replay_probe_payload_errors(
+                    payload,
+                    path=path,
+                ),
+                adapter_kind="libafl_bfm_fuzz.harness_candidate_replay_probe_config",
+                artifact_role="candidate_replay_probe_config",
+                make_var="HARNESS_REPLAY_PROBE_CONFIG",
+                runtime_action=True,
+            ),
+            "scoreboard_check": HarnessActionPlugin(
+                action_type="scoreboard_check",
+                payload_required=True,
+                dsl_schema=schema["scoreboard_check"],
+                payload_validator=lambda payload, path: scoreboard_check_payload_errors(
+                    payload,
+                    path=path,
+                ),
+                adapter_kind=(
+                    "libafl_bfm_fuzz.harness_candidate_scoreboard_check_config"
+                ),
+                artifact_role="candidate_scoreboard_check_config",
+                make_var="HARNESS_SCOREBOARD_CHECK_CONFIG",
+                runtime_action=True,
+            ),
+            "ref_model_patch": HarnessActionPlugin(
+                action_type="ref_model_patch",
+                safe_for_sandbox=False,
+            ),
+            "coverage_feedback_tuning": HarnessActionPlugin(
+                action_type="coverage_feedback_tuning",
+                payload_required=True,
+                dsl_schema=schema["coverage_feedback_tuning"],
+                payload_validator=(
+                    lambda payload, path: coverage_feedback_tuning_payload_errors(
+                        payload,
+                        path=path,
+                    )
+                ),
+                adapter_kind=(
+                    "libafl_bfm_fuzz."
+                    "harness_candidate_coverage_feedback_tuning_config"
+                ),
+                artifact_role="candidate_coverage_feedback_tuning_config",
+                make_var="HARNESS_COVERAGE_FEEDBACK_TUNING_CONFIG",
+                runtime_action=True,
+            ),
+            "mmio_readback": HarnessActionPlugin(
+                action_type="mmio_readback",
+                payload_required=True,
+                dsl_schema=schema["mmio_readback"],
+                payload_validator=lambda payload, path: mmio_readback_payload_errors(
+                    payload,
+                    path=path,
+                ),
+                adapter_kind="libafl_bfm_fuzz.harness_candidate_mmio_readback_config",
+                artifact_role="candidate_mmio_readback_config",
+                make_var="HARNESS_MMIO_READBACK_CONFIG",
+                runtime_action=True,
+            ),
+            "documentation_note": HarnessActionPlugin(
+                action_type="documentation_note",
+                adapter_kind="libafl_bfm_fuzz.harness_candidate_documentation_notes",
+                artifact_role="candidate_documentation_notes",
+                make_var="HARNESS_DOCUMENTATION_NOTES",
+            ),
+            "no_op": HarnessActionPlugin(action_type="no_op"),
+        }
+    )
 
 
 def evidence_index_for(harness_evaluation: dict[str, Any]) -> dict[str, list[str]]:

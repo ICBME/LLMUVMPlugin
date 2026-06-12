@@ -9,7 +9,7 @@ from fuzz_bfm.plugin_loader import build_driver
 from fuzz_bfm.target_config import TargetConfig
 from fuzz_pipeline.replay_orchestrator import ReplayPipelineOrchestrator
 from fuzz_pipeline.harness_runtime_actions import (
-    ReplayProbeRuntime,
+    HarnessRuntimeActionManager,
     ScoreboardCheckRuntime,
 )
 from fuzz_uvm.functional_coverage import build_coverage_model
@@ -146,7 +146,7 @@ class ObservableReplayDriverAdapter:
         self.stage = stage_adapter or ReplayStageAdapter(config, orchestrator)
         self.ref_model = self.stage.build_ref_model()
         self.target_driver = self.stage.build_replay_driver()
-        self.replay_probe = ReplayProbeRuntime.from_env()
+        self.runtime_actions = HarnessRuntimeActionManager.from_env()
 
     async def reset(self) -> None:
         await self.stage.reset_driver(self.target_driver)
@@ -154,11 +154,21 @@ class ObservableReplayDriverAdapter:
     async def execute(self, case: Any, *, index: int) -> Any:
         result = await self.stage.execute_case(self.target_driver, case, index=index)
         if self.ref_model is None:
-            self.replay_probe.sample(index=index, case=case, result=result)
+            await self.runtime_actions.sample_after_execute(
+                index=index,
+                case=case,
+                result=result,
+                driver=self.target_driver,
+            )
             return result
         expected = self.stage.predict_ref_model(self.ref_model, case, index=index)
         final_result = replace(result, expected=expected.expected)
-        self.replay_probe.sample(index=index, case=case, result=final_result)
+        await self.runtime_actions.sample_after_execute(
+            index=index,
+            case=case,
+            result=final_result,
+            driver=self.target_driver,
+        )
         return final_result
 
 
