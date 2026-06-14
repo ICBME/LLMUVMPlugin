@@ -22,6 +22,14 @@ from .oracle_ir import (
 from .pipeline import CodegenPipelineConfig, finalize_bundle, promote_candidate, write_candidate_bundle
 from .prompt import write_generation_prompt
 from .validation import load_golden_cases, validate_artifact_dir
+from LLMPlugin import create_backend, registered_backend_names
+from Spec2Backend.Spec2IR import (
+    build_semantic_spec_ir_prompt,
+    collect_semantic_spec_ir_issues,
+    generate_semantic_spec_ir,
+    load_semantic_spec_ir,
+    write_semantic_spec_ir,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -40,6 +48,29 @@ def main(argv: list[str] | None = None) -> int:
     oracle_ir.add_argument("--spec", action="append", default=[], type=Path)
     oracle_ir.add_argument("--target")
     oracle_ir.add_argument("--out", required=True, type=Path)
+
+    semantic_ir = subparsers.add_parser("extract-semantic-ir")
+    semantic_ir.add_argument("--manifest", required=True, type=Path)
+    semantic_ir.add_argument("--spec", action="append", default=[], type=Path)
+    semantic_ir.add_argument("--ir", type=Path)
+    semantic_ir.add_argument("--target")
+    semantic_ir.add_argument("--out", required=True, type=Path)
+    semantic_ir.add_argument("--prompt-out", type=Path)
+    semantic_ir.add_argument("--llm", action="store_true")
+    semantic_ir.add_argument(
+        "--llm-backend",
+        default="langgraph",
+        choices=registered_backend_names(),
+        help="Pluginized LLM backend to use when --llm is set.",
+    )
+    semantic_ir.add_argument("--model")
+
+    validate_semantic_ir = subparsers.add_parser("validate-semantic-ir")
+    validate_semantic_ir.add_argument("--semantic-ir", required=True, type=Path)
+    validate_semantic_ir.add_argument("--manifest", type=Path)
+    validate_semantic_ir.add_argument("--spec", action="append", default=[], type=Path)
+    validate_semantic_ir.add_argument("--target")
+    validate_semantic_ir.add_argument("--require-reviewed", action="store_true")
 
     validate_oracle_ir = subparsers.add_parser("validate-oracle-ir")
     validate_oracle_ir.add_argument("--oracle-ir", required=True, type=Path)
@@ -109,6 +140,46 @@ def main(argv: list[str] | None = None) -> int:
         )
         write_oracle_ir(args.out, ir)
         print(f"wrote OracleIR: {args.out}")
+        return 0
+    if args.command == "extract-semantic-ir":
+        if args.prompt_out:
+            prompt = build_semantic_spec_ir_prompt(
+                manifest_path=args.manifest,
+                spec_paths=tuple(args.spec),
+                design_ir_path=args.ir,
+                target=args.target,
+            )
+            write_json(args.prompt_out, prompt)
+        semantic_ir_value = generate_semantic_spec_ir(
+            manifest_path=args.manifest,
+            spec_paths=tuple(args.spec),
+            design_ir_path=args.ir,
+            target=args.target,
+            llm_backend=(
+                create_backend(args.llm_backend, model=args.model)
+                if args.llm
+                else None
+            ),
+            model=args.model,
+        )
+        write_semantic_spec_ir(args.out, semantic_ir_value)
+        print(f"wrote SemanticSpecIR: {args.out}")
+        return 0
+    if args.command == "validate-semantic-ir":
+        semantic_ir_value = load_semantic_spec_ir(args.semantic_ir)
+        target = args.target or str(semantic_ir_value.get("target") or "dut")
+        issues = collect_semantic_spec_ir_issues(
+            semantic_ir_value,
+            manifest_path=args.manifest,
+            spec_paths=tuple(args.spec),
+            target=target,
+            require_reviewed=args.require_reviewed,
+        )
+        if issues:
+            for issue in issues:
+                print(issue.format(), file=sys.stderr)
+            return 1
+        print(f"validated SemanticSpecIR: {args.semantic_ir}")
         return 0
     if args.command == "validate-oracle-ir":
         oracle_ir_value = load_oracle_ir(args.oracle_ir)
