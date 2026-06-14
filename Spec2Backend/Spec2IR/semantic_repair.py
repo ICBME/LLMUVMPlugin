@@ -56,6 +56,8 @@ def build_semantic_spec_ir_repair_prompt(
             "Preserve traceability: every semantic item must cite evidence from the original spec text.",
             "Do not fabricate source quotes; evidence quotes must appear in the referenced source line range.",
             "Do not invent manifest fields, DesignIR bindings, or source files.",
+            "Use effects[].kind='compute_expected' for deterministic output semantics; do not invent effect kinds such as drive_constant.",
+            "Put constants, direct mappings, and expressions in effects[].expr; for example use {'literal': 0} for a constant LOW output.",
             "Do not mark review.status accepted unless the input already contains sufficient human review evidence.",
             "If behavior cannot be safely expressed, keep it in unsupported or open_questions instead of inventing rules.",
             "Do not generate Python code, OracleIR, or plugin artifacts in this stage.",

@@ -198,7 +198,10 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
 
             self.assertEqual(prompt["target"], "demo_sha")
             self.assertEqual(prompt["inputs"]["specs"][0]["id"], "src1")
-            self.assertIn("Every semantic item", " ".join(prompt["constraints"]))
+            constraints = " ".join(prompt["constraints"])
+            self.assertIn("Every semantic item", constraints)
+            self.assertIn("compute_expected", constraints)
+            self.assertIn("lowerable_effect_schema", prompt["semantic_spec_ir_contract"])
 
     def test_llmplugin_callable_backend_and_registry_are_available(self):
         def fake_llm(prompt, model):
@@ -311,6 +314,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(prompt["review_report"]["status"], "failed")
             self.assertTrue(prompt["review_report"]["findings"])
             self.assertIn("semantic_spec_ir", prompt["response_contract"])
+            self.assertIn("compute_expected", " ".join(prompt["constraints"]))
             self.assertEqual(prompt["inputs"]["specs"][0]["path"], str(spec))
 
     def test_semantic_repair_prompt_accepts_generator_spec_paths(self):

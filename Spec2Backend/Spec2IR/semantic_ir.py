@@ -253,6 +253,8 @@ def build_semantic_spec_ir_prompt(
             "Return one complete SemanticSpecIR object under the top-level key semantic_spec_ir.",
             "Every semantic item must cite at least one evidence id from the original spec text.",
             "Evidence must include source_id, line_start, line_end, and a short quote copied from those lines.",
+            "Use effects[].kind='compute_expected' for deterministic output semantics; do not invent effect kinds such as drive_constant.",
+            "Put constants, direct mappings, and expressions in effects[].expr; for example use {'literal': 0} for a constant LOW output.",
             "Use open_questions for missing, ambiguous, or conflicting semantics.",
             "Do not generate Python code, OracleIR, or plugin artifacts in this stage.",
             "Do not invent manifest fields; field references must come from inputs, manifest fields, or be marked as open questions.",
@@ -484,6 +486,19 @@ def semantic_spec_ir_contract() -> dict[str, Any]:
                 }
             ],
             "evidence": ["ev1"],
+        },
+        "lowerable_effect_schema": {
+            "kind": "compute_expected",
+            "output": "expected output name, scoreboard key, or interface output",
+            "expr": {
+                "literal": "constant value for constant outputs, e.g. 0 for logic LOW",
+                "field": "manifest field name for direct mappings",
+                "call": "allowed calls for algorithmic behavior",
+            },
+            "notes": [
+                "Use {'literal': 0} rather than a custom drive_constant/value pair.",
+                "Use {'field': 'name'} only when name is present in the manifest inputs.",
+            ],
         },
         "allowed_review_statuses": sorted(ALLOWED_REVIEW_STATUSES),
         "allowed_lowerable_calls": sorted(ALLOWED_CALLS),
