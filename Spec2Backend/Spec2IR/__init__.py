@@ -15,6 +15,12 @@ from .semantic_ir import (
     validate_semantic_spec_ir,
     write_semantic_spec_ir,
 )
+from .semantic_repair import (
+    build_semantic_spec_ir_repair_prompt,
+    repair_semantic_spec_ir_file,
+    repair_semantic_spec_ir_with_review,
+    write_semantic_repair_artifacts,
+)
 from .validation_review import (
     REVIEW_SCHEMA_VERSION,
     ReviewFinding,
@@ -30,6 +36,7 @@ __all__ = [
     "SemanticSpecIRCallable",
     "SemanticSpecIRIssue",
     "SemanticSpecIRValidationError",
+    "build_semantic_spec_ir_repair_prompt",
     "build_semantic_spec_ir_prompt",
     "collect_semantic_spec_ir_issues",
     "generate_semantic_spec_ir",
@@ -37,9 +44,12 @@ __all__ = [
     "load_semantic_spec_ir",
     "maybe_call_semantic_spec_ir_llm",
     "normalize_semantic_spec_ir_response",
+    "repair_semantic_spec_ir_file",
+    "repair_semantic_spec_ir_with_review",
     "review_semantic_spec_ir",
     "review_semantic_spec_ir_file",
     "validate_semantic_spec_ir",
+    "write_semantic_repair_artifacts",
     "write_semantic_review",
     "write_semantic_spec_ir",
 ]

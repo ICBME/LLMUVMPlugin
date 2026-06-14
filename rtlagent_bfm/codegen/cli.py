@@ -28,6 +28,7 @@ from Spec2Backend.Spec2IR import (
     collect_semantic_spec_ir_issues,
     generate_semantic_spec_ir,
     load_semantic_spec_ir,
+    repair_semantic_spec_ir_with_review,
     review_semantic_spec_ir,
     write_semantic_review,
     write_semantic_spec_ir,
@@ -82,6 +83,27 @@ def main(argv: list[str] | None = None) -> int:
     review_semantic_ir.add_argument("--target")
     review_semantic_ir.add_argument("--require-reviewed", action="store_true")
     review_semantic_ir.add_argument("--out", type=Path)
+
+    repair_semantic_ir = subparsers.add_parser("repair-semantic-ir")
+    repair_semantic_ir.add_argument("--semantic-ir", required=True, type=Path)
+    repair_semantic_ir.add_argument("--manifest", type=Path)
+    repair_semantic_ir.add_argument("--spec", action="append", default=[], type=Path)
+    repair_semantic_ir.add_argument("--ir", type=Path)
+    repair_semantic_ir.add_argument("--target")
+    repair_semantic_ir.add_argument("--require-reviewed", action="store_true")
+    repair_semantic_ir.add_argument("--out", type=Path)
+    repair_semantic_ir.add_argument("--prompt-out", type=Path)
+    repair_semantic_ir.add_argument("--review-out", type=Path)
+    repair_semantic_ir.add_argument("--llm", action="store_true")
+    repair_semantic_ir.add_argument(
+        "--llm-backend",
+        default="langgraph",
+        choices=registered_backend_names(),
+        help="Pluginized LLM backend to use when --llm is set.",
+    )
+    repair_semantic_ir.add_argument("--model")
+    repair_semantic_ir.add_argument("--llm-response-out", type=Path)
+    repair_semantic_ir.add_argument("--max-attempts", type=int, default=2)
 
     validate_oracle_ir = subparsers.add_parser("validate-oracle-ir")
     validate_oracle_ir.add_argument("--oracle-ir", required=True, type=Path)
@@ -216,6 +238,53 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if review["status"] == "needs_human_input":
             return 2
+        return 1
+    if args.command == "repair-semantic-ir":
+        semantic_ir_value = load_semantic_spec_ir(args.semantic_ir)
+        target = args.target or str(semantic_ir_value.get("target") or "dut")
+        result = repair_semantic_spec_ir_with_review(
+            semantic_ir_value,
+            manifest_path=args.manifest,
+            spec_paths=tuple(args.spec),
+            design_ir_path=args.ir,
+            target=target,
+            require_reviewed=args.require_reviewed,
+            llm_backend=(
+                create_backend(args.llm_backend, model=args.model)
+                if args.llm
+                else None
+            ),
+            model=args.model,
+            max_attempts=args.max_attempts,
+        )
+        if args.prompt_out:
+            write_json(args.prompt_out, result["prompt"])
+        if args.review_out:
+            write_semantic_review(args.review_out, result["review"])
+        if args.llm_response_out:
+            write_json(
+                args.llm_response_out,
+                {
+                    "status": result["status"],
+                    "attempt_count": result["attempt_count"],
+                    "llm_responses": result["llm_responses"],
+                },
+            )
+        if result["status"] in {"valid", "repaired"}:
+            if args.out:
+                write_semantic_spec_ir(args.out, result["semantic_ir"])
+            print(f"SemanticSpecIR {result['status']}: {args.semantic_ir}")
+            return 0
+        for finding in result["review"].get("findings", []):
+            print(
+                f"{finding['stage']}:{finding['severity']}: "
+                f"{finding['path']}: {finding['message']}",
+                file=sys.stderr if finding["severity"] == "error" else sys.stdout,
+            )
+        if result["status"] in {"needs_human_input", "llm_unavailable"}:
+            print(f"SemanticSpecIR repair status: {result['status']}", file=sys.stderr)
+            return 2
+        print(f"SemanticSpecIR repair status: {result['status']}", file=sys.stderr)
         return 1
     if args.command == "validate-oracle-ir":
         oracle_ir_value = load_oracle_ir(args.oracle_ir)

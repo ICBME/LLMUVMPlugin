@@ -13,10 +13,12 @@ from LLMPlugin import (
 )
 from LLMPlugin.langgraph_backend import create_langgraph_backend
 from Spec2Backend.Spec2IR import (
+    build_semantic_spec_ir_repair_prompt,
     build_semantic_spec_ir_prompt,
     collect_semantic_spec_ir_issues,
     generate_semantic_spec_ir,
     normalize_semantic_spec_ir_response,
+    repair_semantic_spec_ir_with_review,
     review_semantic_spec_ir,
     validate_semantic_spec_ir,
 )
@@ -286,6 +288,124 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertTrue(
                 any(finding["stage"] == "human_review_gate" for finding in review["findings"])
             )
+
+    def test_semantic_repair_prompt_includes_review_findings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["evidence"][0]["quote"] = "missing quote"
+
+            prompt = build_semantic_spec_ir_repair_prompt(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(prompt["workflow"], "semantic_spec_ir_validation_feedback_repair")
+            self.assertEqual(prompt["review_report"]["status"], "failed")
+            self.assertTrue(prompt["review_report"]["findings"])
+            self.assertIn("semantic_spec_ir", prompt["response_contract"])
+            self.assertEqual(prompt["inputs"]["specs"][0]["path"], str(spec))
+
+    def test_semantic_repair_prompt_accepts_generator_spec_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["evidence"][0]["quote"] = "missing quote"
+
+            prompt = build_semantic_spec_ir_repair_prompt(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=(path for path in [spec]),
+                target="demo_sha",
+            )
+
+            self.assertEqual(prompt["inputs"]["specs"][0]["path"], str(spec))
+            self.assertEqual(prompt["review_report"]["status"], "failed")
+
+    def test_semantic_repair_loop_accepts_fixed_llm_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            fixed_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            broken_ir = json.loads(json.dumps(fixed_ir))
+            broken_ir["evidence"][0]["quote"] = "missing quote"
+            testcase = self
+
+            class FakeRepairBackend:
+                name = "fake-repair"
+
+                def invoke(self, request):
+                    testcase.assertEqual(
+                        request.prompt["workflow"],
+                        "semantic_spec_ir_validation_feedback_repair",
+                    )
+                    return LLMResponse(
+                        content=json.dumps({"semantic_spec_ir": fixed_ir}),
+                    )
+
+            result = repair_semantic_spec_ir_with_review(
+                broken_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+                llm_backend=FakeRepairBackend(),
+                max_attempts=1,
+            )
+
+            self.assertEqual(result["status"], "repaired")
+            self.assertEqual(result["attempt_count"], 1)
+            self.assertEqual(result["review"]["status"], "passed")
+            self.assertEqual(result["semantic_ir"], fixed_ir)
+
+    def test_semantic_repair_cli_writes_prompt_and_review_without_llm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            semantic_ir_path = root / "semantic_ir.json"
+            prompt_out = root / "repair_prompt.json"
+            review_out = root / "repair_review.json"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["evidence"][0]["quote"] = "missing quote"
+            semantic_ir_path.write_text(json.dumps(semantic_ir))
+
+            status = codegen_cli_main(
+                [
+                    "repair-semantic-ir",
+                    "--semantic-ir",
+                    str(semantic_ir_path),
+                    "--manifest",
+                    str(manifest),
+                    "--spec",
+                    str(spec),
+                    "--target",
+                    "demo_sha",
+                    "--prompt-out",
+                    str(prompt_out),
+                    "--review-out",
+                    str(review_out),
+                ]
+            )
+
+            self.assertEqual(status, 1)
+            self.assertTrue(prompt_out.exists())
+            self.assertTrue(review_out.exists())
+            self.assertEqual(json.loads(review_out.read_text())["status"], "failed")
 
 
 def _sha_manifest():
