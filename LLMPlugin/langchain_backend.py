@@ -60,21 +60,24 @@ class LangChainLLMBackend:
             max_retries=self.config.max_retries,
             model_kwargs=model_kwargs,
         )
-        response = llm.invoke(
-            [
-                SystemMessage(content=request.system_prompt),
-                HumanMessage(content=json.dumps(request.prompt, sort_keys=True)),
-            ],
-            config={
-                "run_name": request.run_name,
-                "tags": list(request.tags),
-                "metadata": {
-                    **request.metadata,
-                    "model": model,
-                    "provider": self.name,
+        try:
+            response = llm.invoke(
+                [
+                    SystemMessage(content=request.system_prompt),
+                    HumanMessage(content=json.dumps(request.prompt, sort_keys=True)),
+                ],
+                config={
+                    "run_name": request.run_name,
+                    "tags": list(request.tags),
+                    "metadata": {
+                        **request.metadata,
+                        "model": model,
+                        "provider": self.name,
+                    },
                 },
-            },
-        )
+            )
+        except Exception as exc:  # noqa: BLE001 - normalize provider errors for callers
+            raise LLMBackendError(f"LangChain backend invocation failed: {exc}") from exc
         content = message_content_to_text(response.content)
         return LLMResponse(
             content=content,

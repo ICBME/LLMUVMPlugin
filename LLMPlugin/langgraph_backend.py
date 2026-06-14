@@ -36,7 +36,12 @@ class LangGraphLLMBackend:
     def invoke(self, request: LLMRequest) -> LLMResponse | None:
         if self._graph is None:
             return self.delegate.invoke(request)
-        result = self._graph.invoke({"request": request})
+        try:
+            result = self._graph.invoke({"request": request})
+        except LLMBackendError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - normalize graph/provider failures
+            raise LLMBackendError(f"LangGraph backend invocation failed: {exc}") from exc
         response = result.get("response")
         if response is None or isinstance(response, LLMResponse):
             return response

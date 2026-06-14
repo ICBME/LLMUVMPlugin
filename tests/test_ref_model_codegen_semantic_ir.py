@@ -7,6 +7,7 @@ import unittest
 from rtlagent_bfm.codegen.cli import main as codegen_cli_main
 from LLMPlugin import (
     CallableLLMBackend,
+    LLMBackendError,
     LLMRequest,
     LLMResponse,
     registered_backend_names,
@@ -369,6 +370,36 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(result["attempt_count"], 1)
             self.assertEqual(result["review"]["status"], "passed")
             self.assertEqual(result["semantic_ir"], fixed_ir)
+
+    def test_semantic_repair_loop_reports_backend_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            broken_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            broken_ir["evidence"][0]["quote"] = "missing quote"
+
+            class ErrorBackend:
+                name = "error-backend"
+
+                def invoke(self, request):
+                    raise LLMBackendError("provider is unavailable")
+
+            result = repair_semantic_spec_ir_with_review(
+                broken_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+                llm_backend=ErrorBackend(),
+                max_attempts=1,
+            )
+
+            self.assertEqual(result["status"], "llm_unavailable")
+            self.assertEqual(result["attempt_count"], 1)
+            self.assertEqual(result["llm_responses"][0]["backend"], "error-backend")
+            self.assertIn("provider is unavailable", result["llm_responses"][0]["message"])
 
     def test_semantic_repair_cli_writes_prompt_and_review_without_llm(self):
         with tempfile.TemporaryDirectory() as tmp:

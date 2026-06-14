@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from LLMPlugin import CallableLLMBackend, LLMBackend, LLMRequest, LLMResponse
+from LLMPlugin import CallableLLMBackend, LLMBackend, LLMBackendError, LLMRequest
 from rtlagent_bfm.codegen.oracle_ir import load_manifest_summary
 from rtlagent_bfm.loader import load_ir
 
@@ -120,12 +120,16 @@ def repair_semantic_spec_ir_with_review(
 
     attempts = max(0, int(max_attempts))
     for _attempt in range(attempts):
-        response = invoke_semantic_repair_backend(
-            backend,
-            prompt,
-            target=str(target or current.get("target") or "unknown"),
-            model=model,
-        )
+        try:
+            response = invoke_semantic_repair_backend(
+                backend,
+                prompt,
+                target=str(target or current.get("target") or "unknown"),
+                model=model,
+            )
+        except LLMBackendError as exc:
+            llm_responses.append(llm_error_payload(exc, backend=backend))
+            return repair_result("llm_unavailable", current, review, prompt, llm_responses)
         if response is None:
             return repair_result("llm_unavailable", current, review, prompt, llm_responses)
         llm_responses.append(response)
@@ -242,6 +246,14 @@ def review_with_response_error(review: dict[str, Any], message: str) -> dict[str
         }
     )
     return updated
+
+
+def llm_error_payload(exc: Exception, *, backend: LLMBackend) -> dict[str, Any]:
+    return {
+        "error": type(exc).__name__,
+        "message": str(exc),
+        "backend": getattr(backend, "name", type(backend).__name__),
+    }
 
 
 def manifest_payload(path: str | Path | None) -> dict[str, Any] | None:

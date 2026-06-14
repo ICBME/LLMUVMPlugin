@@ -9,6 +9,7 @@ dependencies = [
     "langchain-openai>=0.2.0",
     "langgraph>=0.2.0",
     "langsmith>=0.1.0",
+    "PySocks>=1.7.1",
     "pyuvm>=4.0.1",
     "socksio>=1.0.0",
 ]
