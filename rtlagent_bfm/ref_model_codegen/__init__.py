@@ -15,7 +15,10 @@ from Spec2Backend.Spec2IR import (
     load_semantic_spec_ir,
     maybe_call_semantic_spec_ir_llm,
     normalize_semantic_spec_ir_response,
+    review_semantic_spec_ir,
+    review_semantic_spec_ir_file,
     validate_semantic_spec_ir,
+    write_semantic_review,
     write_semantic_spec_ir,
 )
 
@@ -29,6 +32,9 @@ __all__ = [
     "load_semantic_spec_ir",
     "maybe_call_semantic_spec_ir_llm",
     "normalize_semantic_spec_ir_response",
+    "review_semantic_spec_ir",
+    "review_semantic_spec_ir_file",
     "validate_semantic_spec_ir",
+    "write_semantic_review",
     "write_semantic_spec_ir",
 ]

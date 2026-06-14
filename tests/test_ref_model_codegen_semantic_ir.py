@@ -17,6 +17,7 @@ from Spec2Backend.Spec2IR import (
     collect_semantic_spec_ir_issues,
     generate_semantic_spec_ir,
     normalize_semantic_spec_ir_response,
+    review_semantic_spec_ir,
     validate_semantic_spec_ir,
 )
 
@@ -125,6 +126,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             spec = root / "sha_spec.md"
             out = root / "semantic_ir.json"
             prompt_out = root / "prompt.json"
+            review_out = root / "semantic_review.json"
             manifest.write_text(_sha_manifest())
             spec.write_text("The block computes SHA-256 over the input message.\n")
 
@@ -154,11 +156,29 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                     "demo_sha",
                 ]
             )
+            review_status = codegen_cli_main(
+                [
+                    "review-semantic-ir",
+                    "--semantic-ir",
+                    str(out),
+                    "--manifest",
+                    str(manifest),
+                    "--spec",
+                    str(spec),
+                    "--target",
+                    "demo_sha",
+                    "--out",
+                    str(review_out),
+                ]
+            )
 
             self.assertEqual(extract_status, 0)
             self.assertEqual(validate_status, 0)
+            self.assertEqual(review_status, 0)
             self.assertTrue(out.exists())
+            self.assertTrue(review_out.exists())
             self.assertEqual(json.loads(prompt_out.read_text())["workflow"], "natural_language_spec_to_traceable_semantic_ir")
+            self.assertEqual(json.loads(review_out.read_text())["status"], "passed")
 
     def test_semantic_prompt_includes_manifest_and_spec_payloads(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -204,6 +224,69 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
 
         self.assertEqual(response.parsed_json["semantic_spec_ir"]["target"], "demo")
 
+    def test_semantic_validation_review_reports_lowering_ready_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["status"], "passed")
+            self.assertEqual(review["lowering"]["ready_items"], ["sem1"])
+            self.assertFalse(review["lowering"]["blocked_items"])
+
+    def test_semantic_validation_review_blocks_bad_traceability(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["evidence"][0]["quote"] = "missing quote"
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["status"], "failed")
+            self.assertTrue(
+                any(finding["stage"] == "traceability_review" for finding in review["findings"])
+            )
+
+    def test_semantic_validation_review_flags_blocking_human_questions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest_with_two_hex_fields())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["status"], "needs_human_input")
+            self.assertTrue(
+                any(finding["stage"] == "human_review_gate" for finding in review["findings"])
+            )
+
 
 def _sha_manifest():
     return (
@@ -219,6 +302,31 @@ def _sha_manifest():
                 "",
                 "[[field]]",
                 'name = "message"',
+                'kind = "hex"',
+            ]
+        )
+        + "\n"
+    )
+
+
+def _sha_manifest_with_two_hex_fields():
+    return (
+        "\n".join(
+            [
+                'name = "demo_sha"',
+                'driver = "demo_driver:Driver"',
+                "",
+                "[[field]]",
+                'name = "mode"',
+                'kind = "enum"',
+                'choices = ["sha224", "sha256"]',
+                "",
+                "[[field]]",
+                'name = "message"',
+                'kind = "hex"',
+                "",
+                "[[field]]",
+                'name = "key"',
                 'kind = "hex"',
             ]
         )

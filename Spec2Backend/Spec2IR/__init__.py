@@ -15,9 +15,18 @@ from .semantic_ir import (
     validate_semantic_spec_ir,
     write_semantic_spec_ir,
 )
+from .validation_review import (
+    REVIEW_SCHEMA_VERSION,
+    ReviewFinding,
+    review_semantic_spec_ir,
+    review_semantic_spec_ir_file,
+    write_semantic_review,
+)
 
 __all__ = [
+    "REVIEW_SCHEMA_VERSION",
     "SEMANTIC_SPEC_IR_SCHEMA_VERSION",
+    "ReviewFinding",
     "SemanticSpecIRCallable",
     "SemanticSpecIRIssue",
     "SemanticSpecIRValidationError",
@@ -28,6 +37,9 @@ __all__ = [
     "load_semantic_spec_ir",
     "maybe_call_semantic_spec_ir_llm",
     "normalize_semantic_spec_ir_response",
+    "review_semantic_spec_ir",
+    "review_semantic_spec_ir_file",
     "validate_semantic_spec_ir",
+    "write_semantic_review",
     "write_semantic_spec_ir",
 ]

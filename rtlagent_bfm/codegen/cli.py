@@ -28,6 +28,8 @@ from Spec2Backend.Spec2IR import (
     collect_semantic_spec_ir_issues,
     generate_semantic_spec_ir,
     load_semantic_spec_ir,
+    review_semantic_spec_ir,
+    write_semantic_review,
     write_semantic_spec_ir,
 )
 
@@ -71,6 +73,15 @@ def main(argv: list[str] | None = None) -> int:
     validate_semantic_ir.add_argument("--spec", action="append", default=[], type=Path)
     validate_semantic_ir.add_argument("--target")
     validate_semantic_ir.add_argument("--require-reviewed", action="store_true")
+
+    review_semantic_ir = subparsers.add_parser("review-semantic-ir")
+    review_semantic_ir.add_argument("--semantic-ir", required=True, type=Path)
+    review_semantic_ir.add_argument("--manifest", type=Path)
+    review_semantic_ir.add_argument("--spec", action="append", default=[], type=Path)
+    review_semantic_ir.add_argument("--ir", type=Path)
+    review_semantic_ir.add_argument("--target")
+    review_semantic_ir.add_argument("--require-reviewed", action="store_true")
+    review_semantic_ir.add_argument("--out", type=Path)
 
     validate_oracle_ir = subparsers.add_parser("validate-oracle-ir")
     validate_oracle_ir.add_argument("--oracle-ir", required=True, type=Path)
@@ -181,6 +192,31 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"validated SemanticSpecIR: {args.semantic_ir}")
         return 0
+    if args.command == "review-semantic-ir":
+        semantic_ir_value = load_semantic_spec_ir(args.semantic_ir)
+        target = args.target or str(semantic_ir_value.get("target") or "dut")
+        review = review_semantic_spec_ir(
+            semantic_ir_value,
+            manifest_path=args.manifest,
+            spec_paths=tuple(args.spec),
+            design_ir_path=args.ir,
+            target=target,
+            require_reviewed=args.require_reviewed,
+        )
+        if args.out:
+            write_semantic_review(args.out, review)
+        for finding in review["findings"]:
+            print(
+                f"{finding['stage']}:{finding['severity']}: "
+                f"{finding['path']}: {finding['message']}",
+                file=sys.stderr if finding["severity"] == "error" else sys.stdout,
+            )
+        print(f"SemanticSpecIR review {review['status']}: {args.semantic_ir}")
+        if review["status"] == "passed":
+            return 0
+        if review["status"] == "needs_human_input":
+            return 2
+        return 1
     if args.command == "validate-oracle-ir":
         oracle_ir_value = load_oracle_ir(args.oracle_ir)
         target = args.target or str(oracle_ir_value.get("target") or "dut")

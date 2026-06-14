@@ -557,8 +557,6 @@ def infer_algorithm_semantic_items(
                 and "checksum" in normalize_algorithm_text(str(item.get("quote", "")))
             )
         ]
-        if not evidence_ids and evidence:
-            evidence_ids = [str(evidence[0]["id"])]
         if not evidence_ids:
             continue
         semantic_items.append(
