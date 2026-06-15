@@ -38,6 +38,22 @@ ALLOWED_CLAIM_STRENGTHS = {
     "should",
     "unknown",
 }
+ALLOWED_CLAIM_OBLIGATION_KINDS = {
+    "assumption",
+    "behavior",
+    "clock",
+    "condition",
+    "constraint",
+    "interface_port",
+    "operation",
+    "protocol",
+    "reset",
+    "response",
+    "state_transition",
+    "timing",
+    "trigger",
+    "truth_table_row",
+}
 ALLOWED_FORMALIZATION_STATUSES = {
     "candidate",
     "formalized",

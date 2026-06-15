@@ -34,6 +34,7 @@ REVIEW_STAGES = (
     "semantic_consistency_review",
     "human_review_gate",
 )
+ClaimKey = tuple[str, int, int, str, str]
 
 
 @dataclass(frozen=True)
@@ -508,8 +509,8 @@ def completeness_review(
 def collect_semantic_claim_obligations(
     value: Any,
     *,
-    ir_claim_id_to_key: dict[str, tuple[str, int, int, str]],
-    expected_by_key: dict[tuple[str, int, int, str], str],
+    ir_claim_id_to_key: dict[str, ClaimKey],
+    expected_by_key: dict[ClaimKey, str],
 ) -> tuple[dict[str, list[dict[str, str]]], list[ReviewFinding]]:
     obligations: dict[str, list[dict[str, str]]] = {}
     findings: list[ReviewFinding] = []
@@ -553,8 +554,8 @@ def collect_question_claim_obligations(
     value: Any,
     *,
     review: Any,
-    ir_claim_id_to_key: dict[str, tuple[str, int, int, str]],
-    expected_by_key: dict[tuple[str, int, int, str], str],
+    ir_claim_id_to_key: dict[str, ClaimKey],
+    expected_by_key: dict[ClaimKey, str],
 ) -> tuple[dict[str, list[dict[str, str]]], list[ReviewFinding]]:
     obligations: dict[str, list[dict[str, str]]] = {}
     findings: list[ReviewFinding] = []
@@ -605,8 +606,8 @@ def collect_question_claim_obligations(
 def collect_gap_claim_obligations(
     value: Any,
     *,
-    ir_claim_id_to_key: dict[str, tuple[str, int, int, str]],
-    expected_by_key: dict[tuple[str, int, int, str], str],
+    ir_claim_id_to_key: dict[str, ClaimKey],
+    expected_by_key: dict[ClaimKey, str],
 ) -> tuple[dict[str, list[dict[str, str]]], list[ReviewFinding]]:
     obligations: dict[str, list[dict[str, str]]] = {}
     findings: list[ReviewFinding] = []
@@ -663,8 +664,8 @@ def collect_answered_question_ids(review: Any) -> set[str]:
 def expected_claim_ids_for_item(
     item: dict[str, Any],
     *,
-    ir_claim_id_to_key: dict[str, tuple[str, int, int, str]],
-    expected_by_key: dict[tuple[str, int, int, str], str],
+    ir_claim_id_to_key: dict[str, ClaimKey],
+    expected_by_key: dict[ClaimKey, str],
 ) -> list[str]:
     expected_ids: list[str] = []
     for claim_id in item.get("claim_ids", []):
@@ -679,12 +680,13 @@ def expected_claim_ids_for_item(
     return expected_ids
 
 
-def claim_key(claim: dict[str, Any]) -> tuple[str, int, int, str]:
+def claim_key(claim: dict[str, Any]) -> ClaimKey:
     return (
         str(claim.get("source_id") or ""),
         safe_int(claim.get("line_start")),
         safe_int(claim.get("line_end")),
         str(claim.get("quote") or "").strip(),
+        str(claim.get("summary") or "").strip(),
     )
 
 
@@ -704,8 +706,8 @@ def source_claim_path(claim: dict[str, Any], *, fallback_id: str) -> str:
 def collect_expected_claim_coverage(
     value: Any,
     *,
-    ir_claim_id_to_key: dict[str, tuple[str, int, int, str]],
-    expected_by_key: dict[tuple[str, int, int, str], str],
+    ir_claim_id_to_key: dict[str, ClaimKey],
+    expected_by_key: dict[ClaimKey, str],
     semantic_complete_only: bool = False,
     semantic_incomplete_only: bool = False,
 ) -> set[str]:

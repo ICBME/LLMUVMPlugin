@@ -37,6 +37,7 @@ from .claim_extraction import (
 )
 from .representation_ast import REPRESENTATION_AST_VERSION, representation_ast_contract
 from .schema import (
+    ALLOWED_CLAIM_OBLIGATION_KINDS,
     ALLOWED_CLAIM_KINDS,
     ALLOWED_CLAIM_STRENGTHS,
     ALLOWED_FORMALIZATION_STATUSES,
@@ -242,6 +243,7 @@ def build_semantic_spec_ir_prompt(
         "constraints": [
             "Return one complete SemanticSpecIR object under the top-level key semantic_spec_ir.",
             "Extract atomic spec_claims for every normative or behavior-relevant statement in the specs.",
+            "For every spec_claim include a stable fingerprint and decomposition.atomic_obligations for condition, trigger, response, timing, clock/reset, protocol, interface, operation, state transition, truth-table row, or fallback behavior semantics.",
             "Every normative spec_claim must be covered by semantic_elements[].claim_ids, open_questions[].claim_ids, or semantic_gaps[].claim_ids.",
             "Every semantic element must cite at least one evidence id from the original spec text.",
             "Evidence must include source_id, line_start, line_end, and a short quote copied from those lines.",
@@ -388,6 +390,20 @@ def semantic_spec_ir_contract() -> dict[str, Any]:
             "strength": sorted(ALLOWED_CLAIM_STRENGTHS),
             "normative": "true for claims that must be covered before SemanticSpecIR review can pass",
             "subjects": ["signals, fields, states, protocol entities, or outputs"],
+            "fingerprint": "sha256 over normalized source identity, location, summary, and quote",
+            "decomposition": {
+                "version": 1,
+                "atomic_obligations": [
+                    {
+                        "id": "stable obligation id such as claim1.obl1",
+                        "kind": sorted(ALLOWED_CLAIM_OBLIGATION_KINDS),
+                        "text": "atomic obligation text",
+                        "subjects": ["signals, states, protocol entities, or fields"],
+                        "required": "true when this obligation must be represented before the claim is complete",
+                        "attributes": "optional structured details such as direction, edge, delay_cycles, or operation",
+                    }
+                ],
+            },
         },
         "semantic_element_schema": {
             "id": "stable semantic element id such as sem1",

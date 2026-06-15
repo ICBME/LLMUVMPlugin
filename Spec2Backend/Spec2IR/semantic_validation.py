@@ -11,6 +11,7 @@ from rtlagent_bfm.codegen.oracle_ir import ManifestSummary, load_manifest_summar
 from .representation_ast import representation_requires_human_review
 from .representation_ast_validation import validate_representation
 from .schema import (
+    ALLOWED_CLAIM_OBLIGATION_KINDS,
     ALLOWED_CLAIM_KINDS,
     ALLOWED_CLAIM_STRENGTHS,
     ALLOWED_FORMALIZATION_STATUSES,
@@ -292,7 +293,54 @@ def validate_spec_claims(
         if not isinstance(item.get("normative"), bool):
             issues.append(SemanticSpecIRIssue(f"{path}.normative", "must be a boolean"))
         validate_string_list(item.get("subjects", []), f"{path}.subjects", issues)
+        fingerprint = item.get("fingerprint")
+        if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            issues.append(SemanticSpecIRIssue(f"{path}.fingerprint", "must be a sha256 hex string"))
+        validate_claim_decomposition(item.get("decomposition"), f"{path}.decomposition", issues)
     return claim_ids
+
+
+def validate_claim_decomposition(
+    value: Any,
+    path: str,
+    issues: list[SemanticSpecIRIssue],
+) -> None:
+    if not isinstance(value, dict):
+        issues.append(SemanticSpecIRIssue(path, "must be an object"))
+        return
+    if value.get("version") != 1:
+        issues.append(SemanticSpecIRIssue(f"{path}.version", "must be 1"))
+    obligations = value.get("atomic_obligations")
+    if not isinstance(obligations, list) or not obligations:
+        issues.append(SemanticSpecIRIssue(f"{path}.atomic_obligations", "must be a non-empty list"))
+        return
+    obligation_ids: set[str] = set()
+    for index, obligation in enumerate(obligations):
+        obligation_path = f"{path}.atomic_obligations[{index}]"
+        if not isinstance(obligation, dict):
+            issues.append(SemanticSpecIRIssue(obligation_path, "must be an object"))
+            continue
+        obligation_id = obligation.get("id")
+        if not isinstance(obligation_id, str) or not obligation_id:
+            issues.append(SemanticSpecIRIssue(f"{obligation_path}.id", "must be a non-empty string"))
+        elif obligation_id in obligation_ids:
+            issues.append(SemanticSpecIRIssue(f"{obligation_path}.id", f"duplicate obligation id {obligation_id!r}"))
+        else:
+            obligation_ids.add(obligation_id)
+        if obligation.get("kind") not in ALLOWED_CLAIM_OBLIGATION_KINDS:
+            issues.append(
+                SemanticSpecIRIssue(
+                    f"{obligation_path}.kind",
+                    f"must be one of {sorted(ALLOWED_CLAIM_OBLIGATION_KINDS)}, got {obligation.get('kind')!r}",
+                )
+            )
+        if not isinstance(obligation.get("text"), str) or not obligation.get("text"):
+            issues.append(SemanticSpecIRIssue(f"{obligation_path}.text", "must be a non-empty string"))
+        validate_string_list(obligation.get("subjects", []), f"{obligation_path}.subjects", issues)
+        if not isinstance(obligation.get("required"), bool):
+            issues.append(SemanticSpecIRIssue(f"{obligation_path}.required", "must be a boolean"))
+        if "attributes" in obligation and not isinstance(obligation["attributes"], dict):
+            issues.append(SemanticSpecIRIssue(f"{obligation_path}.attributes", "must be an object"))
 
 
 def validate_inputs(

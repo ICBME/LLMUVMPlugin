@@ -163,6 +163,36 @@ review 会使用传入的 `spec_paths` 重新读取 source 文件，并校验 `p
 - `strength`: 约束强度。
 - `normative`: 是否为必须覆盖的规范性语义。
 - `subjects`: 涉及的信号、字段、状态或协议实体。
+- `fingerprint`: 基于 source id、行号范围、归一化 summary 和 quote 生成的 sha256，
+  用于跨轮 repair / review 识别同一 source claim。
+- `decomposition`: claim 的原子义务拆解。当前格式为：
+
+```json
+{
+  "version": 1,
+  "atomic_obligations": [
+    {
+      "id": "claim1.obl1",
+      "kind": "condition | trigger | response | timing | clock | reset | protocol | interface_port | operation | state_transition | truth_table_row | constraint | behavior | assumption",
+      "text": "atomic obligation text",
+      "subjects": ["signal_or_state"],
+      "required": true,
+      "attributes": {}
+    }
+  ]
+}
+```
+
+`decomposition` 不是 backend support 判断；它只表达 source claim 内部必须被 IR 覆盖的语义槽位，
+用于后续 AST-to-claim alignment review 和 human-in-loop 补全。
+
+source claim extraction 当前按 markdown/source block 解析：
+
+- 普通 paragraph：支持跨行合并，并按句子拆分为 claim。
+- bullet / numbered list：每个 list item 作为独立 claim，支持缩进续行。
+- markdown 或纯文本 pipe table：header 后每个 data row 生成一个 `truth_table_row`
+  claim，例如 `Truth table row: when x=0, y=1`。
+- fenced code block 和 heading 不作为 claim。
 
 当前允许的 claim kind：
 

@@ -24,6 +24,8 @@ from Spec2Backend.Spec2IR import (
     review_semantic_spec_ir,
     validate_semantic_spec_ir,
 )
+from Spec2Backend.Spec2IR.claim_extraction import extract_spec_claims
+from Spec2Backend.Spec2IR.schema import SourceDocument
 
 
 class TestSemanticSpecIRGeneration(unittest.TestCase):
@@ -52,6 +54,10 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(semantic_ir["target"], "demo_sha")
             self.assertEqual(semantic_ir["sources"][0]["content_hash"], hashlib.sha256(spec.read_bytes()).hexdigest())
             self.assertEqual([claim["id"] for claim in semantic_ir["spec_claims"]], ["claim1"])
+            claim = semantic_ir["spec_claims"][0]
+            self.assertRegex(claim["fingerprint"], r"^[0-9a-f]{64}$")
+            obligations = claim["decomposition"]["atomic_obligations"]
+            self.assertTrue(any(item["kind"] == "operation" for item in obligations))
             self.assertEqual(
                 semantic_ir["semantic_elements"][0]["claim_ids"],
                 ["claim1"],
@@ -72,6 +78,142 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 spec_paths=[spec],
                 target="demo_sha",
             )
+
+    def test_extract_spec_claims_handles_multiline_lists_and_truth_tables(self):
+        spec_text = "\n".join(
+            [
+                "# Demo",
+                "The module implements a combinational circuit",
+                "for the following truth table:",
+                "",
+                " - input  x",
+                " - output y",
+                "",
+                "  x | y",
+                "  0 | 1",
+                "  1 | 0",
+            ]
+        )
+
+        claims = extract_spec_claims(
+            (
+                SourceDocument(
+                    id="src1",
+                    path=Path("demo_spec.md"),
+                    text=spec_text,
+                ),
+            )
+        )
+
+        summaries = [claim["summary"] for claim in claims]
+        self.assertIn("The module implements a combinational circuit for the following truth table:", summaries)
+        self.assertIn("input x", summaries)
+        self.assertIn("output y", summaries)
+        self.assertIn("Truth table row: when x=0, y=1", summaries)
+        self.assertIn("Truth table row: when x=1, y=0", summaries)
+        for claim in claims:
+            self.assertRegex(claim["fingerprint"], r"^[0-9a-f]{64}$")
+            self.assertTrue(claim["decomposition"]["atomic_obligations"])
+            self.assertIn(claim["quote"].strip(), spec_text)
+        table_claim = next(
+            claim
+            for claim in claims
+            if claim["summary"] == "Truth table row: when x=0, y=1"
+        )
+        self.assertEqual(table_claim["line_start"], 8)
+        self.assertEqual(table_claim["line_end"], 9)
+        self.assertIn("x | y", table_claim["quote"])
+        self.assertIn("0 | 1", table_claim["quote"])
+        self.assertEqual(table_claim["kind"], "functional_behavior")
+        self.assertTrue(
+            any(
+                obligation["kind"] == "truth_table_row"
+                for obligation in table_claim["decomposition"]["atomic_obligations"]
+            )
+        )
+
+    def test_extract_spec_claims_preserves_unique_quotes_for_wrapped_sentences(self):
+        spec_text = (
+            "The block computes SHA-256 over\n"
+            "the input message. Reset must clear\n"
+            "the busy flag to zero.\n"
+        )
+
+        claims = extract_spec_claims(
+            (
+                SourceDocument(
+                    id="src1",
+                    path=Path("wrapped_spec.md"),
+                    text=spec_text,
+                ),
+            )
+        )
+
+        self.assertEqual([claim["summary"] for claim in claims], [
+            "The block computes SHA-256 over the input message.",
+            "Reset must clear the busy flag to zero.",
+        ])
+        self.assertEqual(len({claim["quote"] for claim in claims}), 2)
+        for claim in claims:
+            self.assertIn(claim["quote"].strip(), spec_text)
+
+    def test_extract_spec_claims_does_not_split_note_prefix(self):
+        claims = extract_spec_claims(
+            (
+                SourceDocument(
+                    id="src1",
+                    path=Path("note_spec.md"),
+                    text="Note: reset is active high.\n",
+                ),
+            )
+        )
+
+        self.assertEqual([claim["summary"] for claim in claims], ["Note: reset is active high."])
+
+    def test_semantic_validation_checks_claim_decomposition_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["spec_claims"][0]["decomposition"]["atomic_obligations"][0]["kind"] = "unsupported"
+
+            issues = collect_semantic_spec_ir_issues(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertTrue(
+                any(
+                    issue.path.endswith(".decomposition.atomic_obligations[0].kind")
+                    for issue in issues
+                )
+            )
+
+    def test_semantic_validation_requires_claim_decomposition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["spec_claims"][0].pop("fingerprint")
+            semantic_ir["spec_claims"][0].pop("decomposition")
+
+            issues = collect_semantic_spec_ir_issues(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertTrue(any(issue.path.endswith(".fingerprint") for issue in issues))
+            self.assertTrue(any(issue.path.endswith(".decomposition") for issue in issues))
 
     def test_semantic_representation_parser_respects_declared_kind(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -850,6 +992,35 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             spec.write_text(
                 "The block computes SHA-256 over the input message.\n"
                 "Reset must clear the busy flag to zero.\n"
+            )
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["semantic_elements"] = [
+                item
+                for item in semantic_ir["semantic_elements"]
+                if "claim2" not in item.get("claim_ids", [])
+            ]
+            semantic_ir["semantic_gaps"] = []
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["status"], "failed")
+            self.assertEqual(review["completeness"]["uncovered_claims"], ["claim2"])
+
+    def test_semantic_completeness_review_distinguishes_wrapped_claim_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text(
+                "The block computes SHA-256 over\n"
+                "the input message. Reset must clear\n"
+                "the busy flag to zero.\n"
             )
             semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
             semantic_ir["semantic_elements"] = [
