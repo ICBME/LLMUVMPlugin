@@ -36,7 +36,7 @@ from rtlagent_bfm.codegen.oracle_ir import (
 from rtlagent_bfm.loader import load_ir
 
 
-SEMANTIC_SPEC_IR_SCHEMA_VERSION = 1
+SEMANTIC_SPEC_IR_SCHEMA_VERSION = 2
 
 SHA_ALGORITHMS = ("sha1", "sha224", "sha256", "sha384", "sha512")
 CRC_ALGORITHMS = ("crc32",)
@@ -54,6 +54,24 @@ ALLOWED_REVIEW_STATUSES = {
     "needs_human_input",
     "accepted",
     "rejected",
+}
+ALLOWED_CLAIM_KINDS = {
+    "compare_policy",
+    "constraint",
+    "descriptive",
+    "functional_behavior",
+    "interface",
+    "protocol",
+    "reset",
+    "state_behavior",
+    "timing",
+}
+ALLOWED_CLAIM_STRENGTHS = {
+    "describes",
+    "must",
+    "shall",
+    "should",
+    "unknown",
 }
 
 
@@ -169,19 +187,26 @@ def generate_rule_based_semantic_spec_ir(
     """Create a conservative review draft without requiring an LLM."""
 
     inputs = [input_from_manifest_field(field) for field in manifest.fields]
+    spec_claims = extract_spec_claims(documents)
     evidence = collect_algorithm_evidence(documents)
     semantic_items = infer_algorithm_semantic_items(
         manifest=manifest,
         documents=documents,
         evidence=evidence,
+        spec_claims=spec_claims,
     )
-    open_questions = build_open_questions(manifest, semantic_items, evidence)
-    unsupported = []
-    if not semantic_items:
+    open_questions = build_open_questions(manifest, semantic_items, evidence, spec_claims)
+    unsupported = unsupported_claims(spec_claims, semantic_items, open_questions)
+    if not semantic_items and not unsupported:
         unsupported.append(
             {
                 "reason": "No supported reference-model behavior was extracted from the spec text.",
                 "requires": "LLM extraction or human SemanticSpecIR authoring",
+                "claim_ids": [
+                    str(claim["id"])
+                    for claim in spec_claims
+                    if isinstance(claim.get("id"), str)
+                ],
             }
         )
 
@@ -192,6 +217,7 @@ def generate_rule_based_semantic_spec_ir(
         "schema_version": SEMANTIC_SPEC_IR_SCHEMA_VERSION,
         "target": target,
         "sources": [document.payload() for document in documents],
+        "spec_claims": spec_claims,
         "inputs": inputs,
         "semantic_items": semantic_items,
         "evidence": evidence,
@@ -251,6 +277,8 @@ def build_semantic_spec_ir_prompt(
         "target": target_name,
         "constraints": [
             "Return one complete SemanticSpecIR object under the top-level key semantic_spec_ir.",
+            "Extract atomic spec_claims for every normative or behavior-relevant statement in the specs.",
+            "Every normative spec_claim must be covered by semantic_items[].claim_ids, open_questions[].claim_ids, or unsupported[].claim_ids.",
             "Every semantic item must cite at least one evidence id from the original spec text.",
             "Evidence must include source_id, line_start, line_end, and a short quote copied from those lines.",
             "Use effects[].kind='compute_expected' for deterministic output semantics; do not invent effect kinds such as drive_constant.",
@@ -346,20 +374,21 @@ def collect_semantic_spec_ir_issues(
         )
 
     source_ids = validate_sources(ir.get("sources"), spec_paths, issues)
+    claim_ids = validate_spec_claims(ir.get("spec_claims"), source_ids, spec_paths, issues)
     evidence_ids = validate_evidence(ir.get("evidence"), source_ids, spec_paths, issues)
     validate_inputs(ir.get("inputs"), manifest_fields, issues)
     item_ids = validate_semantic_items(
         ir.get("semantic_items"),
         evidence_ids,
+        claim_ids,
         manifest_fields,
         issues,
     )
-    validate_open_questions(ir.get("open_questions", []), item_ids, issues)
+    validate_open_questions(ir.get("open_questions", []), item_ids, claim_ids, issues)
     validate_string_list(ir.get("assumptions", []), "assumptions", issues)
     validate_review(ir.get("review"), require_reviewed, issues)
+    validate_unsupported(ir.get("unsupported", []), claim_ids, issues)
     unsupported = ir.get("unsupported", [])
-    if unsupported is not None and not isinstance(unsupported, list):
-        issues.append(SemanticSpecIRIssue("unsupported", "must be a list"))
     if not ir.get("semantic_items") and not unsupported:
         issues.append(
             SemanticSpecIRIssue(
@@ -453,6 +482,7 @@ def semantic_spec_ir_contract() -> dict[str, Any]:
             "schema_version",
             "target",
             "sources",
+            "spec_claims",
             "inputs",
             "semantic_items",
             "evidence",
@@ -465,6 +495,18 @@ def semantic_spec_ir_contract() -> dict[str, Any]:
             "kind": TRACEABLE_SOURCE_KIND,
             "content_hash": "sha256 hex of source content",
             "line_count": "number of lines",
+        },
+        "spec_claim_schema": {
+            "id": "stable claim id such as claim1",
+            "source_id": "source document id",
+            "line_start": "1-based start line",
+            "line_end": "1-based end line",
+            "quote": "short exact quote copied from the source line range",
+            "summary": "atomic normalized claim summary",
+            "kind": sorted(ALLOWED_CLAIM_KINDS),
+            "strength": sorted(ALLOWED_CLAIM_STRENGTHS),
+            "normative": "true for claims that must be covered before lowering",
+            "subjects": ["signals, fields, states, protocol entities, or outputs"],
         },
         "semantic_item_schema": {
             "id": "stable semantic item id such as sem1",
@@ -486,6 +528,7 @@ def semantic_spec_ir_contract() -> dict[str, Any]:
                 }
             ],
             "evidence": ["ev1"],
+            "claim_ids": ["claim1"],
         },
         "lowerable_effect_schema": {
             "kind": "compute_expected",
@@ -519,6 +562,132 @@ def load_source_documents(paths: Iterable[str | Path]) -> tuple[SourceDocument, 
     return tuple(documents)
 
 
+def extract_spec_claims(documents: tuple[SourceDocument, ...]) -> list[dict[str, Any]]:
+    claims: list[dict[str, Any]] = []
+    for document in documents:
+        in_code_block = False
+        for line_no, raw_line in enumerate(document.lines, start=1):
+            stripped = raw_line.strip()
+            if stripped.startswith("```"):
+                in_code_block = not in_code_block
+                continue
+            if in_code_block or not stripped or stripped.startswith("#"):
+                continue
+            if is_markdown_table_rule(stripped):
+                continue
+            for quote in split_claim_quotes(stripped):
+                summary = summarize_claim_quote(quote)
+                if not summary:
+                    continue
+                claims.append(
+                    {
+                        "id": f"claim{len(claims) + 1}",
+                        "source_id": document.id,
+                        "line_start": line_no,
+                        "line_end": line_no,
+                        "quote": quote[:240],
+                        "summary": summary,
+                        "kind": classify_claim_kind(summary),
+                        "strength": classify_claim_strength(summary),
+                        "normative": True,
+                        "subjects": infer_claim_subjects(summary),
+                    }
+                )
+    return claims
+
+
+def split_claim_quotes(line: str) -> list[str]:
+    normalized = line.strip()
+    if not normalized:
+        return []
+    if re.match(r"^[-*]\s+", normalized):
+        return [normalized]
+    parts = [part.strip() for part in re.split(r"(?<=[.;])\s+", normalized) if part.strip()]
+    return parts or [normalized]
+
+
+def summarize_claim_quote(quote: str) -> str:
+    text = re.sub(r"^[-*]\s+", "", quote.strip())
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" ;")
+
+
+def is_markdown_table_rule(line: str) -> bool:
+    return bool(re.fullmatch(r"\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?", line))
+
+
+def classify_claim_kind(summary: str) -> str:
+    text = summary.lower()
+    if any(word in text for word in ("reset", "rst")):
+        return "reset"
+    if any(word in text for word in ("cycle", "clock", "posedge", "negedge", "pulse", "latency")):
+        return "timing"
+    if any(word in text for word in ("fsm", "state", "transition")):
+        return "state_behavior"
+    if any(word in text for word in ("valid", "ready", "handshake", "bus", "transaction", "request", "response")):
+        return "protocol"
+    if any(word in text for word in ("input", "output", "port", "interface")):
+        return "interface"
+    if any(word in text for word in ("compare", "scoreboard", "expected")):
+        return "compare_policy"
+    if any(word in text for word in ("must", "shall", "should", "only", "range", "illegal", "constraint")):
+        return "constraint"
+    if any(word in text for word in ("compute", "computes", "implement", "implements", "produce", "produces", "choose", "clear", "count", "add", "xor", "and", "or", "not")):
+        return "functional_behavior"
+    return "descriptive"
+
+
+def classify_claim_strength(summary: str) -> str:
+    text = summary.lower()
+    if "shall" in text:
+        return "shall"
+    if "must" in text or "always" in text:
+        return "must"
+    if "should" in text:
+        return "should"
+    if any(word in text for word in ("compute", "computes", "implement", "implements", "produce", "produces")):
+        return "must"
+    return "describes"
+
+
+def infer_claim_subjects(summary: str) -> list[str]:
+    words = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", summary)
+    stop_words = {
+        "a",
+        "an",
+        "and",
+        "are",
+        "be",
+        "before",
+        "block",
+        "by",
+        "if",
+        "in",
+        "input",
+        "is",
+        "module",
+        "must",
+        "of",
+        "or",
+        "output",
+        "over",
+        "should",
+        "signal",
+        "the",
+        "to",
+        "when",
+        "with",
+    }
+    subjects = []
+    for word in words:
+        lowered = word.lower()
+        if lowered in stop_words:
+            continue
+        if lowered not in subjects:
+            subjects.append(lowered)
+    return subjects[:8]
+
+
 def collect_algorithm_evidence(documents: tuple[SourceDocument, ...]) -> list[dict[str, Any]]:
     keywords = SUPPORTED_ALGORITHMS + ("checksum", "digest", "hash")
     evidence: list[dict[str, Any]] = []
@@ -544,6 +713,7 @@ def infer_algorithm_semantic_items(
     manifest: ManifestSummary,
     documents: tuple[SourceDocument, ...],
     evidence: list[dict[str, Any]],
+    spec_claims: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     message_field = select_hex_message_field(manifest.fields)
     if message_field is None:
@@ -574,12 +744,14 @@ def infer_algorithm_semantic_items(
         ]
         if not evidence_ids:
             continue
+        claim_ids = claim_ids_for_algorithm(algorithm, spec_claims)
         semantic_items.append(
             semantic_item_for_algorithm(
                 algorithm=algorithm,
                 message_field=message_field,
                 mode_field=mode_field,
                 evidence_ids=evidence_ids,
+                claim_ids=claim_ids,
                 index=len(semantic_items) + 1,
             )
         )
@@ -592,6 +764,7 @@ def semantic_item_for_algorithm(
     message_field: ManifestField,
     mode_field: ManifestField | None,
     evidence_ids: list[str],
+    claim_ids: list[str],
     index: int,
 ) -> dict[str, Any]:
     condition = None
@@ -623,6 +796,7 @@ def semantic_item_for_algorithm(
             }
         ],
         "evidence": evidence_ids,
+        "claim_ids": claim_ids,
         "provenance": {
             "source": "rule_based",
             "extractor": "algorithm_keyword_semantic_extractor",
@@ -631,12 +805,35 @@ def semantic_item_for_algorithm(
     return item
 
 
+def claim_ids_for_algorithm(algorithm: str, spec_claims: list[dict[str, Any]]) -> list[str]:
+    normalized_algorithm = algorithm.replace("_", "").replace("-", "").lower()
+    claim_ids = []
+    for claim in spec_claims:
+        text = normalize_algorithm_text(
+            " ".join(
+                [
+                    str(claim.get("quote", "")),
+                    str(claim.get("summary", "")),
+                ]
+            )
+        )
+        if normalized_algorithm in text or (
+            normalized_algorithm == "crc32" and "checksum" in text
+        ):
+            claim_id = claim.get("id")
+            if isinstance(claim_id, str):
+                claim_ids.append(claim_id)
+    return claim_ids
+
+
 def build_open_questions(
     manifest: ManifestSummary,
     semantic_items: list[dict[str, Any]],
     evidence: list[dict[str, Any]],
+    spec_claims: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     questions: list[dict[str, Any]] = []
+    semantic_claim_ids = sorted(covered_claim_ids_from_items(semantic_items))
     hex_fields = [field for field in manifest.fields if field.kind == "hex"]
     if len(hex_fields) > 1 and semantic_items:
         questions.append(
@@ -646,6 +843,7 @@ def build_open_questions(
                 "status": "open",
                 "question": "Which hex manifest field is the reference-model message/input payload?",
                 "related_items": [item["id"] for item in semantic_items],
+                "claim_ids": semantic_claim_ids,
                 "suggested_answers": [field.name for field in hex_fields],
             }
         )
@@ -657,10 +855,12 @@ def build_open_questions(
                 "status": "open",
                 "question": "Confirm the expected-result representation used by the scoreboard.",
                 "related_items": [item["id"] for item in semantic_items],
+                "claim_ids": semantic_claim_ids,
                 "suggested_answers": ["lowercase_hex_string", "raw_bytes", "integer"],
             }
         )
     if not semantic_items and evidence:
+        evidence_claim_ids = claim_ids_for_evidence(evidence, spec_claims)
         questions.append(
             {
                 "id": f"q{len(questions) + 1}",
@@ -668,10 +868,74 @@ def build_open_questions(
                 "status": "open",
                 "question": "The spec mentions hash/checksum terms, but no lowerable behavior was extracted.",
                 "related_items": [],
+                "claim_ids": evidence_claim_ids,
                 "suggested_answers": ["author_semantic_item", "mark_unsupported"],
             }
         )
     return questions
+
+
+def unsupported_claims(
+    spec_claims: list[dict[str, Any]],
+    semantic_items: list[dict[str, Any]],
+    open_questions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    covered = covered_claim_ids_from_items(semantic_items)
+    covered.update(covered_claim_ids_from_questions(open_questions))
+    unsupported = []
+    for claim in spec_claims:
+        claim_id = claim.get("id")
+        if not isinstance(claim_id, str) or claim_id in covered:
+            continue
+        unsupported.append(
+            {
+                "reason": f"No supported semantic item extracted for spec claim {claim_id}.",
+                "requires": "LLM extraction, human semantic completion, or explicit waiver before lowering",
+                "claim_ids": [claim_id],
+            }
+        )
+    return unsupported
+
+
+def covered_claim_ids_from_items(items: list[dict[str, Any]]) -> set[str]:
+    covered: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for claim_id in item.get("claim_ids", []):
+            if isinstance(claim_id, str):
+                covered.add(claim_id)
+    return covered
+
+
+def covered_claim_ids_from_questions(questions: list[dict[str, Any]]) -> set[str]:
+    covered: set[str] = set()
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        for claim_id in question.get("claim_ids", []):
+            if isinstance(claim_id, str):
+                covered.add(claim_id)
+    return covered
+
+
+def claim_ids_for_evidence(
+    evidence: list[dict[str, Any]],
+    spec_claims: list[dict[str, Any]],
+) -> list[str]:
+    normalized_evidence = [
+        normalize_algorithm_text(str(item.get("quote", "")))
+        for item in evidence
+        if isinstance(item, dict)
+    ]
+    claim_ids = []
+    for claim in spec_claims:
+        quote = normalize_algorithm_text(str(claim.get("quote", "")))
+        if any(quote and (quote in evidence_quote or evidence_quote in quote) for evidence_quote in normalized_evidence):
+            claim_id = claim.get("id")
+            if isinstance(claim_id, str):
+                claim_ids.append(claim_id)
+    return claim_ids
 
 
 def default_assumptions(semantic_items: list[dict[str, Any]]) -> list[str]:
@@ -790,6 +1054,79 @@ def validate_evidence(
     return evidence_ids
 
 
+def validate_spec_claims(
+    value: Any,
+    source_ids: set[str],
+    spec_paths: Iterable[str | Path],
+    issues: list[SemanticSpecIRIssue],
+) -> set[str]:
+    claim_ids: set[str] = set()
+    if not isinstance(value, list):
+        issues.append(SemanticSpecIRIssue("spec_claims", "must be a list"))
+        return claim_ids
+    source_lines = load_source_lines_by_id(spec_paths)
+    for index, item in enumerate(value):
+        path = f"spec_claims[{index}]"
+        if not isinstance(item, dict):
+            issues.append(SemanticSpecIRIssue(path, "must be an object"))
+            continue
+        claim_id = item.get("id")
+        if not isinstance(claim_id, str) or not claim_id:
+            issues.append(SemanticSpecIRIssue(f"{path}.id", "must be a non-empty string"))
+            continue
+        if claim_id in claim_ids:
+            issues.append(SemanticSpecIRIssue(f"{path}.id", f"duplicate claim id {claim_id!r}"))
+        claim_ids.add(claim_id)
+        source_id = item.get("source_id")
+        if not isinstance(source_id, str) or source_id not in source_ids:
+            issues.append(SemanticSpecIRIssue(f"{path}.source_id", f"unknown source id {source_id!r}"))
+        line_start = item.get("line_start")
+        line_end = item.get("line_end")
+        if not isinstance(line_start, int) or line_start < 1:
+            issues.append(SemanticSpecIRIssue(f"{path}.line_start", "must be a positive integer"))
+        if not isinstance(line_end, int) or line_end < 1:
+            issues.append(SemanticSpecIRIssue(f"{path}.line_end", "must be a positive integer"))
+        if isinstance(line_start, int) and isinstance(line_end, int) and line_end < line_start:
+            issues.append(SemanticSpecIRIssue(f"{path}.line_end", "must be >= line_start"))
+        quote = item.get("quote")
+        if not isinstance(quote, str) or not quote.strip():
+            issues.append(SemanticSpecIRIssue(f"{path}.quote", "must be a non-empty string"))
+        elif (
+            isinstance(source_id, str)
+            and isinstance(line_start, int)
+            and isinstance(line_end, int)
+            and source_id in source_lines
+        ):
+            quoted_lines = "\n".join(source_lines[source_id][line_start - 1 : line_end])
+            if quote.strip() not in quoted_lines:
+                issues.append(
+                    SemanticSpecIRIssue(
+                        f"{path}.quote",
+                        "must appear in the referenced source line range",
+                    )
+                )
+        if not isinstance(item.get("summary"), str) or not item.get("summary"):
+            issues.append(SemanticSpecIRIssue(f"{path}.summary", "must be a non-empty string"))
+        if item.get("kind") not in ALLOWED_CLAIM_KINDS:
+            issues.append(
+                SemanticSpecIRIssue(
+                    f"{path}.kind",
+                    f"must be one of {sorted(ALLOWED_CLAIM_KINDS)}, got {item.get('kind')!r}",
+                )
+            )
+        if item.get("strength") not in ALLOWED_CLAIM_STRENGTHS:
+            issues.append(
+                SemanticSpecIRIssue(
+                    f"{path}.strength",
+                    f"must be one of {sorted(ALLOWED_CLAIM_STRENGTHS)}, got {item.get('strength')!r}",
+                )
+            )
+        if not isinstance(item.get("normative"), bool):
+            issues.append(SemanticSpecIRIssue(f"{path}.normative", "must be a boolean"))
+        validate_string_list(item.get("subjects", []), f"{path}.subjects", issues)
+    return claim_ids
+
+
 def validate_inputs(
     value: Any,
     manifest_fields: set[str],
@@ -819,6 +1156,7 @@ def validate_inputs(
 def validate_semantic_items(
     value: Any,
     evidence_ids: set[str],
+    claim_ids: set[str],
     manifest_fields: set[str],
     issues: list[SemanticSpecIRIssue],
 ) -> set[str]:
@@ -855,6 +1193,7 @@ def validate_semantic_items(
             issues.append(SemanticSpecIRIssue(f"{path}.confidence", "must be a number from 0 to 1"))
         validate_string_list(item.get("subjects", []), f"{path}.subjects", issues)
         validate_item_evidence(item.get("evidence"), f"{path}.evidence", evidence_ids, issues)
+        validate_claim_ids(item.get("claim_ids"), f"{path}.claim_ids", claim_ids, issues)
         validate_conditions(item.get("conditions", []), f"{path}.conditions", manifest_fields, issues)
         validate_effects(item.get("effects", []), f"{path}.effects", manifest_fields, issues)
     return item_ids
@@ -863,6 +1202,7 @@ def validate_semantic_items(
 def validate_open_questions(
     value: Any,
     item_ids: set[str],
+    claim_ids: set[str],
     issues: list[SemanticSpecIRIssue],
 ) -> None:
     if not isinstance(value, list):
@@ -895,8 +1235,10 @@ def validate_open_questions(
                         SemanticSpecIRIssue(
                             f"{path}.related_items[{related_index}]",
                             f"unknown semantic item id {related_id!r}",
-                        )
                     )
+                )
+        if "claim_ids" in item:
+            validate_claim_ids(item.get("claim_ids"), f"{path}.claim_ids", claim_ids, issues)
 
 
 def validate_review(
@@ -942,6 +1284,62 @@ def validate_item_evidence(
                     f"{path}[{index}]",
                     f"unknown evidence id {evidence_id!r}",
                 )
+            )
+
+
+def validate_claim_ids(
+    value: Any,
+    path: str,
+    claim_ids: set[str],
+    issues: list[SemanticSpecIRIssue],
+    *,
+    required: bool = True,
+) -> None:
+    if value is None and not required:
+        return
+    if not claim_ids and value is None:
+        return
+    if not isinstance(value, list) or (required and not value):
+        issues.append(SemanticSpecIRIssue(path, "must contain at least one spec claim id"))
+        return
+    for index, claim_id in enumerate(value):
+        if not isinstance(claim_id, str):
+            issues.append(SemanticSpecIRIssue(f"{path}[{index}]", "must be a string"))
+        elif claim_id not in claim_ids:
+            issues.append(
+                SemanticSpecIRIssue(
+                    f"{path}[{index}]",
+                    f"unknown spec claim id {claim_id!r}",
+                )
+            )
+
+
+def validate_unsupported(
+    value: Any,
+    claim_ids: set[str],
+    issues: list[SemanticSpecIRIssue],
+) -> None:
+    if value is None:
+        return
+    if not isinstance(value, list):
+        issues.append(SemanticSpecIRIssue("unsupported", "must be a list"))
+        return
+    for index, item in enumerate(value):
+        path = f"unsupported[{index}]"
+        if not isinstance(item, dict):
+            issues.append(SemanticSpecIRIssue(path, "must be an object"))
+            continue
+        if "reason" in item and not isinstance(item["reason"], str):
+            issues.append(SemanticSpecIRIssue(f"{path}.reason", "must be a string"))
+        if "requires" in item and not isinstance(item["requires"], str):
+            issues.append(SemanticSpecIRIssue(f"{path}.requires", "must be a string"))
+        if "claim_ids" in item:
+            validate_claim_ids(
+                item.get("claim_ids"),
+                f"{path}.claim_ids",
+                claim_ids,
+                issues,
+                required=False,
             )
 
 

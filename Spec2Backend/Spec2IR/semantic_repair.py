@@ -53,6 +53,8 @@ def build_semantic_spec_ir_repair_prompt(
         "review_report": review,
         "constraints": [
             "Return one complete corrected SemanticSpecIR object under the top-level key semantic_spec_ir.",
+            "Preserve or repair spec_claims for every normative or behavior-relevant source statement.",
+            "Every normative spec_claim must be covered by semantic_items[].claim_ids, open_questions[].claim_ids, or unsupported[].claim_ids.",
             "Preserve traceability: every semantic item must cite evidence from the original spec text.",
             "Do not fabricate source quotes; evidence quotes must appear in the referenced source line range.",
             "Do not invent manifest fields, DesignIR bindings, or source files.",

@@ -47,9 +47,14 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 spec_paths=[spec],
             )
 
-            self.assertEqual(semantic_ir["schema_version"], 1)
+            self.assertEqual(semantic_ir["schema_version"], 2)
             self.assertEqual(semantic_ir["target"], "demo_sha")
             self.assertEqual(semantic_ir["sources"][0]["content_hash"], hashlib.sha256(spec.read_bytes()).hexdigest())
+            self.assertEqual([claim["id"] for claim in semantic_ir["spec_claims"]], ["claim1"])
+            self.assertEqual(
+                semantic_ir["semantic_items"][0]["claim_ids"],
+                ["claim1"],
+            )
             self.assertEqual(semantic_ir["evidence"][0]["line_start"], 2)
             self.assertIn("SHA-224", semantic_ir["evidence"][0]["quote"])
             self.assertEqual(
@@ -200,7 +205,9 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(prompt["inputs"]["specs"][0]["id"], "src1")
             constraints = " ".join(prompt["constraints"])
             self.assertIn("Every semantic item", constraints)
+            self.assertIn("Every normative spec_claim", constraints)
             self.assertIn("compute_expected", constraints)
+            self.assertIn("spec_claim_schema", prompt["semantic_spec_ir_contract"])
             self.assertIn("lowerable_effect_schema", prompt["semantic_spec_ir_contract"])
 
     def test_llmplugin_callable_backend_and_registry_are_available(self):
@@ -247,8 +254,161 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             )
 
             self.assertEqual(review["status"], "passed")
+            self.assertEqual(review["completeness"]["normative_claims"], ["claim1"])
+            self.assertEqual(review["completeness"]["covered_claims"], ["claim1"])
+            self.assertFalse(review["completeness"]["uncovered_claims"])
             self.assertEqual(review["lowering"]["ready_items"], ["sem1"])
             self.assertFalse(review["lowering"]["blocked_items"])
+
+    def test_semantic_completeness_review_blocks_placeholder_only_claims(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text(
+                "\n".join(
+                    [
+                        "The block computes SHA-256 over the input message.",
+                        "Reset must clear the busy flag to zero before the next transaction.",
+                        "The done signal must pulse exactly one cycle after digest completion.",
+                    ]
+                )
+                + "\n"
+            )
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["status"], "needs_human_input")
+            self.assertEqual(
+                review["completeness"]["placeholder_only_claims"],
+                ["claim2", "claim3"],
+            )
+            self.assertTrue(
+                any(finding["stage"] == "completeness_review" for finding in review["findings"])
+            )
+
+    def test_semantic_completeness_review_fails_uncovered_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text(
+                "The block computes SHA-256 over the input message.\n"
+                "Reset must clear the busy flag to zero.\n"
+            )
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["unsupported"] = [
+                item
+                for item in semantic_ir["unsupported"]
+                if "claim2" not in item.get("claim_ids", [])
+            ]
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["status"], "failed")
+            self.assertEqual(review["completeness"]["uncovered_claims"], ["claim2"])
+
+    def test_semantic_completeness_review_blocks_unsupported_comb_logic_spec(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "notgate.toml"
+            spec = root / "notgate_spec.md"
+            manifest.write_text(_notgate_manifest())
+            spec.write_text(
+                "\n".join(
+                    [
+                        "The module should implement a NOT gate.",
+                        "When in=0, out=1. When in=1, out=0.",
+                    ]
+                )
+                + "\n"
+            )
+            semantic_ir = generate_semantic_spec_ir(
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_notgate",
+            )
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_notgate",
+            )
+
+            self.assertEqual(semantic_ir["semantic_items"], [])
+            self.assertEqual(review["status"], "needs_human_input")
+            self.assertEqual(
+                sorted(review["completeness"]["placeholder_only_claims"]),
+                ["claim1", "claim2", "claim3"],
+            )
+
+    def test_semantic_completeness_review_recomputes_source_claims(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text(
+                "The block computes SHA-256 over the input message.\n"
+                "Reset must clear the busy flag to zero.\n"
+            )
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["spec_claims"] = []
+            for item in semantic_ir["semantic_items"]:
+                item.pop("claim_ids", None)
+            semantic_ir["open_questions"] = []
+            semantic_ir["unsupported"] = []
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["status"], "failed")
+            self.assertEqual(review["completeness"]["uncovered_claims"], ["claim1", "claim2"])
+            self.assertTrue(
+                any(finding["stage"] == "completeness_review" for finding in review["findings"])
+            )
+
+    def test_semantic_review_requires_spec_paths_for_trusted_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["status"], "failed")
+            self.assertTrue(
+                any(
+                    finding["stage"] == "traceability_review"
+                    and finding["severity"] == "error"
+                    for finding in review["findings"]
+                )
+            )
 
     def test_semantic_validation_review_blocks_bad_traceability(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -483,6 +643,24 @@ def _sha_manifest_with_two_hex_fields():
                 "[[field]]",
                 'name = "key"',
                 'kind = "hex"',
+            ]
+        )
+        + "\n"
+    )
+
+
+def _notgate_manifest():
+    return (
+        "\n".join(
+            [
+                'name = "demo_notgate"',
+                'driver = "demo_driver:Driver"',
+                "",
+                "[[field]]",
+                'name = "in"',
+                'kind = "int"',
+                "min = 0",
+                "max = 1",
             ]
         )
         + "\n"

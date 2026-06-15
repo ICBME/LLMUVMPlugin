@@ -13,6 +13,8 @@ from rtlagent_bfm.loader import load_ir
 from .semantic_ir import (
     SemanticSpecIRIssue,
     collect_semantic_spec_ir_issues,
+    extract_spec_claims,
+    load_source_documents,
     load_semantic_spec_ir,
     sha256_text,
 )
@@ -22,6 +24,7 @@ REVIEW_SCHEMA_VERSION = 1
 REVIEW_STAGES = (
     "schema_review",
     "traceability_review",
+    "completeness_review",
     "semantic_consistency_review",
     "lowering_readiness_review",
     "human_review_gate",
@@ -63,6 +66,14 @@ def review_semantic_spec_ir(
 
     spec_path_tuple = tuple(Path(path) for path in spec_paths)
     findings: list[ReviewFinding] = []
+    expected_claims: list[dict[str, Any]] | None = None
+    expected_claims_error = ""
+    if spec_path_tuple:
+        try:
+            expected_claims = extract_spec_claims(load_source_documents(spec_path_tuple))
+        except Exception as exc:  # noqa: BLE001 - keep review report structured
+            expected_claims = []
+            expected_claims_error = str(exc)
     findings.extend(
         schema_review(
             ir,
@@ -71,6 +82,12 @@ def review_semantic_spec_ir(
         )
     )
     findings.extend(traceability_review(ir, spec_paths=spec_path_tuple))
+    completeness = completeness_review(
+        ir,
+        expected_claims=expected_claims,
+        expected_claims_error=expected_claims_error,
+    )
+    findings.extend(completeness["findings"])
     findings.extend(
         semantic_consistency_review(
             ir,
@@ -94,6 +111,12 @@ def review_semantic_spec_ir(
         "status": status,
         "stage_summaries": stage_summaries,
         "findings": finding_dicts,
+        "completeness": {
+            "normative_claims": completeness["normative_claims"],
+            "covered_claims": completeness["covered_claims"],
+            "uncovered_claims": completeness["uncovered_claims"],
+            "placeholder_only_claims": completeness["placeholder_only_claims"],
+        },
         "lowering": {
             "ready_items": lowering["ready_items"],
             "blocked_items": lowering["blocked_items"],
@@ -144,9 +167,10 @@ def traceability_review(
         return [
             ReviewFinding(
                 stage="traceability_review",
-                severity="warning",
+                severity="error",
                 path="spec_paths",
-                message="spec paths not provided; source hash and quote checks were skipped",
+                message="spec paths are required for trusted traceability and completeness review",
+                blocking=True,
             )
         ]
 
@@ -243,6 +267,35 @@ def traceability_review(
                 )
             )
 
+    for index, claim in enumerate(ir.get("spec_claims", [])):
+        path = f"spec_claims[{index}]"
+        if not isinstance(claim, dict):
+            continue
+        source_id = claim.get("source_id")
+        line_start = claim.get("line_start")
+        line_end = claim.get("line_end")
+        quote = claim.get("quote")
+        if (
+            not isinstance(source_id, str)
+            or source_id not in lines_by_source
+            or not isinstance(line_start, int)
+            or not isinstance(line_end, int)
+            or not isinstance(quote, str)
+            or not quote.strip()
+        ):
+            continue
+        line_text = "\n".join(lines_by_source[source_id][line_start - 1 : line_end])
+        if quote.strip() not in line_text:
+            findings.append(
+                ReviewFinding(
+                    stage="traceability_review",
+                    severity="error",
+                    path=f"{path}.quote",
+                    message="quote does not appear in referenced source line range",
+                    blocking=True,
+                )
+            )
+
     for item_index, item in enumerate(ir.get("semantic_items", [])):
         if not isinstance(item, dict):
             continue
@@ -270,6 +323,175 @@ def traceability_review(
                     )
                 )
     return findings
+
+
+def completeness_review(
+    ir: dict[str, Any],
+    *,
+    expected_claims: list[dict[str, Any]] | None,
+    expected_claims_error: str = "",
+) -> dict[str, Any]:
+    findings: list[ReviewFinding] = []
+    if expected_claims is None:
+        findings.append(
+            ReviewFinding(
+                stage="completeness_review",
+                severity="error",
+                path="spec_paths",
+                message="cannot verify completeness without source spec paths",
+                blocking=True,
+            )
+        )
+        return {
+            "normative_claims": [],
+            "covered_claims": [],
+            "uncovered_claims": [],
+            "placeholder_only_claims": [],
+            "findings": findings,
+        }
+    if expected_claims_error:
+        findings.append(
+            ReviewFinding(
+                stage="completeness_review",
+                severity="error",
+                path="spec_paths",
+                message=f"could not extract expected spec claims: {expected_claims_error}",
+                blocking=True,
+            )
+        )
+
+    source_claims = [
+        claim
+        for claim in expected_claims
+        if isinstance(claim, dict) and claim.get("normative", True)
+    ]
+    expected_claim_ids = [
+        str(claim.get("id"))
+        for claim in source_claims
+        if isinstance(claim.get("id"), str)
+    ]
+    expected_by_key = {
+        claim_key(claim): str(claim.get("id"))
+        for claim in source_claims
+        if isinstance(claim.get("id"), str)
+    }
+    ir_claim_id_to_key = {
+        str(claim.get("id")): claim_key(claim)
+        for claim in ir.get("spec_claims", [])
+        if isinstance(claim, dict)
+        and isinstance(claim.get("id"), str)
+        and claim.get("normative", True)
+    }
+    covered_by_semantic = collect_expected_claim_coverage(
+        ir.get("semantic_items", []),
+        ir_claim_id_to_key=ir_claim_id_to_key,
+        expected_by_key=expected_by_key,
+    )
+    covered_by_questions = collect_expected_claim_coverage(
+        ir.get("open_questions", []),
+        ir_claim_id_to_key=ir_claim_id_to_key,
+        expected_by_key=expected_by_key,
+    )
+    covered_by_unsupported = collect_expected_claim_coverage(
+        ir.get("unsupported", []),
+        ir_claim_id_to_key=ir_claim_id_to_key,
+        expected_by_key=expected_by_key,
+    )
+    covered_claims = sorted(
+        set(expected_claim_ids).intersection(
+            covered_by_semantic | covered_by_questions | covered_by_unsupported
+        )
+    )
+    uncovered_claims: list[str] = []
+    placeholder_only_claims: list[str] = []
+    expected_claims_by_id = {
+        str(claim.get("id")): claim
+        for claim in source_claims
+        if isinstance(claim.get("id"), str)
+    }
+
+    for claim_id in expected_claim_ids:
+        has_semantic = claim_id in covered_by_semantic
+        has_placeholder = claim_id in covered_by_questions or claim_id in covered_by_unsupported
+        claim = expected_claims_by_id.get(claim_id, {})
+        path = source_claim_path(claim, fallback_id=claim_id)
+        if not has_semantic and not has_placeholder:
+            uncovered_claims.append(claim_id)
+            findings.append(
+                ReviewFinding(
+                    stage="completeness_review",
+                    severity="error",
+                    path=path,
+                    message=f"source-derived normative spec claim {claim_id!r} is not covered by semantic_items, open_questions, or unsupported",
+                    blocking=True,
+                )
+            )
+            continue
+        if not has_semantic and has_placeholder:
+            placeholder_only_claims.append(claim_id)
+            findings.append(
+                ReviewFinding(
+                    stage="completeness_review",
+                    severity="warning",
+                    path=path,
+                    message=f"source-derived normative spec claim {claim_id!r} is only covered by open_questions or unsupported",
+                    blocking=True,
+                )
+            )
+
+    return {
+        "normative_claims": expected_claim_ids,
+        "covered_claims": covered_claims,
+        "uncovered_claims": uncovered_claims,
+        "placeholder_only_claims": placeholder_only_claims,
+        "findings": findings,
+    }
+
+
+def claim_key(claim: dict[str, Any]) -> tuple[str, int, int, str]:
+    return (
+        str(claim.get("source_id") or ""),
+        safe_int(claim.get("line_start")),
+        safe_int(claim.get("line_end")),
+        str(claim.get("quote") or "").strip(),
+    )
+
+
+def safe_int(value: Any) -> int:
+    return value if isinstance(value, int) else 0
+
+
+def source_claim_path(claim: dict[str, Any], *, fallback_id: str) -> str:
+    source_id = claim.get("source_id")
+    line_start = claim.get("line_start")
+    line_end = claim.get("line_end")
+    if isinstance(source_id, str) and isinstance(line_start, int) and isinstance(line_end, int):
+        return f"source_claims[{source_id}:{line_start}-{line_end}]"
+    return f"source_claims[{fallback_id}]"
+
+
+def collect_expected_claim_coverage(
+    value: Any,
+    *,
+    ir_claim_id_to_key: dict[str, tuple[str, int, int, str]],
+    expected_by_key: dict[tuple[str, int, int, str], str],
+) -> set[str]:
+    covered: set[str] = set()
+    if not isinstance(value, list):
+        return covered
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        for claim_id in item.get("claim_ids", []):
+            if not isinstance(claim_id, str):
+                continue
+            key = ir_claim_id_to_key.get(claim_id)
+            if key is None:
+                continue
+            expected_claim_id = expected_by_key.get(key)
+            if expected_claim_id is not None:
+                covered.add(expected_claim_id)
+    return covered
 
 
 def semantic_consistency_review(
