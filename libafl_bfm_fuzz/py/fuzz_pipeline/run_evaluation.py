@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 from typing import Any, Callable, Protocol
 
-from connector_observe import ObservationContext
+from ConnectGraph import ObservationContext, flush_observer
 
 from .coverage_feedback import CoverageFeedbackResult
 from .harness_evidence.optimization import (
@@ -116,7 +116,7 @@ class RunEvaluationAdapter:
         observation_events = _resolved_artifact_path(
             artifacts.get("observation_events"),
         ) or self.paths.path_from_cwd(self.config.observation_out)
-        _flush_observer(self.observation_context)
+        flush_observer(self.observation_context.observer)
         if observation_events is None or not observation_events.exists():
             return
         outputs = HarnessTraceOutputs.from_evaluation_path(evaluation_path)
@@ -257,7 +257,7 @@ class CampaignEvaluationAdapter:
             artifacts.get("observation_events"),
             cwd=self.cwd,
         )
-        _flush_observer(self.observation_context)
+        flush_observer(self.observation_context.observer)
         if observation_events is None or not observation_events.exists():
             return
         outputs = HarnessTraceOutputs.from_evaluation_path(self.path)
@@ -303,16 +303,6 @@ class CampaignEvaluationAdapter:
 
 def _mapping(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
-
-
-def _flush_observer(observation_context: ObservationContext) -> None:
-    observer = observation_context.observer
-    if observer is None:
-        return
-    try:
-        observer.flush()
-    except Exception:
-        return
 
 
 def _resolved_artifact_path(

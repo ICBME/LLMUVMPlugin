@@ -2,7 +2,9 @@ from .connector import Connector, ObservationContext
 from .observation import (
     ObservationRuntime,
     close_observation,
+    flush_observer,
     connector_from_env,
+    observation_make_vars,
     observation_context_from_env,
 )
 from .observers import (
@@ -26,6 +28,9 @@ from .topology import (
     ConnectorEdge,
     PipelineTopology,
     merge_topologies,
+    topology_out_from_env,
+    validate_connector_endpoint,
+    write_topology_from_env,
     write_topology,
 )
 from .trace import (
@@ -63,12 +68,17 @@ __all__ = [
     "event_span_id",
     "event_status",
     "external_command_step",
+    "flush_observer",
     "merge_topologies",
     "connector_from_env",
     "observation_context_from_env",
+    "observation_make_vars",
     "observer_from_env",
     "read_json_object",
     "read_jsonl_events",
+    "topology_out_from_env",
+    "validate_connector_endpoint",
     "trace_quality",
+    "write_topology_from_env",
     "write_topology",
 ]

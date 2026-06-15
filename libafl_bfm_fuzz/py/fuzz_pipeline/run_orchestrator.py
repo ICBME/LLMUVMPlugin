@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 from typing import Any, Mapping, Sequence
 
-from connector_observe import ObservationContext
+from ConnectGraph import ObservationContext, observation_context_from_env
 from fuzz_bfm.corpus import load_cases
 from fuzz_bfm.target_config import load_target_config
 
@@ -17,7 +17,6 @@ from .coverage_feedback import (
     CoverageFeedbackResult,
     run_coverage_feedback_pipeline,
 )
-from .harness_evidence.collection import observation_context_from_env
 from .harness_evidence.runtime_actions import (
     COVERAGE_FEEDBACK_TUNING_CONFIG_ENV,
     RUNTIME_METRICS_OUT_ENV,

@@ -97,6 +97,56 @@ def close_observation() -> None:
             _context = None
 
 
+def flush_observer(observer: Observer | None) -> None:
+    if observer is None:
+        return
+    try:
+        observer.flush()
+    except Exception:
+        return
+
+
+def observation_make_vars(
+    *,
+    observation_out: Path | str | None = None,
+    monitoring_out: Path | str | None = None,
+    topology_out: Path | str | None = None,
+    observation_context: ObservationContext | None = None,
+    stage_id: str,
+    run_id: str | None = None,
+    round_id: str | None = None,
+    parent_event_id: str | None = None,
+) -> list[str]:
+    context = observation_context or observation_context_from_env()
+    values: list[str] = []
+    if observation_out is not None and str(observation_out).strip():
+        values.append(f"CONNECTOR_OBSERVE_OUT={observation_out}")
+    if monitoring_out is not None and str(monitoring_out).strip():
+        values.append(f"CONNECTOR_MONITOR_OUT={monitoring_out}")
+    if topology_out is not None and str(topology_out).strip():
+        values.append(f"CONNECTOR_TOPOLOGY_OUT={topology_out}")
+
+    resolved_run_id = run_id if run_id is not None else context.run_id
+    if resolved_run_id is not None:
+        values.append(f"CONNECTOR_OBSERVE_RUN_ID={resolved_run_id}")
+
+    resolved_round_id = round_id if round_id is not None else context.round_id
+    if resolved_round_id is not None:
+        values.append(f"CONNECTOR_OBSERVE_ROUND_ID={resolved_round_id}")
+
+    values.append(f"CONNECTOR_OBSERVE_STAGE_ID={stage_id}")
+
+    resolved_parent_event_id = (
+        parent_event_id if parent_event_id is not None else context.parent_event_id
+    )
+    if resolved_parent_event_id is not None:
+        values.append(
+            "CONNECTOR_OBSERVE_PARENT_EVENT_ID="
+            f"{resolved_parent_event_id}"
+        )
+    return values
+
+
 def connector_from_env(
     name: str,
     from_layer: str,
@@ -115,6 +165,8 @@ def connector_from_env(
 __all__ = [
     "ObservationRuntime",
     "close_observation",
+    "flush_observer",
     "connector_from_env",
+    "observation_make_vars",
     "observation_context_from_env",
 ]

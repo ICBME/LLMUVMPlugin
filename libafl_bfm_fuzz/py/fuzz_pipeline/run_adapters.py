@@ -7,7 +7,7 @@ import shutil
 import subprocess
 from typing import Callable, MutableMapping, Protocol
 
-from connector_observe import ObservationContext
+from ConnectGraph import ObservationContext, observation_make_vars
 
 
 class FuzzRunConfigView(Protocol):
@@ -335,36 +335,16 @@ class UvmReplayAdapter:
         return split_tool_command(self.config.make, "make")
 
     def observation_make_vars(self, *, stage_id: str) -> list[str]:
-        values: list[str] = []
-        if self.config.observation_out is not None:
-            values.append(
-                "CONNECTOR_OBSERVE_OUT="
-                f"{self.paths.path_from_cwd(self.config.observation_out)}"
-            )
-        if self.config.monitoring_out is not None:
-            values.append(
-                "CONNECTOR_MONITOR_OUT="
-                f"{self.paths.path_from_cwd(self.config.monitoring_out)}"
-            )
-        if self.config.topology_out is not None:
-            values.append(
-                "CONNECTOR_TOPOLOGY_OUT="
-                f"{self.paths.path_from_cwd(self.config.topology_out)}"
-            )
-        if self.observation_context.run_id is not None:
-            values.append(f"CONNECTOR_OBSERVE_RUN_ID={self.observation_context.run_id}")
-        round_id = self.round_id()
-        if round_id is not None:
-            values.append(f"CONNECTOR_OBSERVE_ROUND_ID={round_id}")
-        values.append(
-            f"CONNECTOR_OBSERVE_STAGE_ID={self.observation_context.stage_id or stage_id}"
+        return observation_make_vars(
+            observation_out=self.paths.path_from_cwd(self.config.observation_out),
+            monitoring_out=self.paths.path_from_cwd(self.config.monitoring_out),
+            topology_out=self.paths.path_from_cwd(self.config.topology_out),
+            observation_context=self.observation_context,
+            stage_id=self.observation_context.stage_id or stage_id,
+            run_id=self.observation_context.run_id,
+            round_id=self.round_id(),
+            parent_event_id=self.observation_context.parent_event_id,
         )
-        if self.observation_context.parent_event_id is not None:
-            values.append(
-                "CONNECTOR_OBSERVE_PARENT_EVENT_ID="
-                f"{self.observation_context.parent_event_id}"
-            )
-        return values
 
 
 @dataclass(frozen=True)

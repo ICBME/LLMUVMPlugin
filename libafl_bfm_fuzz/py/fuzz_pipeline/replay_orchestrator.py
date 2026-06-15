@@ -4,13 +4,13 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
-from connector_observe import ObservationContext
-from connector_observe.observers import NullObserver
+from ConnectGraph import ObservationContext, observation_context_from_env
+from ConnectGraph.observers import NullObserver
+from ConnectGraph.topology import topology_out_from_env
 from fuzz_bfm.target_config import TargetConfig
 
 from .harness_evidence.collection import (
     functional_coverage_metrics,
-    observation_context_from_env,
     path_sha256,
     replay_case_metadata,
     replay_context_metrics,
@@ -329,8 +329,3 @@ def replay_corpus_from_env(target: str | None = None) -> Path:
 def functional_coverage_output_from_env(config: TargetConfig) -> Path:
     default_path = Path("coverage") / f"{config.name}_uvm_functional_coverage.json"
     return Path(os.getenv("UVM_FUNCTIONAL_COVERAGE_OUT", str(default_path)))
-
-
-def topology_out_from_env() -> Path | None:
-    path = os.getenv("CONNECTOR_TOPOLOGY_OUT")
-    return Path(path) if path and path.strip() else None

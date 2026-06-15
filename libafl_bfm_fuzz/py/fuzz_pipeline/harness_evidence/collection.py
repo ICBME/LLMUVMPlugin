@@ -2,24 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 import subprocess
 from typing import Any, Sequence
 
-from ConnectGraph import Connector
-from ConnectGraph.observation import (
-    close_observation,
-    observation_context_from_env,
+from ConnectGraph import close_observation, observation_context_from_env
+from ConnectGraph.topology import (
+    topology_out_from_env,
+    validate_connector_endpoint,
+    write_topology_from_env,
 )
-from ConnectGraph.observers import Observer
-from ConnectGraph.topology import write_topology
 
 from ..orchestrator import PipelineContext, PipelineOrchestrator, external_command_step
-from ..topology import FULL_FUZZ_TOPOLOGY, PipelineTopology
+from ..topology import FULL_FUZZ_TOPOLOGY
 
 
-_topology_paths_written: set[str] = set()
 _PATH_SHA256_CACHE: dict[tuple[str, int, int], str] = {}
 _CASE_METADATA_KEYS = {
     "case_id",
@@ -34,14 +31,7 @@ _CASE_METADATA_KEYS = {
 
 
 def write_observation_topology(path: str | Path | None = None) -> None:
-    output_path = path or os.getenv("CONNECTOR_TOPOLOGY_OUT")
-    if output_path is None or not str(output_path).strip():
-        return
-    resolved = str(Path(output_path))
-    if resolved in _topology_paths_written:
-        return
-    write_topology(FULL_FUZZ_TOPOLOGY, Path(output_path))
-    _topology_paths_written.add(resolved)
+    write_topology_from_env(FULL_FUZZ_TOPOLOGY, path)
 
 
 def run_command(
@@ -55,11 +45,17 @@ def run_command(
     metadata: dict[str, Any] | None = None,
     cwd: str | Path | None = None,
 ) -> subprocess.CompletedProcess:
-    _validate_connector_endpoint(connector_name, from_layer, to_layer)
+    validate_connector_endpoint(
+        FULL_FUZZ_TOPOLOGY,
+        connector_name,
+        from_layer,
+        to_layer,
+    )
     input_artifacts = _artifact_mapping(inputs)
     output_artifacts = _artifact_mapping(outputs)
+    observation_context = observation_context_from_env()
     context = PipelineContext(
-        run_id=observation_context_from_env().run_id,
+        run_id=observation_context.run_id,
         artifacts={**input_artifacts, **output_artifacts},
         metadata=dict(metadata or {}),
     )
@@ -73,8 +69,8 @@ def run_command(
     )
     PipelineOrchestrator(
         FULL_FUZZ_TOPOLOGY,
-        observation_context_from_env(),
-        topology_out=_topology_out_from_env(),
+        observation_context,
+        topology_out=topology_out_from_env(),
     ).run([step], context)
     return context.values[connector_name]
 
@@ -97,24 +93,6 @@ def _artifact_mapping(value: Any) -> dict[str, Path]:
                 result[str(role)] = Path(item_path)
         return result
     return {}
-
-
-def _topology_out_from_env() -> Path | None:
-    path = os.getenv("CONNECTOR_TOPOLOGY_OUT")
-    return Path(path) if path and path.strip() else None
-
-
-def _validate_connector_endpoint(connector_name: str, from_layer: str, to_layer: str) -> None:
-    for edge in FULL_FUZZ_TOPOLOGY.connectors:
-        if edge.name != connector_name:
-            continue
-        if edge.from_layer != from_layer or edge.to_layer != to_layer:
-            raise ValueError(
-                f"connector {connector_name!r} endpoint mismatch: "
-                f"expected {edge.from_layer}->{edge.to_layer}, got {from_layer}->{to_layer}"
-            )
-        return
-    raise ValueError(f"unknown connector: {connector_name}")
 
 
 def replay_context_metrics(context: Any) -> dict[str, Any]:
@@ -228,4 +206,3 @@ def functional_coverage_metrics(summary: dict[str, Any]) -> dict[str, Any]:
 
 def _reset_observation_context_for_tests() -> None:
     close_observation()
-    _topology_paths_written.clear()

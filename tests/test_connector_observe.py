@@ -18,7 +18,9 @@ from connector_observe import (  # noqa: E402
     ObservationContext,
     observer_from_env,
 )
+from ConnectGraph import observation_make_vars  # noqa: E402
 from connector_observe.schema import normalize_artifact_refs  # noqa: E402
+from ConnectGraph.topology import write_topology_from_env  # noqa: E402
 from fuzz_bfm.bfm_base import ReplayResult  # noqa: E402
 from fuzz_bfm.corpus import FuzzCase  # noqa: E402
 from fuzz_bfm.target_config import TargetConfig  # noqa: E402
@@ -529,6 +531,45 @@ class TestConnectorObserve(unittest.TestCase):
                 os.environ["CONNECTOR_OBSERVE_OUT"] = old_out
 
         self.assertEqual(type(observer).__name__, "NullObserver")
+
+    def test_observation_make_vars_reads_environment_by_default(self):
+        old_env = {
+            name: os.environ.get(name)
+            for name in (
+                "CONNECTOR_OBSERVE_RUN_ID",
+                "CONNECTOR_OBSERVE_ROUND_ID",
+                "CONNECTOR_OBSERVE_STAGE_ID",
+                "CONNECTOR_OBSERVE_PARENT_EVENT_ID",
+            )
+        }
+        os.environ["CONNECTOR_OBSERVE_RUN_ID"] = "run-1"
+        os.environ["CONNECTOR_OBSERVE_ROUND_ID"] = "round-1"
+        os.environ["CONNECTOR_OBSERVE_PARENT_EVENT_ID"] = "parent-1"
+        _reset_observation_context_for_tests()
+        try:
+            values = observation_make_vars(stage_id="stage-1")
+        finally:
+            _reset_observation_context_for_tests()
+            for name, value in old_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+        self.assertIn("CONNECTOR_OBSERVE_RUN_ID=run-1", values)
+        self.assertIn("CONNECTOR_OBSERVE_ROUND_ID=round-1", values)
+        self.assertIn("CONNECTOR_OBSERVE_STAGE_ID=stage-1", values)
+        self.assertIn("CONNECTOR_OBSERVE_PARENT_EVENT_ID=parent-1", values)
+
+    def test_write_topology_from_env_ignores_empty_path(self):
+        topology = PipelineTopology(
+            name="demo_pipeline",
+            components=(ComponentNode("a", "source"),),
+            connectors=(),
+        )
+
+        self.assertIsNone(write_topology_from_env(topology, ""))
+        self.assertIsNone(write_topology_from_env(topology, "   "))
 
     def test_monitoring_observer_aggregates_connector_health(self):
         with tempfile.TemporaryDirectory() as tmp:

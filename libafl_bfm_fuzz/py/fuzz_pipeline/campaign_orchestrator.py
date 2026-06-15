@@ -6,9 +6,8 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from connector_observe import ObservationContext
+from ConnectGraph import ObservationContext, observation_context_from_env
 
-from .harness_evidence.collection import observation_context_from_env
 from .harness_evidence.optimization import (
     HarnessOptimizationAdapter,
     HarnessOptimizationPaths,
