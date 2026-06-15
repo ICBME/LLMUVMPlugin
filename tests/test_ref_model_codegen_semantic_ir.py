@@ -47,7 +47,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 spec_paths=[spec],
             )
 
-            self.assertEqual(semantic_ir["schema_version"], 4)
+            self.assertEqual(semantic_ir["schema_version"], 5)
             self.assertEqual(semantic_ir["target"], "demo_sha")
             self.assertEqual(semantic_ir["sources"][0]["content_hash"], hashlib.sha256(spec.read_bytes()).hexdigest())
             self.assertEqual([claim["id"] for claim in semantic_ir["spec_claims"]], ["claim1"])
@@ -60,7 +60,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(semantic_ir["semantic_elements"][0]["kind"], "combinational_behavior")
             self.assertEqual(semantic_ir["semantic_elements"][0]["formalization_status"], "candidate")
             representation = semantic_ir["semantic_elements"][0]["representation"]
-            self.assertEqual(representation["ast_version"], 1)
+            self.assertEqual(representation["ast_version"], 2)
             self.assertEqual(representation["kind"], "combinational_relation")
             self.assertEqual(representation["ast"]["node"], "operation_relation")
             self.assertEqual(semantic_ir["review"]["status"], "draft")
@@ -128,6 +128,191 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(review["status"], "needs_human_input")
             self.assertEqual(review["completeness"]["placeholder_only_claims"], ["claim1"])
             self.assertFalse(review["completeness"]["covered_claims"])
+
+    def test_temporal_latency_claim_uses_typed_ast_but_requires_clock_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The done signal must pulse exactly one cycle after digest completion.\n")
+
+            semantic_ir = generate_semantic_spec_ir(
+                manifest_path=manifest,
+                spec_paths=[spec],
+            )
+            element = semantic_ir["semantic_elements"][0]
+            representation = element["representation"]
+
+            self.assertEqual(element["kind"], "temporal_behavior")
+            self.assertEqual(element["formalization_status"], "needs_human_review")
+            self.assertEqual(representation["kind"], "temporal_rule")
+            self.assertEqual(representation["ast"]["property"]["node"], "latency_rule")
+            self.assertEqual(representation["ast"]["property"]["delay"], {"node": "delay_range", "min": 1, "max": 1})
+            validate_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["status"], "needs_human_input")
+            self.assertEqual(review["completeness"]["placeholder_only_claims"], ["claim1"])
+
+    def test_temporal_latency_ast_with_clock_context_is_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The done signal must pulse exactly one cycle after digest completion.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            element = semantic_ir["semantic_elements"][0]
+            element["formalization_status"] = "candidate"
+            element["representation"] = {
+                "ast_version": 2,
+                "kind": "temporal_rule",
+                "text": element["summary"],
+                "ast": {
+                    "node": "temporal_rule",
+                    "context": {
+                        "node": "clock_reset_context",
+                        "clock": {
+                            "node": "clock_event",
+                            "edge": "posedge",
+                            "signal": {"node": "signal_ref", "name": "clk"},
+                        },
+                    },
+                    "property": {
+                        "node": "latency_rule",
+                        "trigger": {
+                            "node": "rose",
+                            "signal": {"node": "signal_ref", "name": "digest_complete"},
+                        },
+                        "response": {
+                            "node": "rose",
+                            "signal": {"node": "signal_ref", "name": "done"},
+                        },
+                        "delay": {"node": "delay_range", "min": 1, "max": 1},
+                    },
+                },
+            }
+
+            validate_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["status"], "passed")
+            self.assertEqual(review["completeness"]["covered_claims"], ["claim1"])
+
+    def test_temporal_latency_text_trigger_still_requires_human_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The done signal must pulse exactly one cycle after digest completion.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            element = semantic_ir["semantic_elements"][0]
+            element["formalization_status"] = "candidate"
+            element["representation"]["ast"]["context"] = {
+                "node": "clock_reset_context",
+                "clock": {
+                    "node": "clock_event",
+                    "edge": "posedge",
+                    "signal": {"node": "signal_ref", "name": "clk"},
+                },
+            }
+
+            issues = collect_semantic_spec_ir_issues(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertTrue(any("placeholder" in issue.message for issue in issues))
+            self.assertEqual(review["status"], "failed")
+
+    def test_protocol_handshake_ast_checks_valid_ready_refs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The bus uses a valid ready handshake.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            element = semantic_ir["semantic_elements"][0]
+            representation = semantic_ir["semantic_elements"][0]["representation"]
+
+            self.assertEqual(element["formalization_status"], "needs_human_review")
+            self.assertEqual(representation["kind"], "protocol_rule")
+            self.assertEqual(representation["ast"]["property"]["node"], "handshake_rule")
+            validate_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+            self.assertEqual(review["status"], "needs_human_input")
+            self.assertEqual(review["completeness"]["placeholder_only_claims"], ["claim1"])
+
+            semantic_ir["semantic_elements"][0]["representation"]["ast"]["property"]["ready"]["name"] = "valid"
+            issues = collect_semantic_spec_ir_issues(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertTrue(any("valid and ready" in issue.message for issue in issues))
+
+    def test_protocol_rule_requires_property(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The bus uses a valid ready handshake.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["semantic_elements"][0]["representation"]["ast"].pop("property")
+
+            issues = collect_semantic_spec_ir_issues(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertTrue(any(issue.path.endswith(".property") and "required" in issue.message for issue in issues))
 
     def test_semantic_spec_ir_validation_reports_bad_evidence_quote(self):
         with tempfile.TemporaryDirectory() as tmp:

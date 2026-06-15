@@ -1,4 +1,4 @@
-"""Strict validator for RepresentationAST v1."""
+"""Strict validator for RepresentationAST v2."""
 
 from __future__ import annotations
 
@@ -11,6 +11,9 @@ from .representation_ast import (
     ALLOWED_COMPARE_OPS,
     ALLOWED_REDUCE_OPS,
     ALLOWED_REPRESENTATION_KINDS,
+    ALLOWED_RESET_POLARITIES,
+    ALLOWED_RESET_SYNCHRONIES,
+    ALLOWED_SIGNAL_BINDING_ROLES,
     ALLOWED_UNARY_OPS,
     NODE_ALLOWED_KEYS,
     REPRESENTATION_AST_VERSION,
@@ -137,6 +140,49 @@ def validate_optional_node(
         validate_ast_node(value[key], f"{path}.{key}", manifest_fields, issues)
 
 
+def validate_required_node_kind(
+    value: dict[str, Any],
+    key: str,
+    path: str,
+    manifest_fields: set[str],
+    issues: list[SemanticSpecIRIssue],
+    allowed_nodes: set[str],
+) -> None:
+    if key not in value:
+        issues.append(SemanticSpecIRIssue(f"{path}.{key}", "is required"))
+        return
+    validate_node_kind(value[key], f"{path}.{key}", manifest_fields, issues, allowed_nodes)
+
+
+def validate_optional_node_kind(
+    value: dict[str, Any],
+    key: str,
+    path: str,
+    manifest_fields: set[str],
+    issues: list[SemanticSpecIRIssue],
+    allowed_nodes: set[str],
+) -> None:
+    if key in value:
+        validate_node_kind(value[key], f"{path}.{key}", manifest_fields, issues, allowed_nodes)
+
+
+def validate_node_kind(
+    value: Any,
+    path: str,
+    manifest_fields: set[str],
+    issues: list[SemanticSpecIRIssue],
+    allowed_nodes: set[str],
+) -> None:
+    validate_ast_node(value, path, manifest_fields, issues)
+    if isinstance(value, dict) and value.get("node") not in allowed_nodes:
+        issues.append(
+            SemanticSpecIRIssue(
+                f"{path}.node",
+                f"must be one of {sorted(allowed_nodes)}",
+            )
+        )
+
+
 def validate_node_list(
     value: Any,
     path: str,
@@ -152,6 +198,14 @@ def validate_node_list(
         return
     for index, item in enumerate(value):
         validate_ast_node(item, f"{path}[{index}]", manifest_fields, issues)
+
+
+def validate_ref_node_list(value: Any, path: str, manifest_fields: set[str], issues: list[SemanticSpecIRIssue]) -> None:
+    if not isinstance(value, list):
+        issues.append(SemanticSpecIRIssue(path, "must be a list"))
+        return
+    for index, item in enumerate(value):
+        validate_ref_node(item, f"{path}[{index}]", manifest_fields, issues)
 
 
 def validate_string(value: dict[str, Any], key: str, path: str, issues: list[SemanticSpecIRIssue]) -> None:
@@ -342,29 +396,34 @@ def validate_fsm(value: dict[str, Any], path: str, manifest_fields: set[str], is
     validate_optional_node(value, "reset", path, manifest_fields, issues)
     validate_node_list(value.get("transitions", []), f"{path}.transitions", manifest_fields, issues)
     validate_node_list(value.get("outputs", []), f"{path}.outputs", manifest_fields, issues)
+    validate_optional_node_kind(value, "context", path, manifest_fields, issues, {"clock_reset_context"})
 
 
 def validate_reset_rule(value: dict[str, Any], path: str, manifest_fields: set[str], issues: list[SemanticSpecIRIssue]) -> None:
     validate_optional_node(value, "condition", path, manifest_fields, issues)
     validate_node_list(value.get("effects"), f"{path}.effects", manifest_fields, issues)
     validate_optional_node(value, "state", path, manifest_fields, issues)
+    validate_optional_node_kind(value, "context", path, manifest_fields, issues, {"clock_reset_context"})
 
 
 def validate_sequential_update(value: dict[str, Any], path: str, manifest_fields: set[str], issues: list[SemanticSpecIRIssue]) -> None:
     validate_optional_node(value, "event", path, manifest_fields, issues)
     validate_node_list(value.get("updates"), f"{path}.updates", manifest_fields, issues)
+    validate_optional_node_kind(value, "context", path, manifest_fields, issues, {"clock_reset_context"})
 
 
 def validate_temporal_rule(value: dict[str, Any], path: str, manifest_fields: set[str], issues: list[SemanticSpecIRIssue]) -> None:
-    validate_optional_node(value, "clock", path, manifest_fields, issues)
-    validate_optional_node(value, "disable", path, manifest_fields, issues)
+    validate_optional_node_kind(value, "clock", path, manifest_fields, issues, {"clock_event"})
+    validate_optional_node_kind(value, "context", path, manifest_fields, issues, {"clock_reset_context"})
+    validate_optional_node_kind(value, "disable", path, manifest_fields, issues, {"reset_disable"})
     validate_required_node(value, "property", path, manifest_fields, issues)
 
 
 def validate_protocol_rule(value: dict[str, Any], path: str, manifest_fields: set[str], issues: list[SemanticSpecIRIssue]) -> None:
     validate_string(value, "text", path, issues)
     validate_string_list(value.get("participants", []), f"{path}.participants", issues)
-    validate_optional_node(value, "property", path, manifest_fields, issues)
+    validate_optional_node_kind(value, "context", path, manifest_fields, issues, {"clock_reset_context"})
+    validate_required_node(value, "property", path, manifest_fields, issues)
 
 
 def validate_constraint(value: dict[str, Any], path: str, manifest_fields: set[str], issues: list[SemanticSpecIRIssue]) -> None:
@@ -395,6 +454,30 @@ def validate_clock_event(value: dict[str, Any], path: str, manifest_fields: set[
         issues.append(SemanticSpecIRIssue(f"{path}.signal", "is required"))
     else:
         validate_ref_node(value["signal"], f"{path}.signal", manifest_fields, issues)
+
+
+def validate_clock_reset_context(value: dict[str, Any], path: str, manifest_fields: set[str], issues: list[SemanticSpecIRIssue]) -> None:
+    if "clock" not in value and "reset" not in value:
+        issues.append(SemanticSpecIRIssue(path, "must include at least clock or reset"))
+    validate_optional_node_kind(value, "clock", path, manifest_fields, issues, {"clock_event"})
+    if "reset" in value:
+        validate_ref_node(value["reset"], f"{path}.reset", manifest_fields, issues)
+    if "reset_polarity" in value and value["reset_polarity"] not in ALLOWED_RESET_POLARITIES:
+        issues.append(
+            SemanticSpecIRIssue(
+                f"{path}.reset_polarity",
+                f"must be one of {sorted(ALLOWED_RESET_POLARITIES)}",
+            )
+        )
+    if "reset_synchrony" in value and value["reset_synchrony"] not in ALLOWED_RESET_SYNCHRONIES:
+        issues.append(
+            SemanticSpecIRIssue(
+                f"{path}.reset_synchrony",
+                f"must be one of {sorted(ALLOWED_RESET_SYNCHRONIES)}",
+            )
+        )
+    if "reset" not in value and ("reset_polarity" in value or "reset_synchrony" in value):
+        issues.append(SemanticSpecIRIssue(f"{path}.reset", "is required when reset polarity or synchrony is provided"))
 
 
 def validate_signal_property(value: dict[str, Any], path: str, manifest_fields: set[str], issues: list[SemanticSpecIRIssue]) -> None:
@@ -428,6 +511,56 @@ def validate_delay_range(value: dict[str, Any], path: str, _manifest_fields: set
         issues.append(SemanticSpecIRIssue(f"{path}.max", "must be >= min"))
 
 
+def validate_latency_rule(value: dict[str, Any], path: str, manifest_fields: set[str], issues: list[SemanticSpecIRIssue]) -> None:
+    validate_required_node(value, "trigger", path, manifest_fields, issues)
+    validate_required_node(value, "response", path, manifest_fields, issues)
+    validate_required_node_kind(value, "delay", path, manifest_fields, issues, {"delay_range"})
+
+
+def validate_handshake_rule(value: dict[str, Any], path: str, manifest_fields: set[str], issues: list[SemanticSpecIRIssue]) -> None:
+    validate_required_ref_node(value, "valid", path, manifest_fields, issues)
+    validate_required_ref_node(value, "ready", path, manifest_fields, issues)
+    valid_name = ref_node_name(value.get("valid"))
+    ready_name = ref_node_name(value.get("ready"))
+    if valid_name and ready_name and valid_name == ready_name:
+        issues.append(SemanticSpecIRIssue(f"{path}.ready", "valid and ready must reference different signals"))
+    if "payload" in value:
+        validate_ref_node_list(value["payload"], f"{path}.payload", manifest_fields, issues)
+    validate_optional_node(value, "transfer", path, manifest_fields, issues)
+    validate_optional_node_kind(value, "latency", path, manifest_fields, issues, {"delay_range"})
+
+
+def validate_required_ref_node(
+    value: dict[str, Any],
+    key: str,
+    path: str,
+    manifest_fields: set[str],
+    issues: list[SemanticSpecIRIssue],
+) -> None:
+    if key not in value:
+        issues.append(SemanticSpecIRIssue(f"{path}.{key}", "is required"))
+        return
+    validate_ref_node(value[key], f"{path}.{key}", manifest_fields, issues)
+
+
+def ref_node_name(value: Any) -> str | None:
+    if isinstance(value, dict) and value.get("node") in {"field_ref", "signal_ref"} and isinstance(value.get("name"), str):
+        return value["name"]
+    return None
+
+
+def validate_signal_binding(value: dict[str, Any], path: str, manifest_fields: set[str], issues: list[SemanticSpecIRIssue]) -> None:
+    validate_string(value, "subject", path, issues)
+    validate_required_ref_node(value, "signal", path, manifest_fields, issues)
+    if "role" in value and value["role"] not in ALLOWED_SIGNAL_BINDING_ROLES:
+        issues.append(
+            SemanticSpecIRIssue(
+                f"{path}.role",
+                f"must be one of {sorted(ALLOWED_SIGNAL_BINDING_ROLES)}",
+            )
+        )
+
+
 def validate_throughout(value: dict[str, Any], path: str, manifest_fields: set[str], issues: list[SemanticSpecIRIssue]) -> None:
     validate_required_node(value, "expr", path, manifest_fields, issues)
     validate_required_node(value, "sequence", path, manifest_fields, issues)
@@ -444,6 +577,7 @@ NODE_VALIDATORS = {
     "call": validate_call,
     "cast": validate_cast,
     "clock_event": validate_clock_event,
+    "clock_reset_context": validate_clock_reset_context,
     "compare": validate_compare,
     "concat": validate_concat,
     "conditional_assignment": validate_conditional_assignment,
@@ -454,9 +588,11 @@ NODE_VALIDATORS = {
     "fell": validate_signal_property,
     "field_ref": validate_field_ref,
     "fsm": validate_fsm,
+    "handshake_rule": validate_handshake_rule,
     "implication": validate_implication,
     "interface_decl": validate_interface_decl,
     "literal": validate_literal,
+    "latency_rule": validate_latency_rule,
     "mux": validate_mux,
     "operation_relation": validate_operation_relation,
     "past": validate_signal_property,
@@ -467,6 +603,7 @@ NODE_VALIDATORS = {
     "rose": validate_signal_property,
     "sequence": validate_sequence,
     "sequential_update": validate_sequential_update,
+    "signal_binding": validate_signal_binding,
     "signal_ref": validate_named_ref,
     "slice": validate_slice,
     "stable": validate_signal_property,

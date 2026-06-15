@@ -11,7 +11,7 @@ import re
 from typing import Any, Callable, Iterable
 
 
-SEMANTIC_SPEC_IR_SCHEMA_VERSION = 4
+SEMANTIC_SPEC_IR_SCHEMA_VERSION = 5
 
 TRACEABLE_SOURCE_KIND = "natural_language_spec"
 ALLOWED_REVIEW_STATUSES = {

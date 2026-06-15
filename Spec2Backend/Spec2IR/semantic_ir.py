@@ -35,7 +35,7 @@ from .claim_extraction import (
     semantic_elements_from_claims,
     semantic_gaps_for_uncovered_claims,
 )
-from .representation_ast import representation_ast_contract
+from .representation_ast import REPRESENTATION_AST_VERSION, representation_ast_contract
 from .schema import (
     ALLOWED_CLAIM_KINDS,
     ALLOWED_CLAIM_STRENGTHS,
@@ -246,9 +246,10 @@ def build_semantic_spec_ir_prompt(
             "Every semantic element must cite at least one evidence id from the original spec text.",
             "Evidence must include source_id, line_start, line_end, and a short quote copied from those lines.",
             "Represent spec semantics independent of backend support; do not decide whether refmodel, SVA, or OracleIR can lower it.",
-            "Use strict RepresentationAST v1 in semantic_elements[].representation; text is only review aid, ast is the semantic source of truth.",
+            "Use strict RepresentationAST v2 in semantic_elements[].representation; text is only review aid, ast is the semantic source of truth.",
             "RepresentationAST must include ast_version, kind, text, and ast; do not use legacy free-form type/fields representation.",
-            "If representation.ast is semantic_claim or contains placeholder targets/conditions, formalization_status must be needs_human_review, incomplete, ambiguous, or conflict.",
+            "Prefer typed clock_reset_context, latency_rule, handshake_rule, and signal_binding nodes over text_expr for temporal and protocol semantics.",
+            "If representation.ast is semantic_claim, text_expr-only temporal/protocol/constraint roots, latency endpoints with text_expr, handshake rules without clock context, or contains placeholder targets/conditions, formalization_status must be needs_human_review, incomplete, ambiguous, or conflict.",
             "Use open_questions for missing, ambiguous, or conflicting semantics.",
             "Use semantic_gaps for source claims that are not yet formalized, ambiguous, incomplete, or conflicting.",
             "Do not generate Python code, OracleIR, or plugin artifacts in this stage.",
@@ -396,11 +397,11 @@ def semantic_spec_ir_contract() -> dict[str, Any]:
             "confidence": "0.0 to 1.0",
             "subjects": ["manifest fields, outputs, registers, or protocol entities"],
             "representation": {
-                "ast_version": 1,
+                "ast_version": REPRESENTATION_AST_VERSION,
                 "kind": "strict RepresentationAST kind",
                 "text": "human-readable review aid; not the semantic source of truth",
                 "ast": "strict RepresentationAST node object",
-                "placeholder_rule": "semantic_claim or placeholder targets/conditions require a blocking formalization_status",
+                "placeholder_rule": "semantic_claim, text_expr-only temporal/protocol/constraint roots, latency endpoints with text_expr, missing temporal/protocol clock context, or placeholder targets/conditions require a blocking formalization_status",
             },
             "evidence": ["ev1"],
             "claim_ids": ["claim1"],

@@ -126,13 +126,13 @@ rtlagent_bfm/codegen/cli.py
 - `langgraph` 当前是单节点 wrapper，后续可以扩展为 retry、repair、review routing 或
   human handoff graph，而不改变 Spec2IR 调用接口。
 
-## SemanticSpecIR v4 数据模型
+## SemanticSpecIR v5 数据模型
 
 顶层对象必须是 JSON object，并包含以下关键字段。
 
 ### `schema_version`
 
-当前固定为 `4`。schema 升级时必须同时更新 validator、prompt contract、tests 和本文档。
+当前固定为 `5`。schema 升级时必须同时更新 validator、prompt contract、tests 和本文档。
 
 ### `target`
 
@@ -266,9 +266,9 @@ needs_human_review
 ### `representation`
 
 `representation` 是 `semantic_elements` 的结构化语义主体。当前实现使用严格
-`RepresentationAST v1`，validator 要求它包含：
+`RepresentationAST v2`，validator 要求它包含：
 
-- `ast_version`: 当前固定为 `1`。
+- `ast_version`: 当前固定为 `2`。
 - `kind`: 受控 representation kind。
 - `text`: 非空字符串，只作为 human review aid。
 - `ast`: 严格 AST node object，是语义真实性来源。
@@ -304,6 +304,10 @@ temporal_rule
 protocol_rule
 constraint
 semantic_claim
+clock_reset_context
+latency_rule
+handshake_rule
+signal_binding
 field_ref
 signal_ref
 state_ref
@@ -326,6 +330,13 @@ validator 会检查：
 - 每类 node 只能包含该 node schema 允许的字段。
 - `semantic_claim` 和含有占位信号/条件的 AST 只能配合 blocking `formalization_status` 使用，
   不能被当作完整形式化。
+- `temporal_rule` 如果使用 typed latency/delay 语义，必须提供 `clock` 或
+  `clock_reset_context.clock` 才能算完整形式化。
+- `clock_reset_context` 必须至少包含 clock 或 reset；reset polarity/synchrony 使用受控枚举。
+- `handshake_rule` 的 valid 和 ready 必须是 ref node，且不能引用同一个信号。
+- `protocol_rule.property` 是必填项；`handshake_rule` 必须通过 `protocol_rule.context.clock`
+  给出采样 clock 才能算完整形式化。
+- `latency_rule.trigger` / `response` 不能停留在 `text_expr`，否则只能作为 placeholder coverage。
 - `field_ref.name` 如果 manifest 已提供，必须是已知 manifest field。
 - `signal_ref`、`state_ref` 等 spec/RTL 实体必须有非空名称，但不强制绑定 manifest。
 
@@ -333,7 +344,7 @@ validator 会检查：
 
 ```json
 {
-  "ast_version": 1,
+  "ast_version": 2,
   "kind": "combinational_relation",
   "text": "When in=0, out=1.",
   "ast": {
@@ -355,6 +366,34 @@ validator 会检查：
 `semantic_gaps`，不能退回旧式自由文本结构。
 `semantic_claim` 只保留原文语义和溯源，不代表已完成机器可检查的形式化；review 会把它计入
 placeholder coverage，并进入 human-in-loop。
+`text_expr` 仍可作为 leaf expression 或审查辅助，但 text-only 的 `temporal_rule`、
+`protocol_rule`、`constraint` root，以及 latency endpoint 中的 `text_expr` 不算完整形式化，
+必须进入 human-in-loop 或继续 repair 成 typed AST。
+
+### RepresentationAST v2 扩展方向
+
+v2 在 v1 的组合逻辑、FSM、temporal/protocol 容器之上，优先补齐后续 refmodel/SVA 所需的
+时序上下文和协议语义：
+
+- `clock_reset_context`: 表达 clock edge、reset signal、reset polarity 和 sync/async 属性。
+- `latency_rule`: 表达 trigger、response 和 delay range，支撑 SVA 的 `|-> ##[m:n]` 类属性。
+- `handshake_rule`: 表达 valid/ready transfer、payload 和可选 latency。
+- `signal_binding`: 表达 spec subject 到 manifest field 或 RTL signal 的绑定，为后续 DesignIR
+  一致性检查留接口。
+- `context` 字段可挂在 `temporal_rule`、`protocol_rule`、`sequential_update`、`reset_rule` 和
+  `fsm` 上，避免 clock/reset 信息散落在自然语言 `text_expr` 中。
+
+### AST 检查策略
+
+AST 检查分三层：
+
+- 结构检查：`ast_version`、allowed node、allowed keys、required fields、root node 与
+  `representation.kind` 对齐。
+- 类型检查：ref node、clock event、delay range、valid/ready、reset polarity/synchrony 等使用
+  受控 schema 和枚举。
+- 完整性检查：`semantic_claim`、text-only temporal/protocol/constraint root、latency endpoint
+  中的 `text_expr`、缺少 clock context 的 temporal/protocol rule，以及占位 target/condition
+  只能使用 blocking `formalization_status`。
 
 ### `open_questions`
 
@@ -630,7 +669,7 @@ tests/test_ref_model_codegen_semantic_ir.py
 - source quote/hash traceability。
 - completeness review 重新从 source spec 抽取 claims。
 - blocking formalization status 进入 `needs_human_input`。
-- `representation` 必须是 strict `RepresentationAST v1`。
+- `representation` 必须是 strict `RepresentationAST v2`。
 - legacy `representation.type` / `representation.fields[]` 会被拒绝。
 - `field_ref` AST 节点必须引用 manifest fields。
 - repair loop 成功、backend error 和无 LLM 情况。
@@ -654,7 +693,7 @@ git diff --check
 任意 spec 的所有语义”。主要限制：
 
 - rule-based extractor 只能生成保守 draft，真正的语义抽取依赖 LLM 或人工补全。
-- `RepresentationAST v1` 已经强制 node kind、root node、allowed keys 和 field_ref 引用，
+- `RepresentationAST v2` 已经强制 node kind、root node、allowed keys 和 field_ref 引用，
   但表达范围仍是第一版，复杂协议/波形/寄存器表还需要继续扩展 node schema。
 - claim extraction 对 Markdown prose 有基本支持，但尚未覆盖表格、时序图、波形图、伪代码、
   register map、协议时序表等复杂 source 格式。

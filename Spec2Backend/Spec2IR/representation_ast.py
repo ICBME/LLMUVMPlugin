@@ -1,4 +1,4 @@
-"""RepresentationAST v1 contract, construction, and traversal helpers."""
+"""RepresentationAST v2 contract, construction, and traversal helpers."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import re
 from typing import Any, Iterable
 
 
-REPRESENTATION_AST_VERSION = 1
+REPRESENTATION_AST_VERSION = 2
 
 ALLOWED_REPRESENTATION_KINDS = {
     "combinational_relation",
@@ -27,6 +27,7 @@ ALLOWED_AST_NODES = {
     "call",
     "cast",
     "clock_event",
+    "clock_reset_context",
     "compare",
     "concat",
     "conditional_assignment",
@@ -40,16 +41,19 @@ ALLOWED_AST_NODES = {
     "implication",
     "interface_decl",
     "literal",
+    "latency_rule",
     "mux",
     "operation_relation",
     "past",
     "protocol_rule",
+    "handshake_rule",
     "reduce",
     "reset_disable",
     "reset_rule",
     "rose",
     "sequence",
     "sequential_update",
+    "signal_binding",
     "signal_ref",
     "slice",
     "stable",
@@ -97,27 +101,31 @@ NODE_ALLOWED_KEYS = {
     "example_trace": {"node", "steps"},
     "fell": {"node", "signal"},
     "field_ref": {"node", "name"},
-    "fsm": {"node", "state_signal", "states", "initial_state", "reset", "transitions", "outputs"},
+    "clock_reset_context": {"node", "clock", "reset", "reset_polarity", "reset_synchrony"},
+    "fsm": {"node", "state_signal", "states", "initial_state", "reset", "transitions", "outputs", "context"},
+    "handshake_rule": {"node", "valid", "ready", "payload", "transfer", "latency"},
     "implication": {"node", "antecedent", "consequent", "delay"},
     "interface_decl": {"node", "direction", "name", "width", "signed"},
     "literal": {"node", "value", "width", "base"},
+    "latency_rule": {"node", "trigger", "response", "delay"},
     "mux": {"node", "condition", "when_true", "when_false"},
     "operation_relation": {"node", "operation", "operands", "result", "text"},
     "past": {"node", "signal", "cycles"},
-    "protocol_rule": {"node", "text", "participants", "property"},
+    "protocol_rule": {"node", "text", "participants", "property", "context"},
     "reduce": {"node", "op", "operand"},
     "reset_disable": {"node", "condition"},
-    "reset_rule": {"node", "condition", "effects", "state"},
+    "reset_rule": {"node", "condition", "effects", "state", "context"},
     "rose": {"node", "signal"},
     "sequence": {"node", "items"},
-    "sequential_update": {"node", "event", "updates"},
+    "sequential_update": {"node", "event", "updates", "context"},
+    "signal_binding": {"node", "subject", "signal", "role"},
     "signal_ref": {"node", "name"},
     "slice": {"node", "value", "msb", "lsb"},
     "stable": {"node", "signal"},
     "state_ref": {"node", "name"},
     "state_transition": {"node", "from", "to", "condition", "outputs"},
     "semantic_claim": {"node", "claim_id", "claim_kind", "text", "subjects"},
-    "temporal_rule": {"node", "clock", "disable", "property"},
+    "temporal_rule": {"node", "clock", "disable", "property", "context"},
     "text_expr": {"node", "text"},
     "throughout": {"node", "expr", "sequence"},
     "unary_op": {"node", "op", "operand"},
@@ -145,11 +153,28 @@ ALLOWED_BINARY_OPS = {
 ALLOWED_COMPARE_OPS = {"eq", "ge", "gt", "le", "lt", "matches", "ne"}
 ALLOWED_REDUCE_OPS = {"and", "nand", "nor", "or", "xnor", "xor"}
 ALLOWED_CLOCK_EDGES = {"any", "negedge", "posedge"}
+ALLOWED_RESET_POLARITIES = {"active_high", "active_low", "unknown"}
+ALLOWED_RESET_SYNCHRONIES = {"async", "sync", "unknown"}
+ALLOWED_SIGNAL_BINDING_ROLES = {
+    "clock",
+    "control",
+    "input",
+    "internal",
+    "output",
+    "payload",
+    "ready",
+    "reset",
+    "state",
+    "unknown",
+    "valid",
+}
 PLACEHOLDER_SIGNAL_NAMES = {"unspecified_target"}
 PLACEHOLDER_TEXT_EXPR_VALUES = {
     "implicit clock/event from spec",
+    "reset asserted",
     "reset condition from spec",
 }
+STRUCTURED_TEXT_FALLBACK_ROOTS = {"constraint", "protocol_rule", "temporal_rule"}
 
 
 def representation_ast_contract() -> dict[str, Any]:
@@ -178,11 +203,32 @@ def representation_ast_contract() -> dict[str, Any]:
                 "states": ["state names"],
                 "transitions": ["state_transition nodes"],
             },
+            "clock_reset_context": {
+                "node": "clock_reset_context",
+                "clock": "clock_event node",
+                "reset": "optional field_ref or signal_ref node",
+                "reset_polarity": sorted(ALLOWED_RESET_POLARITIES),
+                "reset_synchrony": sorted(ALLOWED_RESET_SYNCHRONIES),
+            },
             "temporal_rule": {
                 "node": "temporal_rule",
                 "clock": "optional clock_event node",
+                "context": "optional clock_reset_context node",
                 "disable": "optional reset_disable node",
                 "property": "SVA-like property AST node",
+            },
+            "latency_rule": {
+                "node": "latency_rule",
+                "trigger": "AST predicate or event node",
+                "response": "AST predicate or event node",
+                "delay": "delay_range node",
+            },
+            "handshake_rule": {
+                "node": "handshake_rule",
+                "valid": "field_ref or signal_ref node",
+                "ready": "field_ref or signal_ref node",
+                "payload": ["optional payload refs"],
+                "latency": "optional delay_range node",
             },
         },
     }
@@ -270,6 +316,32 @@ def ast_for_claim(
         parsed_reset = parse_reset_clear(summary, manifest_fields)
         if parsed_reset:
             return parsed_reset
+
+    if representation_kind == "temporal_rule":
+        parsed_latency = parse_latency_rule(summary)
+        if parsed_latency:
+            temporal_rule: dict[str, Any] = {
+                "node": "temporal_rule",
+                "property": parsed_latency,
+            }
+            context = parse_clock_reset_context(summary)
+            if context:
+                temporal_rule["context"] = context
+            return temporal_rule
+
+    if representation_kind == "protocol_rule":
+        parsed_handshake = parse_handshake_rule(summary)
+        if parsed_handshake:
+            protocol_rule: dict[str, Any] = {
+                "node": "protocol_rule",
+                "text": summary,
+                "participants": string_subjects(claim),
+                "property": parsed_handshake,
+            }
+            context = parse_clock_reset_context(summary)
+            if context:
+                protocol_rule["context"] = context
+            return protocol_rule
 
     if representation_kind == "constraint":
         return {
@@ -441,6 +513,93 @@ def parse_operation_relation(summary: str) -> dict[str, Any] | None:
     return None
 
 
+def parse_latency_rule(summary: str) -> dict[str, Any] | None:
+    match = re.search(
+        r"(?P<response>[A-Za-z_][A-Za-z0-9_]*)"
+        r"(?:\s+signal)?\s+must\s+pulse\s+exactly\s+"
+        r"(?P<count>\d+|one|two|three|four|five)\s+cycles?\s+after\s+"
+        r"(?P<trigger>[^.;]+)",
+        summary,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    cycles = word_or_int(match.group("count"))
+    if cycles is None:
+        return None
+    return {
+        "node": "latency_rule",
+        "trigger": text_expr(match.group("trigger").strip()),
+        "response": {
+            "node": "rose",
+            "signal": signal_ref(match.group("response")),
+        },
+        "delay": {
+            "node": "delay_range",
+            "min": cycles,
+            "max": cycles,
+        },
+    }
+
+
+def parse_handshake_rule(summary: str) -> dict[str, Any] | None:
+    lowered = summary.lower()
+    if "valid" not in lowered or "ready" not in lowered:
+        return None
+    valid_name = first_signal_like(summary, "valid")
+    ready_name = first_signal_like(summary, "ready")
+    if not valid_name or not ready_name:
+        return None
+    return {
+        "node": "handshake_rule",
+        "valid": signal_ref(valid_name),
+        "ready": signal_ref(ready_name),
+        "payload": [
+            signal_ref(name)
+            for name in sorted(set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*_payload)\b", summary)))
+        ],
+        "transfer": {
+            "node": "binary_op",
+            "op": "logical_and",
+            "left": signal_ref(valid_name),
+            "right": signal_ref(ready_name),
+        },
+    }
+
+
+def parse_clock_reset_context(summary: str) -> dict[str, Any] | None:
+    clock_match = re.search(
+        r"\b(?P<edge>posedge|negedge)\s+(?P<clock>[A-Za-z_][A-Za-z0-9_]*)\b",
+        summary,
+        re.IGNORECASE,
+    )
+    context: dict[str, Any] = {"node": "clock_reset_context"}
+    if clock_match:
+        context["clock"] = {
+            "node": "clock_event",
+            "edge": clock_match.group("edge").lower(),
+            "signal": signal_ref(clock_match.group("clock")),
+        }
+    reset_match = re.search(
+        r"\b(?P<polarity>active[-_\s]low|active[-_\s]high)?\s*"
+        r"(?P<reset>rst_n|reset_n|rst|reset)\b",
+        summary,
+        re.IGNORECASE,
+    )
+    if reset_match:
+        reset_name = reset_match.group("reset")
+        context["reset"] = signal_ref(reset_name)
+        polarity_text = (reset_match.group("polarity") or "").lower().replace("-", "_").replace(" ", "_")
+        if polarity_text in {"active_low", "active_high"}:
+            context["reset_polarity"] = polarity_text
+        elif reset_name.endswith("_n"):
+            context["reset_polarity"] = "active_low"
+        else:
+            context["reset_polarity"] = "unknown"
+        context["reset_synchrony"] = "unknown"
+    return context if len(context) > 1 else None
+
+
 def parse_transition_outputs(outputs: str, manifest_fields: set[str]) -> list[dict[str, Any]]:
     parsed = []
     for item in re.split(r"[,;]", outputs):
@@ -457,6 +616,30 @@ def parse_transition_outputs(outputs: str, manifest_fields: set[str]) -> list[di
                 }
             )
     return parsed
+
+
+def first_signal_like(text: str, keyword: str) -> str | None:
+    exact = re.search(rf"\b([A-Za-z_][A-Za-z0-9_]*{keyword}[A-Za-z0-9_]*)\b", text, re.IGNORECASE)
+    if exact:
+        return exact.group(1)
+    bare = re.search(rf"\b{keyword}\b", text, re.IGNORECASE)
+    return bare.group(0) if bare else None
+
+
+def word_or_int(text: str) -> int | None:
+    lowered = text.lower()
+    words = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+    }
+    if lowered in words:
+        return words[lowered]
+    if re.fullmatch(r"\d+", text):
+        return int(text)
+    return None
 
 
 def ref_for_name(name: str, manifest_fields: set[str], *, prefer_field: bool = True) -> dict[str, Any]:
@@ -507,7 +690,59 @@ def string_subjects(claim: dict[str, Any]) -> list[str]:
 def representation_requires_human_review(representation: Any) -> bool:
     if not isinstance(representation, dict):
         return True
-    return ast_node_requires_human_review(representation.get("ast"))
+    ast = representation.get("ast")
+    if root_ast_requires_human_review(ast):
+        return True
+    return ast_node_requires_human_review(ast)
+
+
+def root_ast_requires_human_review(expr: Any) -> bool:
+    if not isinstance(expr, dict):
+        return True
+    node = expr.get("node")
+    if node in STRUCTURED_TEXT_FALLBACK_ROOTS and root_uses_text_fallback(expr):
+        return True
+    if node == "temporal_rule" and not temporal_rule_has_clock(expr):
+        return True
+    if node == "protocol_rule" and protocol_rule_requires_clock(expr):
+        return True
+    return False
+
+
+def root_uses_text_fallback(expr: dict[str, Any]) -> bool:
+    node = expr.get("node")
+    if node == "constraint":
+        return isinstance(expr.get("expr"), dict) and expr["expr"].get("node") == "text_expr"
+    if node in {"protocol_rule", "temporal_rule"}:
+        property_expr = expr.get("property")
+        return not isinstance(property_expr, dict) or property_expr.get("node") == "text_expr"
+    return False
+
+
+def temporal_rule_has_clock(expr: dict[str, Any]) -> bool:
+    clock = expr.get("clock")
+    if isinstance(clock, dict) and clock.get("node") == "clock_event":
+        return True
+    context = expr.get("context")
+    if isinstance(context, dict):
+        context_clock = context.get("clock")
+        return isinstance(context_clock, dict) and context_clock.get("node") == "clock_event"
+    return False
+
+
+def protocol_rule_requires_clock(expr: dict[str, Any]) -> bool:
+    property_expr = expr.get("property")
+    if isinstance(property_expr, dict) and property_expr.get("node") == "handshake_rule":
+        return not rule_has_context_clock(expr)
+    return False
+
+
+def rule_has_context_clock(expr: dict[str, Any]) -> bool:
+    context = expr.get("context")
+    if not isinstance(context, dict):
+        return False
+    context_clock = context.get("clock")
+    return isinstance(context_clock, dict) and context_clock.get("node") == "clock_event"
 
 
 def ast_node_requires_human_review(expr: Any) -> bool:
@@ -515,9 +750,16 @@ def ast_node_requires_human_review(expr: Any) -> bool:
         node = expr.get("node")
         if node == "semantic_claim":
             return True
+        if node == "latency_rule" and latency_rule_uses_text_endpoint(expr):
+            return True
         if node == "signal_ref" and expr.get("name") in PLACEHOLDER_SIGNAL_NAMES:
             return True
         if node == "text_expr" and expr.get("text") in PLACEHOLDER_TEXT_EXPR_VALUES:
+            return True
+        if node == "clock_reset_context" and (
+            expr.get("reset_polarity") == "unknown"
+            or expr.get("reset_synchrony") == "unknown"
+        ):
             return True
         return any(
             ast_node_requires_human_review(value)
@@ -526,6 +768,20 @@ def ast_node_requires_human_review(expr: Any) -> bool:
         )
     if isinstance(expr, list):
         return any(ast_node_requires_human_review(value) for value in expr)
+    return False
+
+
+def latency_rule_uses_text_endpoint(expr: dict[str, Any]) -> bool:
+    return contains_ast_node(expr.get("trigger"), "text_expr") or contains_ast_node(expr.get("response"), "text_expr")
+
+
+def contains_ast_node(expr: Any, node: str) -> bool:
+    if isinstance(expr, dict):
+        if expr.get("node") == node:
+            return True
+        return any(contains_ast_node(value, node) for value in expr.values())
+    if isinstance(expr, list):
+        return any(contains_ast_node(value, node) for value in expr)
     return False
 
 
