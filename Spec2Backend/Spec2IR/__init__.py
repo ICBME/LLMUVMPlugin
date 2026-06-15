@@ -15,6 +15,10 @@ from .semantic_ir import (
     validate_semantic_spec_ir,
     write_semantic_spec_ir,
 )
+from .representation_ast import (
+    REPRESENTATION_AST_VERSION,
+    representation_ast_contract,
+)
 from .semantic_repair import (
     build_semantic_spec_ir_repair_prompt,
     repair_semantic_spec_ir_file,
@@ -31,6 +35,7 @@ from .validation_review import (
 
 __all__ = [
     "REVIEW_SCHEMA_VERSION",
+    "REPRESENTATION_AST_VERSION",
     "SEMANTIC_SPEC_IR_SCHEMA_VERSION",
     "ReviewFinding",
     "SemanticSpecIRCallable",
@@ -46,6 +51,7 @@ __all__ = [
     "normalize_semantic_spec_ir_response",
     "repair_semantic_spec_ir_file",
     "repair_semantic_spec_ir_with_review",
+    "representation_ast_contract",
     "review_semantic_spec_ir",
     "review_semantic_spec_ir_file",
     "validate_semantic_spec_ir",

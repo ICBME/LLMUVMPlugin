@@ -47,7 +47,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 spec_paths=[spec],
             )
 
-            self.assertEqual(semantic_ir["schema_version"], 3)
+            self.assertEqual(semantic_ir["schema_version"], 4)
             self.assertEqual(semantic_ir["target"], "demo_sha")
             self.assertEqual(semantic_ir["sources"][0]["content_hash"], hashlib.sha256(spec.read_bytes()).hexdigest())
             self.assertEqual([claim["id"] for claim in semantic_ir["spec_claims"]], ["claim1"])
@@ -59,7 +59,10 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertIn("SHA-224", semantic_ir["evidence"][0]["quote"])
             self.assertEqual(semantic_ir["semantic_elements"][0]["kind"], "combinational_behavior")
             self.assertEqual(semantic_ir["semantic_elements"][0]["formalization_status"], "candidate")
-            self.assertEqual(semantic_ir["semantic_elements"][0]["representation"]["type"], "relation")
+            representation = semantic_ir["semantic_elements"][0]["representation"]
+            self.assertEqual(representation["ast_version"], 1)
+            self.assertEqual(representation["kind"], "combinational_relation")
+            self.assertEqual(representation["ast"]["node"], "operation_relation")
             self.assertEqual(semantic_ir["review"]["status"], "draft")
             self.assertFalse(semantic_ir["semantic_gaps"])
             validate_semantic_spec_ir(
@@ -68,6 +71,63 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 spec_paths=[spec],
                 target="demo_sha",
             )
+
+    def test_semantic_representation_parser_respects_declared_kind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("input data (8 bits) computes SHA-256 over the input message.\n")
+
+            semantic_ir = generate_semantic_spec_ir(
+                manifest_path=manifest,
+                spec_paths=[spec],
+            )
+
+            element = semantic_ir["semantic_elements"][0]
+            representation = element["representation"]
+            self.assertEqual(element["kind"], "combinational_behavior")
+            self.assertEqual(representation["kind"], "combinational_relation")
+            self.assertEqual(representation["ast"]["node"], "operation_relation")
+            validate_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+    def test_semantic_claim_placeholder_requires_human_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("This block has documented behavior.\n")
+
+            semantic_ir = generate_semantic_spec_ir(
+                manifest_path=manifest,
+                spec_paths=[spec],
+            )
+            element = semantic_ir["semantic_elements"][0]
+            representation = element["representation"]
+
+            self.assertEqual(element["kind"], "descriptive")
+            self.assertEqual(element["formalization_status"], "needs_human_review")
+            self.assertEqual(representation["kind"], "textual_formalization")
+            self.assertEqual(representation["ast"]["node"], "semantic_claim")
+            self.assertEqual(semantic_ir["review"]["status"], "needs_human_input")
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["status"], "needs_human_input")
+            self.assertEqual(review["completeness"]["placeholder_only_claims"], ["claim1"])
+            self.assertFalse(review["completeness"]["covered_claims"])
 
     def test_semantic_spec_ir_validation_reports_bad_evidence_quote(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -202,8 +262,10 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertIn("Every semantic element", constraints)
             self.assertIn("Every normative spec_claim", constraints)
             self.assertIn("independent of backend support", constraints)
+            self.assertIn("RepresentationAST", constraints)
             self.assertIn("spec_claim_schema", prompt["semantic_spec_ir_contract"])
             self.assertIn("semantic_element_schema", prompt["semantic_spec_ir_contract"])
+            self.assertIn("representation_ast_schema", prompt["semantic_spec_ir_contract"])
             self.assertIn("semantic_gap_schema", prompt["semantic_spec_ir_contract"])
 
     def test_llmplugin_callable_backend_and_registry_are_available(self):
@@ -301,7 +363,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertTrue(any("representation" in issue.path for issue in issues))
             self.assertEqual(review["status"], "failed")
 
-    def test_semantic_validation_checks_representation_fields_against_manifest(self):
+    def test_semantic_validation_rejects_legacy_representation_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "sha.toml"
@@ -309,7 +371,11 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             manifest.write_text(_sha_manifest())
             spec.write_text("The block computes SHA-256 over the input message.\n")
             semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
-            semantic_ir["semantic_elements"][0]["representation"]["fields"] = ["missing_field"]
+            semantic_ir["semantic_elements"][0]["representation"] = {
+                "type": "relation",
+                "text": "legacy loose representation",
+                "fields": ["message"],
+            }
 
             issues = collect_semantic_spec_ir_issues(
                 semantic_ir,
@@ -322,6 +388,63 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 manifest_path=manifest,
                 spec_paths=[spec],
                 target="demo_sha",
+            )
+
+            self.assertTrue(any("ast_version" in issue.path for issue in issues))
+            self.assertTrue(any("is not allowed" in issue.message for issue in issues))
+            self.assertEqual(review["status"], "failed")
+
+    def test_semantic_validation_rejects_placeholder_ast_with_candidate_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("This block has documented behavior.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["semantic_elements"][0]["formalization_status"] = "candidate"
+
+            issues = collect_semantic_spec_ir_issues(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertTrue(any("placeholder" in issue.message for issue in issues))
+            self.assertEqual(review["status"], "failed")
+
+    def test_semantic_validation_checks_ast_field_refs_against_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "notgate.toml"
+            spec = root / "notgate_spec.md"
+            manifest.write_text(_notgate_manifest())
+            spec.write_text("When in=0, out=1.\n")
+            semantic_ir = generate_semantic_spec_ir(
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_notgate",
+            )
+            semantic_ir["semantic_elements"][0]["representation"]["ast"]["condition"]["left"]["name"] = "missing_field"
+
+            issues = collect_semantic_spec_ir_issues(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_notgate",
+            )
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_notgate",
             )
 
             self.assertTrue(any("missing_field" in issue.message for issue in issues))
@@ -432,6 +555,20 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             )
 
             self.assertTrue(semantic_ir["semantic_elements"])
+            self.assertEqual(
+                semantic_ir["semantic_elements"][1]["representation"]["ast"],
+                {
+                    "node": "conditional_assignment",
+                    "condition": {
+                        "node": "compare",
+                        "op": "eq",
+                        "left": {"node": "field_ref", "name": "in"},
+                        "right": {"node": "literal", "value": 0},
+                    },
+                    "target": {"node": "signal_ref", "name": "out"},
+                    "value": {"node": "literal", "value": 1},
+                },
+            )
             self.assertEqual(review["status"], "passed")
             self.assertEqual(
                 sorted(review["completeness"]["covered_claims"]),

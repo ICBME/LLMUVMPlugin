@@ -10,6 +10,10 @@ from typing import Any, Iterable
 from rtlagent_bfm.codegen.oracle_ir import load_manifest_summary
 from rtlagent_bfm.loader import load_ir
 
+from .representation_ast import (
+    iter_ast_field_refs,
+    representation_requires_human_review,
+)
 from .semantic_ir import (
     BLOCKING_FORMALIZATION_STATUSES,
     SemanticSpecIRIssue,
@@ -508,7 +512,9 @@ def collect_expected_claim_coverage(
 
 
 def semantic_element_has_complete_formalization(item: dict[str, Any]) -> bool:
-    return item.get("formalization_status") not in BLOCKING_FORMALIZATION_STATUSES
+    if item.get("formalization_status") in BLOCKING_FORMALIZATION_STATUSES:
+        return False
+    return not representation_requires_human_review(item.get("representation"))
 
 
 def semantic_consistency_review(
@@ -551,7 +557,7 @@ def semantic_consistency_review(
         for item_index, item in enumerate(ir.get("semantic_elements", [])):
             if not isinstance(item, dict):
                 continue
-            for field_path, field in iter_expr_fields(item.get("representation")):
+            for field_path, field in iter_ast_field_refs(item.get("representation")):
                 if field not in manifest_fields:
                     findings.append(
                         ReviewFinding(
@@ -668,16 +674,3 @@ def finding_from_issue(
         message=issue.message,
         blocking=severity == "error",
     )
-
-
-def iter_expr_fields(expr: Any, path: str = ""):
-    if isinstance(expr, dict):
-        if isinstance(expr.get("field"), str):
-            yield f"{path}.field", expr["field"]
-        for key, value in expr.items():
-            if key == "field":
-                continue
-            yield from iter_expr_fields(value, f"{path}.{key}")
-    elif isinstance(expr, list):
-        for index, value in enumerate(expr):
-            yield from iter_expr_fields(value, f"{path}[{index}]")

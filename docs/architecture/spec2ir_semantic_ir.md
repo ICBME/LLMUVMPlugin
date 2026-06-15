@@ -126,13 +126,13 @@ rtlagent_bfm/codegen/cli.py
 - `langgraph` 当前是单节点 wrapper，后续可以扩展为 retry、repair、review routing 或
   human handoff graph，而不改变 Spec2IR 调用接口。
 
-## SemanticSpecIR v3 数据模型
+## SemanticSpecIR v4 数据模型
 
 顶层对象必须是 JSON object，并包含以下关键字段。
 
 ### `schema_version`
 
-当前固定为 `3`。schema 升级时必须同时更新 validator、prompt contract、tests 和本文档。
+当前固定为 `4`。schema 升级时必须同时更新 validator、prompt contract、tests 和本文档。
 
 ### `target`
 
@@ -191,8 +191,8 @@ unknown
 ### `inputs`
 
 由 manifest field 转换得到的输入摘要。当前用于让 LLM 和 validator 知道哪些字段是合法
-manifest field。`representation.fields[]` 或递归对象里的 `field` 引用必须能在
-manifest fields 中找到。
+manifest field。`representation.ast` 中的 `field_ref` 节点必须引用已知 manifest
+field。
 
 ### `evidence`
 
@@ -265,48 +265,96 @@ needs_human_review
 
 ### `representation`
 
-`representation` 是 `semantic_elements` 的结构化语义主体。当前 validator 要求它至少包含：
+`representation` 是 `semantic_elements` 的结构化语义主体。当前实现使用严格
+`RepresentationAST v1`，validator 要求它包含：
 
-- `type`: 非空字符串。
-- `text`: 非空字符串，记录 canonical normalized semantics。
+- `ast_version`: 当前固定为 `1`。
+- `kind`: 受控 representation kind。
+- `text`: 非空字符串，只作为 human review aid。
+- `ast`: 严格 AST node object，是语义真实性来源。
 
-当前 rule-based draft 会根据 claim kind 生成以下 representation type：
+当前允许的 representation kind：
 
 ```text
-interface_decl
-reset_rule
-state_machine
-sequential_rule
-temporal_rule
-protocol_rule
+combinational_relation
 constraint
-relation
+example_trace
+interface_decl
+protocol_rule
+reset_rule
+sequential_update
+state_machine
+temporal_rule
 textual_formalization
 ```
 
-`representation` 是可扩展对象。当前 validator 会递归检查：
-
-- `field`: 如果 manifest 已提供，必须是已知 manifest field。
-- `fields`: 如果 manifest 已提供，列表内每个字段必须是已知 manifest field。
-- `signal`、`signals`、`subjects`: 必须是字符串或字符串列表，但不强制绑定 manifest。
-
-设计上，`representation` 表达“语义是什么”，不表达“哪个 backend 支持它”。后续可以逐步把
-`type` 收紧为更强类型，例如：
+当前允许的核心 AST node 包括：
 
 ```text
-interface_decl
+assignment
+conditional_assignment
 constant_relation
-combinational_relation
-sequential_update
+operation_relation
+interface_decl
 reset_rule
-state_machine
+sequential_update
+state_transition
+fsm
 temporal_rule
 protocol_rule
-example_waveform
-truth_table
+constraint
+semantic_claim
+field_ref
+signal_ref
+state_ref
+literal
+unary_op
+binary_op
+compare
+mux
+concat
+slice
+call
+text_expr
 ```
 
-该增强属于 SemanticSpecIR schema 的后续演进，不应在 artifact backend 内隐式实现。
+validator 会检查：
+
+- representation 只能包含 `ast_version`、`kind`、`text`、`ast` 和可选 `subjects`。
+- `ast.node` 必须是允许的 node。
+- root node 必须匹配 `representation.kind`。
+- 每类 node 只能包含该 node schema 允许的字段。
+- `semantic_claim` 和含有占位信号/条件的 AST 只能配合 blocking `formalization_status` 使用，
+  不能被当作完整形式化。
+- `field_ref.name` 如果 manifest 已提供，必须是已知 manifest field。
+- `signal_ref`、`state_ref` 等 spec/RTL 实体必须有非空名称，但不强制绑定 manifest。
+
+示例：
+
+```json
+{
+  "ast_version": 1,
+  "kind": "combinational_relation",
+  "text": "When in=0, out=1.",
+  "ast": {
+    "node": "conditional_assignment",
+    "condition": {
+      "node": "compare",
+      "op": "eq",
+      "left": {"node": "field_ref", "name": "in"},
+      "right": {"node": "literal", "value": 0}
+    },
+    "target": {"node": "signal_ref", "name": "out"},
+    "value": {"node": "literal", "value": 1}
+  }
+}
+```
+
+设计上，`representation` 表达“语义是什么”，不表达“哪个 backend 支持它”。如果 claim
+无法安全转成严格 AST，应使用 blocking `formalization_status`、`open_questions` 或
+`semantic_gaps`，不能退回旧式自由文本结构。
+`semantic_claim` 只保留原文语义和溯源，不代表已完成机器可检查的形式化；review 会把它计入
+placeholder coverage，并进入 human-in-loop。
 
 ### `open_questions`
 
@@ -582,8 +630,9 @@ tests/test_ref_model_codegen_semantic_ir.py
 - source quote/hash traceability。
 - completeness review 重新从 source spec 抽取 claims。
 - blocking formalization status 进入 `needs_human_input`。
-- `representation` 必须存在并包含结构化 `type` / `text`。
-- `representation.fields[]` 必须引用 manifest fields。
+- `representation` 必须是 strict `RepresentationAST v1`。
+- legacy `representation.type` / `representation.fields[]` 会被拒绝。
+- `field_ref` AST 节点必须引用 manifest fields。
 - repair loop 成功、backend error 和无 LLM 情况。
 
 推荐回归命令：
@@ -605,24 +654,24 @@ git diff --check
 任意 spec 的所有语义”。主要限制：
 
 - rule-based extractor 只能生成保守 draft，真正的语义抽取依赖 LLM 或人工补全。
-- `representation.type` 当前仍是开放字符串，validator 只强制 `type`、`text` 和引用合法性，
-  尚未对不同 type 的内部字段做强 schema 校验。
+- `RepresentationAST v1` 已经强制 node kind、root node、allowed keys 和 field_ref 引用，
+  但表达范围仍是第一版，复杂协议/波形/寄存器表还需要继续扩展 node schema。
 - claim extraction 对 Markdown prose 有基本支持，但尚未覆盖表格、时序图、波形图、伪代码、
   register map、协议时序表等复杂 source 格式。
 - `confidence` 当前只做范围校验，还没有基于证据强度或多轮一致性的评分策略。
 - human answers 当前只作为 review gate 信号，尚未定义标准 patch/action 格式。
 - optional DesignIR 当前只做可加载性检查，尚未参与 signal/port/clock/reset 层的一致性验证。
 
-这些限制不会破坏现有审查链路，因为无法完整形式化的语义必须进入 `semantic_gaps` 或
-`open_questions`，后续 artifact 生成不应消费未通过 review gate 的 IR。
+这些限制不会破坏现有审查链路，因为无法完整形式化的语义必须进入 blocking
+`formalization_status`、`semantic_gaps` 或 `open_questions`，后续 artifact 生成不应消费未通过
+review gate 的 IR。
 
 ## 后续演进方向
 
 建议按以下顺序推进：
 
-1. 强化 `representation` typed schema。优先支持 `interface_decl`、
-   `combinational_relation`、`sequential_update`、`reset_rule`、`state_machine`、
-   `temporal_rule` 和 `protocol_rule`。
+1. 扩展 `RepresentationAST` typed schema。继续强化 `temporal_rule`、`protocol_rule`、
+   `example_trace` 和 register-map/source-table 表达。
 2. 增加 signal/port/clock/reset 语义层，让 manifest fields、DesignIR signals 和 spec
    subjects 之间有明确映射。
 3. 将 FSM 作为一等结构，显式表示 states、initial/reset state、transitions、outputs 和
