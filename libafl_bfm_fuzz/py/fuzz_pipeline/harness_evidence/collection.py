@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import atexit
 import hashlib
 import json
 import os
@@ -8,15 +7,18 @@ from pathlib import Path
 import subprocess
 from typing import Any, Sequence
 
-from connector_observe import Connector, ObservationContext, observer_from_env
-from connector_observe.observers import Observer
+from ConnectGraph import Connector
+from ConnectGraph.observation import (
+    close_observation,
+    observation_context_from_env,
+)
+from ConnectGraph.observers import Observer
+from ConnectGraph.topology import write_topology
 
 from ..orchestrator import PipelineContext, PipelineOrchestrator, external_command_step
-from ..topology import FULL_FUZZ_TOPOLOGY
+from ..topology import FULL_FUZZ_TOPOLOGY, PipelineTopology
 
 
-_context: ObservationContext | None = None
-_owned_observer: Observer | None = None
 _topology_paths_written: set[str] = set()
 _PATH_SHA256_CACHE: dict[tuple[str, int, int], str] = {}
 _CASE_METADATA_KEYS = {
@@ -31,57 +33,14 @@ _CASE_METADATA_KEYS = {
 }
 
 
-def observation_context_from_env() -> ObservationContext:
-    global _context, _owned_observer
-    if _context is not None:
-        return _context
-
-    _owned_observer = observer_from_env()
-    base = ObservationContext.from_env(observer=_owned_observer)
-    run_id = os.getenv("CONNECTOR_OBSERVE_RUN_ID") or base.run_id
-    round_id = os.getenv("CONNECTOR_OBSERVE_ROUND_ID") or base.round_id
-    stage_id = os.getenv("CONNECTOR_OBSERVE_STAGE_ID") or base.stage_id
-    parent_event_id = os.getenv("CONNECTOR_OBSERVE_PARENT_EVENT_ID") or base.parent_event_id
-    _context = ObservationContext(
-        run_id=run_id,
-        round_id=round_id,
-        stage_id=stage_id,
-        parent_event_id=parent_event_id,
-        observer=base.observer,
-        strict=base.strict,
-    )
-    atexit.register(close_observation)
-    return _context
-
-
-def close_observation() -> None:
-    global _context, _owned_observer
-    if _owned_observer is not None:
-        try:
-            _owned_observer.close()
-        finally:
-            _owned_observer = None
-            _context = None
-
-
-def connector_from_env(name: str, from_layer: str, to_layer: str) -> Connector:
-    return Connector.from_context(name, from_layer, to_layer, observation_context_from_env())
-
-
 def write_observation_topology(path: str | Path | None = None) -> None:
     output_path = path or os.getenv("CONNECTOR_TOPOLOGY_OUT")
     if output_path is None or not str(output_path).strip():
         return
-
     resolved = str(Path(output_path))
     if resolved in _topology_paths_written:
         return
-    topology_path = Path(output_path)
-    topology_path.parent.mkdir(parents=True, exist_ok=True)
-    topology_path.write_text(
-        json.dumps(FULL_FUZZ_TOPOLOGY.to_json(), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    write_topology(FULL_FUZZ_TOPOLOGY, Path(output_path))
     _topology_paths_written.add(resolved)
 
 

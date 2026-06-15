@@ -1,4 +1,10 @@
 from .connector import Connector, ObservationContext
+from .observation import (
+    ObservationRuntime,
+    close_observation,
+    connector_from_env,
+    observation_context_from_env,
+)
 from .observers import (
     AsyncObserver,
     CompositeObserver,
@@ -7,7 +13,21 @@ from .observers import (
     NullObserver,
     observer_from_env,
 )
+from .orchestrator import (
+    PipelineContext,
+    PipelineOrchestrator,
+    StepPolicy,
+    StepSpec,
+    external_command_step,
+)
 from .schema import ArtifactRef, ConnectorEvent, SCHEMA_VERSION
+from .topology import (
+    ComponentNode,
+    ConnectorEdge,
+    PipelineTopology,
+    merge_topologies,
+    write_topology,
+)
 from .trace import (
     FINAL_EVENT_TYPES,
     STARTED_EVENT_TYPE,
@@ -21,20 +41,34 @@ from .trace import (
 __all__ = [
     "AsyncObserver",
     "ArtifactRef",
+    "close_observation",
+    "ComponentNode",
     "CompositeObserver",
     "Connector",
+    "ConnectorEdge",
     "ConnectorEvent",
     "FINAL_EVENT_TYPES",
     "JsonlObserver",
     "MonitoringObserver",
     "NullObserver",
     "ObservationContext",
+    "ObservationRuntime",
+    "PipelineContext",
+    "PipelineOrchestrator",
+    "PipelineTopology",
     "SCHEMA_VERSION",
     "STARTED_EVENT_TYPE",
+    "StepPolicy",
+    "StepSpec",
     "event_span_id",
     "event_status",
+    "external_command_step",
+    "merge_topologies",
+    "connector_from_env",
+    "observation_context_from_env",
     "observer_from_env",
     "read_json_object",
     "read_jsonl_events",
     "trace_quality",
+    "write_topology",
 ]
