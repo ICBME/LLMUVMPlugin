@@ -8,7 +8,7 @@
 source bundle / RTL / docs / registers
               |
               v
-       agent-generated IR
+       SemanticSpecIR / agent-generated IR
               |
               v
    LLM candidate plugin artifacts
@@ -29,11 +29,14 @@ source bundle / RTL / docs / registers
         DUT simulation + coverage
 ```
 
-系统分为两条主线：
+系统分为几类主要模块：
 
 - `rtlagent_bfm`：提供 IR、HDL path resolver 和生成 BFM 的运行时访问层。
 - `rtlagent_bfm.codegen`：提供 LLM plugin candidate 写入、OracleIR ref model 生成、
   校验、提升和 manifest 接入工具。
+- `Spec2Backend/Spec2IR`：提供自然语言 spec 到 `SemanticSpecIR` 的可溯源语义抽取、
+  审查和 repair loop。
+- `LLMPlugin`：提供 Spec2IR 和后续生成链路共享的插件化 LLM backend。
 - `libafl_bfm_fuzz`：提供 corpus generation、JSONL validation、pyUVM replay、
   scoreboard/ref-model hook、functional coverage 和 coverage feedback；仓库内的
   `fuzz_examples` 与 `targets/secworks_*` 是 smoke/example target，不是核心依赖。
@@ -104,6 +107,8 @@ connector 事件、monitor 汇总和 topology JSON 的格式见
 
 - Manifest 描述 case schema 和插件位置。
 - IR 描述语义信号与 HDL path 的绑定。
+- Spec2IR 的 `SemanticSpecIR` 描述自然语言规格的可溯源语义，是 ref model、SVA 或
+  其他 backend artifact planning 之前的可信审查层；它不记录 backend support 判断。
 - LLM 生成的 ref model / scoreboard 必须先通过 candidate validation，再作为
   final plugin 由 manifest 接入。
 - OracleIR 生成的 ref model 也复用同一条 candidate/final validation 链路；当前

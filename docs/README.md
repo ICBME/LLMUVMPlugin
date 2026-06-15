@@ -7,19 +7,20 @@
 
 1. [总体架构](architecture/overview.md)
 2. [IR 与运行时架构](architecture/ir_runtime.md)
-3. [LLM Plugin Codegen 架构](architecture/llm_plugin_codegen.md)
-4. [Reference Model OracleIR 评估](architecture/ref_model_oracle_ir_eval.md)
-5. [Fuzz/Replay 架构](architecture/fuzz_replay.md)
-6. [Connector Observability 架构](architecture/connector_observability.md)
-7. [UVM-Fuzz Connector 迁移计划](architecture/uvm_fuzz_connector_migration_plan.md)
-8. [Coverage Feedback 设计](architecture/coverage_feedback_design.md)
-9. [Coverage Feedback 评估](architecture/coverage_feedback_eval.md)
-10. [Target Manifest 参考](reference/target_manifest.md)
-11. [插件契约](reference/plugin_contracts.md)
-12. [Corpus 与 Mutation Directives](reference/corpus_directives.md)
-13. [接入新 DUT 指南](guides/add_new_dut.md)
-14. [Secworks 示例闭环](guides/secworks_examples.md)
-15. [设计约束](guides/design_constraints.md)
+3. [Spec2IR SemanticSpecIR 设计](architecture/spec2ir_semantic_ir.md)
+4. [LLM Plugin Codegen 架构](architecture/llm_plugin_codegen.md)
+5. [Reference Model OracleIR 评估](architecture/ref_model_oracle_ir_eval.md)
+6. [Fuzz/Replay 架构](architecture/fuzz_replay.md)
+7. [Connector Observability 架构](architecture/connector_observability.md)
+8. [UVM-Fuzz Connector 迁移计划](architecture/uvm_fuzz_connector_migration_plan.md)
+9. [Coverage Feedback 设计](architecture/coverage_feedback_design.md)
+10. [Coverage Feedback 评估](architecture/coverage_feedback_eval.md)
+11. [Target Manifest 参考](reference/target_manifest.md)
+12. [插件契约](reference/plugin_contracts.md)
+13. [Corpus 与 Mutation Directives](reference/corpus_directives.md)
+14. [接入新 DUT 指南](guides/add_new_dut.md)
+15. [Secworks 示例闭环](guides/secworks_examples.md)
+16. [设计约束](guides/design_constraints.md)
 
 ## 文档层次
 
@@ -44,6 +45,8 @@
 - DUT 专用协议、reference model、scoreboard 和 coverage model 均通过插件接入。
 - Manifest 是 Rust corpus generator 和 Python replay/validation 之间的共享契约。
 - IR 只描述语义名到 HDL path 的映射，不表达协议行为。
+- Spec2IR 生成的 `SemanticSpecIR` 是自然语言规格的可溯源语义层，与运行时 HDL path
+  绑定 IR 分离，且不判断具体 backend 的生成能力。
 - Connector observability 只观察组件连接、artifact、metrics 和错误状态，不改变
   harness 主链路执行结果。
 - LLM 生成的 ref model / scoreboard 和 OracleIR 生成的 ref model 都先作为 candidate
