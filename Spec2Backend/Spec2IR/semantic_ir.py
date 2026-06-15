@@ -1,9 +1,10 @@
 """Traceable semantic IR extraction from natural-language specs.
 
 SemanticSpecIR is the reviewable layer between raw target documentation and
-lower-level verifiable artifacts such as OracleIR.  It deliberately keeps
-evidence, confidence, open questions, and review state alongside extracted
-behavior so humans can audit and complete the spec semantics before codegen.
+downstream artifacts such as reference models or SVA.  It deliberately keeps
+source claims, evidence, confidence, open questions, and review state alongside
+formalized behavior so humans can audit and complete the spec semantics before
+any backend-specific lowering decision is made.
 """
 
 from __future__ import annotations
@@ -24,31 +25,16 @@ from LLMPlugin import (
     create_backend,
 )
 from rtlagent_bfm.codegen.oracle_ir import (
-    ALLOWED_CALLS,
-    ManifestField,
     ManifestSummary,
     input_from_manifest_field,
     load_manifest_summary,
-    normalize_algorithm_text,
-    select_algorithm_mode_field,
-    select_hex_message_field,
 )
 from rtlagent_bfm.loader import load_ir
 
 
-SEMANTIC_SPEC_IR_SCHEMA_VERSION = 2
+SEMANTIC_SPEC_IR_SCHEMA_VERSION = 3
 
-SHA_ALGORITHMS = ("sha1", "sha224", "sha256", "sha384", "sha512")
-CRC_ALGORITHMS = ("crc32",)
-SUPPORTED_ALGORITHMS = SHA_ALGORITHMS + CRC_ALGORITHMS
 TRACEABLE_SOURCE_KIND = "natural_language_spec"
-ALLOWED_ITEM_STATUSES = {
-    "draft",
-    "needs_review",
-    "human_confirmed",
-    "accepted",
-    "rejected",
-}
 ALLOWED_REVIEW_STATUSES = {
     "draft",
     "needs_human_input",
@@ -72,6 +58,43 @@ ALLOWED_CLAIM_STRENGTHS = {
     "shall",
     "should",
     "unknown",
+}
+ALLOWED_FORMALIZATION_STATUSES = {
+    "candidate",
+    "formalized",
+    "ambiguous",
+    "incomplete",
+    "conflict",
+    "needs_human_review",
+}
+BLOCKING_FORMALIZATION_STATUSES = {
+    "ambiguous",
+    "incomplete",
+    "conflict",
+    "needs_human_review",
+}
+ALLOWED_SEMANTIC_ELEMENT_KINDS = {
+    "compare_policy",
+    "combinational_behavior",
+    "constraint",
+    "descriptive",
+    "example",
+    "functional_behavior",
+    "interface",
+    "protocol",
+    "reset",
+    "sequential_behavior",
+    "state_behavior",
+    "state_machine",
+    "temporal_behavior",
+    "timing",
+}
+ALLOWED_SEMANTIC_GAP_KINDS = {
+    "ambiguous",
+    "conflict",
+    "incomplete",
+    "missing_context",
+    "unformalized",
 }
 
 
@@ -188,42 +211,44 @@ def generate_rule_based_semantic_spec_ir(
 
     inputs = [input_from_manifest_field(field) for field in manifest.fields]
     spec_claims = extract_spec_claims(documents)
-    evidence = collect_algorithm_evidence(documents)
-    semantic_items = infer_algorithm_semantic_items(
-        manifest=manifest,
-        documents=documents,
-        evidence=evidence,
-        spec_claims=spec_claims,
+    evidence = evidence_from_spec_claims(spec_claims)
+    semantic_elements = semantic_elements_from_claims(spec_claims, evidence)
+    open_questions = build_open_questions(
+        manifest,
+        semantic_elements,
+        evidence,
+        spec_claims,
     )
-    open_questions = build_open_questions(manifest, semantic_items, evidence, spec_claims)
-    unsupported = unsupported_claims(spec_claims, semantic_items, open_questions)
-    if not semantic_items and not unsupported:
-        unsupported.append(
+    semantic_gaps = semantic_gaps_for_uncovered_claims(
+        spec_claims,
+        semantic_elements,
+        open_questions,
+    )
+    if not spec_claims:
+        semantic_gaps.append(
             {
-                "reason": "No supported reference-model behavior was extracted from the spec text.",
-                "requires": "LLM extraction or human SemanticSpecIR authoring",
-                "claim_ids": [
-                    str(claim["id"])
-                    for claim in spec_claims
-                    if isinstance(claim.get("id"), str)
-                ],
+                "id": "gap1",
+                "kind": "missing_context",
+                "reason": "No normative or behavior-relevant source claims were extracted from the spec text.",
+                "resolution": "Provide a natural-language hardware behavior spec or add human-authored claims.",
+                "claim_ids": [],
             }
         )
 
     review_status = "needs_human_input" if any(
         bool(question.get("blocking")) for question in open_questions
-    ) else "draft"
+    ) or any(gap_requires_human_input(gap) for gap in semantic_gaps) else "draft"
     return {
         "schema_version": SEMANTIC_SPEC_IR_SCHEMA_VERSION,
         "target": target,
         "sources": [document.payload() for document in documents],
         "spec_claims": spec_claims,
         "inputs": inputs,
-        "semantic_items": semantic_items,
+        "semantic_elements": semantic_elements,
         "evidence": evidence,
         "open_questions": open_questions,
-        "assumptions": default_assumptions(semantic_items),
-        "unsupported": unsupported,
+        "assumptions": [],
+        "semantic_gaps": semantic_gaps,
         "review": {
             "status": review_status,
             "human_answers": [],
@@ -278,12 +303,13 @@ def build_semantic_spec_ir_prompt(
         "constraints": [
             "Return one complete SemanticSpecIR object under the top-level key semantic_spec_ir.",
             "Extract atomic spec_claims for every normative or behavior-relevant statement in the specs.",
-            "Every normative spec_claim must be covered by semantic_items[].claim_ids, open_questions[].claim_ids, or unsupported[].claim_ids.",
-            "Every semantic item must cite at least one evidence id from the original spec text.",
+            "Every normative spec_claim must be covered by semantic_elements[].claim_ids, open_questions[].claim_ids, or semantic_gaps[].claim_ids.",
+            "Every semantic element must cite at least one evidence id from the original spec text.",
             "Evidence must include source_id, line_start, line_end, and a short quote copied from those lines.",
-            "Use effects[].kind='compute_expected' for deterministic output semantics; do not invent effect kinds such as drive_constant.",
-            "Put constants, direct mappings, and expressions in effects[].expr; for example use {'literal': 0} for a constant LOW output.",
+            "Represent spec semantics independent of backend support; do not decide whether refmodel, SVA, or OracleIR can lower it.",
+            "Use semantic_elements[].representation for structured semantics such as combinational relations, sequential updates, FSM transitions, protocol timing, constraints, or examples.",
             "Use open_questions for missing, ambiguous, or conflicting semantics.",
+            "Use semantic_gaps for source claims that are not yet formalized, ambiguous, incomplete, or conflicting.",
             "Do not generate Python code, OracleIR, or plugin artifacts in this stage.",
             "Do not invent manifest fields; field references must come from inputs, manifest fields, or be marked as open questions.",
         ],
@@ -377,23 +403,23 @@ def collect_semantic_spec_ir_issues(
     claim_ids = validate_spec_claims(ir.get("spec_claims"), source_ids, spec_paths, issues)
     evidence_ids = validate_evidence(ir.get("evidence"), source_ids, spec_paths, issues)
     validate_inputs(ir.get("inputs"), manifest_fields, issues)
-    item_ids = validate_semantic_items(
-        ir.get("semantic_items"),
+    element_ids = validate_semantic_elements(
+        ir.get("semantic_elements"),
         evidence_ids,
         claim_ids,
         manifest_fields,
         issues,
     )
-    validate_open_questions(ir.get("open_questions", []), item_ids, claim_ids, issues)
+    validate_open_questions(ir.get("open_questions", []), element_ids, claim_ids, issues)
     validate_string_list(ir.get("assumptions", []), "assumptions", issues)
     validate_review(ir.get("review"), require_reviewed, issues)
-    validate_unsupported(ir.get("unsupported", []), claim_ids, issues)
-    unsupported = ir.get("unsupported", [])
-    if not ir.get("semantic_items") and not unsupported:
+    validate_semantic_gaps(ir.get("semantic_gaps", []), claim_ids, issues)
+    semantic_gaps = ir.get("semantic_gaps", [])
+    if not ir.get("semantic_elements") and not semantic_gaps and not ir.get("open_questions"):
         issues.append(
             SemanticSpecIRIssue(
-                "unsupported",
-                "must explain why no semantic items were generated",
+                "semantic_gaps",
+                "must explain why no semantic elements were generated",
             )
         )
     return issues
@@ -421,7 +447,7 @@ def invoke_semantic_spec_ir_backend(
             prompt=prompt,
             model=model,
             system_prompt=(
-                "You extract traceable hardware reference-model semantics. "
+                "You extract traceable hardware specification semantics. "
                 "Return strict JSON satisfying the response_contract."
             ),
             run_name="semantic_spec_ir_extraction",
@@ -484,9 +510,10 @@ def semantic_spec_ir_contract() -> dict[str, Any]:
             "sources",
             "spec_claims",
             "inputs",
-            "semantic_items",
+            "semantic_elements",
             "evidence",
             "open_questions",
+            "semantic_gaps",
             "review",
         ],
         "source_schema": {
@@ -505,46 +532,32 @@ def semantic_spec_ir_contract() -> dict[str, Any]:
             "summary": "atomic normalized claim summary",
             "kind": sorted(ALLOWED_CLAIM_KINDS),
             "strength": sorted(ALLOWED_CLAIM_STRENGTHS),
-            "normative": "true for claims that must be covered before lowering",
+            "normative": "true for claims that must be covered before SemanticSpecIR review can pass",
             "subjects": ["signals, fields, states, protocol entities, or outputs"],
         },
-        "semantic_item_schema": {
-            "id": "stable semantic item id such as sem1",
-            "kind": "functional_behavior | reference_model_rule | state_behavior | compare_policy",
-            "summary": "human-readable semantic claim",
-            "status": sorted(ALLOWED_ITEM_STATUSES),
+        "semantic_element_schema": {
+            "id": "stable semantic element id such as sem1",
+            "kind": sorted(ALLOWED_SEMANTIC_ELEMENT_KINDS),
+            "summary": "human-readable formalized semantic statement",
+            "formalization_status": sorted(ALLOWED_FORMALIZATION_STATUSES),
             "confidence": "0.0 to 1.0",
             "subjects": ["manifest fields, outputs, registers, or protocol entities"],
-            "conditions": [{"field": "mode", "op": "eq", "value": "sha256"}],
-            "effects": [
-                {
-                    "kind": "compute_expected",
-                    "output": "expected",
-                    "expr": {
-                        "call": "hashlib.sha256",
-                        "args": [{"bytes_from_hex": {"field": "message"}}],
-                        "format": "hexdigest",
-                    },
-                }
-            ],
+            "representation": {
+                "type": "structured representation such as relation, transition_table, temporal_rule, interface_decl, example, or textual_formalization",
+                "text": "canonical normalized semantics independent of backend support",
+                "fields": ["optional referenced manifest fields or signals"],
+            },
             "evidence": ["ev1"],
             "claim_ids": ["claim1"],
         },
-        "lowerable_effect_schema": {
-            "kind": "compute_expected",
-            "output": "expected output name, scoreboard key, or interface output",
-            "expr": {
-                "literal": "constant value for constant outputs, e.g. 0 for logic LOW",
-                "field": "manifest field name for direct mappings",
-                "call": "allowed calls for algorithmic behavior",
-            },
-            "notes": [
-                "Use {'literal': 0} rather than a custom drive_constant/value pair.",
-                "Use {'field': 'name'} only when name is present in the manifest inputs.",
-            ],
+        "semantic_gap_schema": {
+            "id": "stable gap id such as gap1",
+            "kind": sorted(ALLOWED_SEMANTIC_GAP_KINDS),
+            "reason": "why the source claim is not fully formalized",
+            "resolution": "human or LLM action needed to complete the semantics",
+            "claim_ids": ["claim ids covered by this gap"],
         },
         "allowed_review_statuses": sorted(ALLOWED_REVIEW_STATUSES),
-        "allowed_lowerable_calls": sorted(ALLOWED_CALLS),
     }
 
 
@@ -618,6 +631,12 @@ def is_markdown_table_rule(line: str) -> bool:
 
 def classify_claim_kind(summary: str) -> str:
     text = summary.lower()
+    if any(word in text for word in ("compute", "computes", "implement", "implements", "produce", "produces", "choose", "clear", "count", "add", "xor")):
+        return "functional_behavior"
+    if re.search(r"\balways\s+outputs?\b", text) or re.search(r"\bbuild\s+a\s+circuit\s+that\b", text):
+        return "functional_behavior"
+    if re.search(r"\b(and|or|not|xor)\s+gate\b", text):
+        return "functional_behavior"
     if any(word in text for word in ("reset", "rst")):
         return "reset"
     if any(word in text for word in ("cycle", "clock", "posedge", "negedge", "pulse", "latency")):
@@ -632,8 +651,6 @@ def classify_claim_kind(summary: str) -> str:
         return "compare_policy"
     if any(word in text for word in ("must", "shall", "should", "only", "range", "illegal", "constraint")):
         return "constraint"
-    if any(word in text for word in ("compute", "computes", "implement", "implements", "produce", "produces", "choose", "clear", "count", "add", "xor", "and", "or", "not")):
-        return "functional_behavior"
     return "descriptive"
 
 
@@ -688,216 +705,203 @@ def infer_claim_subjects(summary: str) -> list[str]:
     return subjects[:8]
 
 
-def collect_algorithm_evidence(documents: tuple[SourceDocument, ...]) -> list[dict[str, Any]]:
-    keywords = SUPPORTED_ALGORITHMS + ("checksum", "digest", "hash")
+def evidence_from_spec_claims(spec_claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
-    for document in documents:
-        for line_no, line in enumerate(document.lines, start=1):
-            normalized = normalize_algorithm_text(line)
-            if not any(keyword in normalized for keyword in keywords):
-                continue
-            evidence.append(
-                {
-                    "id": f"ev{len(evidence) + 1}",
-                    "source_id": document.id,
-                    "line_start": line_no,
-                    "line_end": line_no,
-                    "quote": line.strip()[:240],
-                }
-            )
+    for claim in spec_claims:
+        claim_id = claim.get("id")
+        if not isinstance(claim_id, str):
+            continue
+        evidence.append(
+            {
+                "id": f"ev{len(evidence) + 1}",
+                "source_id": claim.get("source_id"),
+                "line_start": claim.get("line_start"),
+                "line_end": claim.get("line_end"),
+                "quote": claim.get("quote"),
+                "claim_ids": [claim_id],
+            }
+        )
     return evidence
 
 
-def infer_algorithm_semantic_items(
-    *,
-    manifest: ManifestSummary,
-    documents: tuple[SourceDocument, ...],
-    evidence: list[dict[str, Any]],
+def semantic_elements_from_claims(
     spec_claims: list[dict[str, Any]],
+    evidence: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    message_field = select_hex_message_field(manifest.fields)
-    if message_field is None:
-        return []
-
-    text = normalize_algorithm_text(
-        "\n".join(
-            [
-                manifest.target,
-                *field_context_parts(manifest.fields),
-                *(document.text for document in documents),
-            ]
-        )
-    )
-    mode_field = select_algorithm_mode_field(manifest.fields)
-    semantic_items: list[dict[str, Any]] = []
-    for algorithm in SUPPORTED_ALGORITHMS:
-        if not algorithm_is_present(algorithm, text, mode_field):
-            continue
-        evidence_ids = [
-            str(item["id"])
-            for item in evidence
-            if algorithm in normalize_algorithm_text(str(item.get("quote", "")))
-            or (
-                algorithm == "crc32"
-                and "checksum" in normalize_algorithm_text(str(item.get("quote", "")))
-            )
-        ]
-        if not evidence_ids:
-            continue
-        claim_ids = claim_ids_for_algorithm(algorithm, spec_claims)
-        semantic_items.append(
-            semantic_item_for_algorithm(
-                algorithm=algorithm,
-                message_field=message_field,
-                mode_field=mode_field,
-                evidence_ids=evidence_ids,
-                claim_ids=claim_ids,
-                index=len(semantic_items) + 1,
-            )
-        )
-    return semantic_items
-
-
-def semantic_item_for_algorithm(
-    *,
-    algorithm: str,
-    message_field: ManifestField,
-    mode_field: ManifestField | None,
-    evidence_ids: list[str],
-    claim_ids: list[str],
-    index: int,
-) -> dict[str, Any]:
-    condition = None
-    subjects = [message_field.name, "expected"]
-    if mode_field is not None:
-        condition = {"field": mode_field.name, "op": "eq", "value": algorithm}
-        subjects.insert(0, mode_field.name)
-    call_name = f"hashlib.{algorithm}" if algorithm.startswith("sha") else "zlib.crc32"
-    item: dict[str, Any] = {
-        "id": f"sem{index}",
-        "kind": "reference_model_rule",
-        "summary": (
-            f"Expected result is {algorithm.upper()} of input field "
-            f"{message_field.name!r}."
-        ),
-        "status": "needs_review",
-        "confidence": 0.72 if evidence_ids else 0.55,
-        "subjects": subjects,
-        "conditions": [condition] if condition else [],
-        "effects": [
-            {
-                "kind": "compute_expected",
-                "output": "expected",
-                "expr": {
-                    "call": call_name,
-                    "args": [{"bytes_from_hex": {"field": message_field.name}}],
-                    "format": "hexdigest" if algorithm.startswith("sha") else "hex",
-                },
-            }
-        ],
-        "evidence": evidence_ids,
-        "claim_ids": claim_ids,
-        "provenance": {
-            "source": "rule_based",
-            "extractor": "algorithm_keyword_semantic_extractor",
-        },
+    evidence_by_claim = {
+        str(claim_id): str(item["id"])
+        for item in evidence
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+        for claim_id in item.get("claim_ids", [])
+        if isinstance(claim_id, str)
     }
-    return item
-
-
-def claim_ids_for_algorithm(algorithm: str, spec_claims: list[dict[str, Any]]) -> list[str]:
-    normalized_algorithm = algorithm.replace("_", "").replace("-", "").lower()
-    claim_ids = []
+    elements: list[dict[str, Any]] = []
     for claim in spec_claims:
-        text = normalize_algorithm_text(
-            " ".join(
-                [
-                    str(claim.get("quote", "")),
-                    str(claim.get("summary", "")),
-                ]
-            )
-        )
-        if normalized_algorithm in text or (
-            normalized_algorithm == "crc32" and "checksum" in text
-        ):
-            claim_id = claim.get("id")
-            if isinstance(claim_id, str):
-                claim_ids.append(claim_id)
-    return claim_ids
+        claim_id = claim.get("id")
+        if not isinstance(claim_id, str):
+            continue
+        summary = str(claim.get("summary") or claim.get("quote") or "").strip()
+        if not summary:
+            continue
+        kind = semantic_element_kind_for_claim(claim)
+        element = {
+            "id": f"sem{len(elements) + 1}",
+            "kind": kind,
+            "summary": summary,
+            "formalization_status": "candidate",
+            "confidence": 0.55,
+            "subjects": claim.get("subjects", []),
+            "representation": semantic_representation_for_claim(claim, kind),
+            "evidence": [evidence_by_claim[claim_id]] if claim_id in evidence_by_claim else [],
+            "claim_ids": [claim_id],
+            "provenance": {
+                "source": "rule_based",
+                "extractor": "claim_structuring_semantic_extractor",
+            },
+        }
+        elements.append(element)
+    return elements
+
+
+def semantic_element_kind_for_claim(claim: dict[str, Any]) -> str:
+    kind = str(claim.get("kind") or "descriptive")
+    summary = str(claim.get("summary") or claim.get("quote") or "").lower()
+    if kind == "timing":
+        return "temporal_behavior"
+    if kind == "state_behavior":
+        if "fsm" in summary or "state machine" in summary or "--" in summary:
+            return "state_machine"
+        return "sequential_behavior"
+    if kind == "functional_behavior":
+        if any(word in summary for word in ("clock", "posedge", "negedge", "flip-flop", "flip flop")):
+            return "sequential_behavior"
+        return "combinational_behavior"
+    if kind in ALLOWED_SEMANTIC_ELEMENT_KINDS:
+        return kind
+    return "descriptive"
+
+
+def semantic_representation_for_claim(claim: dict[str, Any], kind: str) -> dict[str, Any]:
+    summary = str(claim.get("summary") or claim.get("quote") or "").strip()
+    representation: dict[str, Any] = {
+        "type": representation_type_for_kind(kind),
+        "text": summary,
+    }
+    subjects = claim.get("subjects")
+    if isinstance(subjects, list) and subjects:
+        representation["subjects"] = [
+            subject for subject in subjects if isinstance(subject, str)
+        ]
+    parsed_port = parse_port_claim(summary)
+    if parsed_port:
+        representation["port"] = parsed_port
+    parsed_transition = parse_transition_claim(summary)
+    if parsed_transition:
+        representation["transition"] = parsed_transition
+    return representation
+
+
+def representation_type_for_kind(kind: str) -> str:
+    return {
+        "interface": "interface_decl",
+        "reset": "reset_rule",
+        "state_machine": "state_machine",
+        "sequential_behavior": "sequential_rule",
+        "temporal_behavior": "temporal_rule",
+        "timing": "temporal_rule",
+        "protocol": "protocol_rule",
+        "constraint": "constraint",
+        "combinational_behavior": "relation",
+        "functional_behavior": "relation",
+    }.get(kind, "textual_formalization")
+
+
+def parse_port_claim(summary: str) -> dict[str, Any] | None:
+    match = re.match(
+        r"^[-*]?\s*(input|output|inout)\s+([A-Za-z_][A-Za-z0-9_]*)"
+        r"(?:\s+\((\d+)\s+bits?\))?",
+        summary.strip(),
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    direction, name, width = match.groups()
+    return {
+        "direction": direction.lower(),
+        "name": name,
+        "width": int(width) if width is not None else 1,
+    }
+
+
+def parse_transition_claim(summary: str) -> dict[str, Any] | None:
+    match = re.search(
+        r"(?P<from>[A-Za-z_][A-Za-z0-9_]*)"
+        r"(?:\s*\((?P<outputs>[^)]*)\))?\s*--(?P<condition>[^-]+)-->\s*"
+        r"(?P<to>[A-Za-z_][A-Za-z0-9_]*)",
+        summary,
+    )
+    if not match:
+        return None
+    return {
+        "from": match.group("from"),
+        "to": match.group("to"),
+        "condition": match.group("condition").strip(),
+        "outputs": match.group("outputs") or "",
+    }
 
 
 def build_open_questions(
     manifest: ManifestSummary,
-    semantic_items: list[dict[str, Any]],
+    semantic_elements: list[dict[str, Any]],
     evidence: list[dict[str, Any]],
     spec_claims: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     questions: list[dict[str, Any]] = []
-    semantic_claim_ids = sorted(covered_claim_ids_from_items(semantic_items))
-    hex_fields = [field for field in manifest.fields if field.kind == "hex"]
-    if len(hex_fields) > 1 and semantic_items:
+    if not spec_claims:
         questions.append(
             {
                 "id": f"q{len(questions) + 1}",
                 "blocking": True,
                 "status": "open",
-                "question": "Which hex manifest field is the reference-model message/input payload?",
-                "related_items": [item["id"] for item in semantic_items],
-                "claim_ids": semantic_claim_ids,
-                "suggested_answers": [field.name for field in hex_fields],
-            }
-        )
-    if semantic_items:
-        questions.append(
-            {
-                "id": f"q{len(questions) + 1}",
-                "blocking": False,
-                "status": "open",
-                "question": "Confirm the expected-result representation used by the scoreboard.",
-                "related_items": [item["id"] for item in semantic_items],
-                "claim_ids": semantic_claim_ids,
-                "suggested_answers": ["lowercase_hex_string", "raw_bytes", "integer"],
-            }
-        )
-    if not semantic_items and evidence:
-        evidence_claim_ids = claim_ids_for_evidence(evidence, spec_claims)
-        questions.append(
-            {
-                "id": f"q{len(questions) + 1}",
-                "blocking": True,
-                "status": "open",
-                "question": "The spec mentions hash/checksum terms, but no lowerable behavior was extracted.",
+                "question": "No source claims were extracted from the provided spec text.",
                 "related_items": [],
-                "claim_ids": evidence_claim_ids,
-                "suggested_answers": ["author_semantic_item", "mark_unsupported"],
+                "claim_ids": [],
+                "suggested_answers": ["provide_behavior_spec", "author_spec_claims"],
             }
         )
+    _ = (manifest, semantic_elements, evidence)
     return questions
 
 
-def unsupported_claims(
+def semantic_gaps_for_uncovered_claims(
     spec_claims: list[dict[str, Any]],
-    semantic_items: list[dict[str, Any]],
+    semantic_elements: list[dict[str, Any]],
     open_questions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    covered = covered_claim_ids_from_items(semantic_items)
+    covered = covered_claim_ids_from_elements(semantic_elements)
     covered.update(covered_claim_ids_from_questions(open_questions))
-    unsupported = []
+    gaps = []
     for claim in spec_claims:
         claim_id = claim.get("id")
         if not isinstance(claim_id, str) or claim_id in covered:
             continue
-        unsupported.append(
+        gaps.append(
             {
-                "reason": f"No supported semantic item extracted for spec claim {claim_id}.",
-                "requires": "LLM extraction, human semantic completion, or explicit waiver before lowering",
+                "id": f"gap{len(gaps) + 1}",
+                "kind": "unformalized",
+                "reason": f"No SemanticSpecIR element was formalized for spec claim {claim_id}.",
+                "resolution": "LLM extraction, human semantic completion, or explicit semantic waiver",
                 "claim_ids": [claim_id],
             }
         )
-    return unsupported
+    return gaps
 
 
-def covered_claim_ids_from_items(items: list[dict[str, Any]]) -> set[str]:
+def gap_requires_human_input(gap: dict[str, Any]) -> bool:
+    return gap.get("kind") in {"ambiguous", "conflict", "incomplete", "missing_context", "unformalized"}
+
+
+def covered_claim_ids_from_elements(items: list[dict[str, Any]]) -> set[str]:
     covered: set[str] = set()
     for item in items:
         if not isinstance(item, dict):
@@ -917,33 +921,6 @@ def covered_claim_ids_from_questions(questions: list[dict[str, Any]]) -> set[str
             if isinstance(claim_id, str):
                 covered.add(claim_id)
     return covered
-
-
-def claim_ids_for_evidence(
-    evidence: list[dict[str, Any]],
-    spec_claims: list[dict[str, Any]],
-) -> list[str]:
-    normalized_evidence = [
-        normalize_algorithm_text(str(item.get("quote", "")))
-        for item in evidence
-        if isinstance(item, dict)
-    ]
-    claim_ids = []
-    for claim in spec_claims:
-        quote = normalize_algorithm_text(str(claim.get("quote", "")))
-        if any(quote and (quote in evidence_quote or evidence_quote in quote) for evidence_quote in normalized_evidence):
-            claim_id = claim.get("id")
-            if isinstance(claim_id, str):
-                claim_ids.append(claim_id)
-    return claim_ids
-
-
-def default_assumptions(semantic_items: list[dict[str, Any]]) -> list[str]:
-    if not semantic_items:
-        return []
-    return [
-        "Algorithmic expected values are represented using the effect expression format until reviewed.",
-    ]
 
 
 def validate_sources(
@@ -1153,39 +1130,44 @@ def validate_inputs(
     return input_names
 
 
-def validate_semantic_items(
+def validate_semantic_elements(
     value: Any,
     evidence_ids: set[str],
     claim_ids: set[str],
     manifest_fields: set[str],
     issues: list[SemanticSpecIRIssue],
 ) -> set[str]:
-    item_ids: set[str] = set()
+    element_ids: set[str] = set()
     if not isinstance(value, list):
-        issues.append(SemanticSpecIRIssue("semantic_items", "must be a list"))
-        return item_ids
+        issues.append(SemanticSpecIRIssue("semantic_elements", "must be a list"))
+        return element_ids
     for index, item in enumerate(value):
-        path = f"semantic_items[{index}]"
+        path = f"semantic_elements[{index}]"
         if not isinstance(item, dict):
             issues.append(SemanticSpecIRIssue(path, "must be an object"))
             continue
-        item_id = item.get("id")
-        if not isinstance(item_id, str) or not item_id:
+        element_id = item.get("id")
+        if not isinstance(element_id, str) or not element_id:
             issues.append(SemanticSpecIRIssue(f"{path}.id", "must be a non-empty string"))
             continue
-        if item_id in item_ids:
-            issues.append(SemanticSpecIRIssue(f"{path}.id", f"duplicate semantic item id {item_id!r}"))
-        item_ids.add(item_id)
-        if not isinstance(item.get("kind"), str) or not item.get("kind"):
-            issues.append(SemanticSpecIRIssue(f"{path}.kind", "must be a non-empty string"))
-        if not isinstance(item.get("summary"), str) or not item.get("summary"):
-            issues.append(SemanticSpecIRIssue(f"{path}.summary", "must be a non-empty string"))
-        status = item.get("status")
-        if status not in ALLOWED_ITEM_STATUSES:
+        if element_id in element_ids:
+            issues.append(SemanticSpecIRIssue(f"{path}.id", f"duplicate semantic element id {element_id!r}"))
+        element_ids.add(element_id)
+        if item.get("kind") not in ALLOWED_SEMANTIC_ELEMENT_KINDS:
             issues.append(
                 SemanticSpecIRIssue(
-                    f"{path}.status",
-                    f"must be one of {sorted(ALLOWED_ITEM_STATUSES)}, got {status!r}",
+                    f"{path}.kind",
+                    f"must be one of {sorted(ALLOWED_SEMANTIC_ELEMENT_KINDS)}, got {item.get('kind')!r}",
+                )
+            )
+        if not isinstance(item.get("summary"), str) or not item.get("summary"):
+            issues.append(SemanticSpecIRIssue(f"{path}.summary", "must be a non-empty string"))
+        status = item.get("formalization_status")
+        if status not in ALLOWED_FORMALIZATION_STATUSES:
+            issues.append(
+                SemanticSpecIRIssue(
+                    f"{path}.formalization_status",
+                    f"must be one of {sorted(ALLOWED_FORMALIZATION_STATUSES)}, got {status!r}",
                 )
             )
         confidence = item.get("confidence")
@@ -1194,9 +1176,12 @@ def validate_semantic_items(
         validate_string_list(item.get("subjects", []), f"{path}.subjects", issues)
         validate_item_evidence(item.get("evidence"), f"{path}.evidence", evidence_ids, issues)
         validate_claim_ids(item.get("claim_ids"), f"{path}.claim_ids", claim_ids, issues)
-        validate_conditions(item.get("conditions", []), f"{path}.conditions", manifest_fields, issues)
-        validate_effects(item.get("effects", []), f"{path}.effects", manifest_fields, issues)
-    return item_ids
+        representation = item.get("representation")
+        if not isinstance(representation, dict):
+            issues.append(SemanticSpecIRIssue(f"{path}.representation", "must be an object"))
+        else:
+            validate_representation(representation, f"{path}.representation", manifest_fields, issues)
+    return element_ids
 
 
 def validate_open_questions(
@@ -1234,7 +1219,7 @@ def validate_open_questions(
                     issues.append(
                         SemanticSpecIRIssue(
                             f"{path}.related_items[{related_index}]",
-                            f"unknown semantic item id {related_id!r}",
+                            f"unknown semantic element id {related_id!r}",
                     )
                 )
         if "claim_ids" in item:
@@ -1314,7 +1299,7 @@ def validate_claim_ids(
             )
 
 
-def validate_unsupported(
+def validate_semantic_gaps(
     value: Any,
     claim_ids: set[str],
     issues: list[SemanticSpecIRIssue],
@@ -1322,17 +1307,26 @@ def validate_unsupported(
     if value is None:
         return
     if not isinstance(value, list):
-        issues.append(SemanticSpecIRIssue("unsupported", "must be a list"))
+        issues.append(SemanticSpecIRIssue("semantic_gaps", "must be a list"))
         return
     for index, item in enumerate(value):
-        path = f"unsupported[{index}]"
+        path = f"semantic_gaps[{index}]"
         if not isinstance(item, dict):
             issues.append(SemanticSpecIRIssue(path, "must be an object"))
             continue
+        if "id" in item and (not isinstance(item["id"], str) or not item["id"]):
+            issues.append(SemanticSpecIRIssue(f"{path}.id", "must be a non-empty string"))
+        if item.get("kind") not in ALLOWED_SEMANTIC_GAP_KINDS:
+            issues.append(
+                SemanticSpecIRIssue(
+                    f"{path}.kind",
+                    f"must be one of {sorted(ALLOWED_SEMANTIC_GAP_KINDS)}, got {item.get('kind')!r}",
+                )
+            )
         if "reason" in item and not isinstance(item["reason"], str):
             issues.append(SemanticSpecIRIssue(f"{path}.reason", "must be a string"))
-        if "requires" in item and not isinstance(item["requires"], str):
-            issues.append(SemanticSpecIRIssue(f"{path}.requires", "must be a string"))
+        if "resolution" in item and not isinstance(item["resolution"], str):
+            issues.append(SemanticSpecIRIssue(f"{path}.resolution", "must be a string"))
         if "claim_ids" in item:
             validate_claim_ids(
                 item.get("claim_ids"),
@@ -1386,6 +1380,58 @@ def validate_effects(
             validate_expr_references(effect["expr"], f"{item_path}.expr", manifest_fields, issues)
 
 
+def validate_representation(
+    value: dict[str, Any],
+    path: str,
+    manifest_fields: set[str],
+    issues: list[SemanticSpecIRIssue],
+) -> None:
+    representation_type = value.get("type")
+    if not isinstance(representation_type, str) or not representation_type:
+        issues.append(SemanticSpecIRIssue(f"{path}.type", "must be a non-empty string"))
+    text = value.get("text")
+    if not isinstance(text, str) or not text.strip():
+        issues.append(SemanticSpecIRIssue(f"{path}.text", "must be a non-empty string"))
+    validate_representation_references(value, path, manifest_fields, issues)
+
+
+def validate_representation_references(
+    value: Any,
+    path: str,
+    manifest_fields: set[str],
+    issues: list[SemanticSpecIRIssue],
+) -> None:
+    if isinstance(value, str | int | float | bool) or value is None:
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            validate_representation_references(item, f"{path}[{index}]", manifest_fields, issues)
+        return
+    if not isinstance(value, dict):
+        issues.append(SemanticSpecIRIssue(path, "representation must be a scalar, list, or object"))
+        return
+    for key, item in value.items():
+        if key in {"field", "signal"}:
+            if not isinstance(item, str) or not item:
+                issues.append(SemanticSpecIRIssue(f"{path}.{key}", "must be a non-empty string"))
+            elif key == "field" and manifest_fields and item not in manifest_fields:
+                issues.append(SemanticSpecIRIssue(f"{path}.{key}", f"unknown manifest field {item!r}"))
+            continue
+        if key == "fields" and isinstance(item, list):
+            for index, name in enumerate(item):
+                if not isinstance(name, str):
+                    issues.append(SemanticSpecIRIssue(f"{path}.{key}[{index}]", "must be a string"))
+                elif manifest_fields and name not in manifest_fields:
+                    issues.append(SemanticSpecIRIssue(f"{path}.{key}[{index}]", f"unknown manifest field {name!r}"))
+            continue
+        if key in {"signals", "subjects"} and isinstance(item, list):
+            for index, name in enumerate(item):
+                if not isinstance(name, str):
+                    issues.append(SemanticSpecIRIssue(f"{path}.{key}[{index}]", "must be a string"))
+            continue
+        validate_representation_references(item, f"{path}.{key}", manifest_fields, issues)
+
+
 def validate_expr_references(
     expr: Any,
     path: str,
@@ -1407,13 +1453,6 @@ def validate_expr_references(
             issues.append(SemanticSpecIRIssue(f"{path}.field", "must be a non-empty string"))
         elif manifest_fields and field_name not in manifest_fields:
             issues.append(SemanticSpecIRIssue(f"{path}.field", f"unknown manifest field {field_name!r}"))
-    if "call" in expr and expr["call"] not in ALLOWED_CALLS:
-        issues.append(
-            SemanticSpecIRIssue(
-                f"{path}.call",
-                f"not lowerable by current OracleIR call allowlist: {expr['call']!r}",
-            )
-        )
     for key, value in expr.items():
         if key in {"field", "call", "format"}:
             continue
@@ -1460,26 +1499,6 @@ def manifest_summary_payload(manifest: ManifestSummary) -> dict[str, Any]:
     }
 
 
-def field_context_parts(fields: tuple[ManifestField, ...]) -> list[str]:
-    parts = []
-    for field in fields:
-        parts.append(field.name)
-        parts.extend(str(choice) for choice in field.choices)
-    return parts
-
-
-def algorithm_is_present(
-    algorithm: str,
-    normalized_text: str,
-    mode_field: ManifestField | None,
-) -> bool:
-    if mode_field is not None and str(algorithm).lower() in {
-        str(choice).lower() for choice in mode_field.choices
-    }:
-        return True
-    return algorithm in normalized_text
-
-
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -1489,7 +1508,7 @@ def looks_like_semantic_spec_ir(value: dict[str, Any]) -> bool:
         "schema_version",
         "target",
         "sources",
-        "semantic_items",
+        "semantic_elements",
         "evidence",
         "review",
     }.issubset(value)

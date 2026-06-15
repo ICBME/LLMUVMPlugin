@@ -7,10 +7,11 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
-from rtlagent_bfm.codegen.oracle_ir import ALLOWED_CALLS, load_manifest_summary
+from rtlagent_bfm.codegen.oracle_ir import load_manifest_summary
 from rtlagent_bfm.loader import load_ir
 
 from .semantic_ir import (
+    BLOCKING_FORMALIZATION_STATUSES,
     SemanticSpecIRIssue,
     collect_semantic_spec_ir_issues,
     extract_spec_claims,
@@ -26,7 +27,6 @@ REVIEW_STAGES = (
     "traceability_review",
     "completeness_review",
     "semantic_consistency_review",
-    "lowering_readiness_review",
     "human_review_gate",
 )
 
@@ -95,8 +95,6 @@ def review_semantic_spec_ir(
             design_ir_path=design_ir_path,
         )
     )
-    lowering = lowering_readiness_review(ir)
-    findings.extend(lowering["findings"])
     findings.extend(human_review_gate(ir, require_reviewed=require_reviewed))
 
     finding_dicts = [finding.to_dict() for finding in findings]
@@ -117,10 +115,8 @@ def review_semantic_spec_ir(
             "uncovered_claims": completeness["uncovered_claims"],
             "placeholder_only_claims": completeness["placeholder_only_claims"],
         },
-        "lowering": {
-            "ready_items": lowering["ready_items"],
-            "blocked_items": lowering["blocked_items"],
-            "unsupported_items": lowering["unsupported_items"],
+        "semantic_gaps": {
+            "count": len(ir.get("semantic_gaps", [])) if isinstance(ir.get("semantic_gaps"), list) else 0,
         },
     }
 
@@ -296,7 +292,7 @@ def traceability_review(
                 )
             )
 
-    for item_index, item in enumerate(ir.get("semantic_items", [])):
+    for item_index, item in enumerate(ir.get("semantic_elements", [])):
         if not isinstance(item, dict):
             continue
         item_evidence = item.get("evidence", [])
@@ -305,8 +301,8 @@ def traceability_review(
                 ReviewFinding(
                     stage="traceability_review",
                     severity="error",
-                    path=f"semantic_items[{item_index}].evidence",
-                    message="semantic item has no evidence",
+                    path=f"semantic_elements[{item_index}].evidence",
+                    message="semantic element has no evidence",
                     blocking=True,
                 )
             )
@@ -317,7 +313,7 @@ def traceability_review(
                     ReviewFinding(
                         stage="traceability_review",
                         severity="error",
-                        path=f"semantic_items[{item_index}].evidence[{evidence_index}]",
+                        path=f"semantic_elements[{item_index}].evidence[{evidence_index}]",
                         message=f"unknown evidence id {evidence_id!r}",
                         blocking=True,
                     )
@@ -383,23 +379,30 @@ def completeness_review(
         and claim.get("normative", True)
     }
     covered_by_semantic = collect_expected_claim_coverage(
-        ir.get("semantic_items", []),
+        ir.get("semantic_elements", []),
         ir_claim_id_to_key=ir_claim_id_to_key,
         expected_by_key=expected_by_key,
+        semantic_complete_only=True,
+    )
+    covered_by_incomplete_semantic = collect_expected_claim_coverage(
+        ir.get("semantic_elements", []),
+        ir_claim_id_to_key=ir_claim_id_to_key,
+        expected_by_key=expected_by_key,
+        semantic_incomplete_only=True,
     )
     covered_by_questions = collect_expected_claim_coverage(
         ir.get("open_questions", []),
         ir_claim_id_to_key=ir_claim_id_to_key,
         expected_by_key=expected_by_key,
     )
-    covered_by_unsupported = collect_expected_claim_coverage(
-        ir.get("unsupported", []),
+    covered_by_gaps = collect_expected_claim_coverage(
+        ir.get("semantic_gaps", []),
         ir_claim_id_to_key=ir_claim_id_to_key,
         expected_by_key=expected_by_key,
     )
     covered_claims = sorted(
         set(expected_claim_ids).intersection(
-            covered_by_semantic | covered_by_questions | covered_by_unsupported
+            covered_by_semantic | covered_by_questions | covered_by_gaps
         )
     )
     uncovered_claims: list[str] = []
@@ -412,7 +415,11 @@ def completeness_review(
 
     for claim_id in expected_claim_ids:
         has_semantic = claim_id in covered_by_semantic
-        has_placeholder = claim_id in covered_by_questions or claim_id in covered_by_unsupported
+        has_placeholder = (
+            claim_id in covered_by_incomplete_semantic
+            or claim_id in covered_by_questions
+            or claim_id in covered_by_gaps
+        )
         claim = expected_claims_by_id.get(claim_id, {})
         path = source_claim_path(claim, fallback_id=claim_id)
         if not has_semantic and not has_placeholder:
@@ -422,7 +429,7 @@ def completeness_review(
                     stage="completeness_review",
                     severity="error",
                     path=path,
-                    message=f"source-derived normative spec claim {claim_id!r} is not covered by semantic_items, open_questions, or unsupported",
+                    message=f"source-derived normative spec claim {claim_id!r} is not covered by semantic_elements, open_questions, or semantic_gaps",
                     blocking=True,
                 )
             )
@@ -434,7 +441,7 @@ def completeness_review(
                     stage="completeness_review",
                     severity="warning",
                     path=path,
-                    message=f"source-derived normative spec claim {claim_id!r} is only covered by open_questions or unsupported",
+                    message=f"source-derived normative spec claim {claim_id!r} is only covered by incomplete semantic_elements, open_questions, or semantic_gaps",
                     blocking=True,
                 )
             )
@@ -475,12 +482,18 @@ def collect_expected_claim_coverage(
     *,
     ir_claim_id_to_key: dict[str, tuple[str, int, int, str]],
     expected_by_key: dict[tuple[str, int, int, str], str],
+    semantic_complete_only: bool = False,
+    semantic_incomplete_only: bool = False,
 ) -> set[str]:
     covered: set[str] = set()
     if not isinstance(value, list):
         return covered
     for item in value:
         if not isinstance(item, dict):
+            continue
+        if semantic_complete_only and not semantic_element_has_complete_formalization(item):
+            continue
+        if semantic_incomplete_only and semantic_element_has_complete_formalization(item):
             continue
         for claim_id in item.get("claim_ids", []):
             if not isinstance(claim_id, str):
@@ -492,6 +505,10 @@ def collect_expected_claim_coverage(
             if expected_claim_id is not None:
                 covered.add(expected_claim_id)
     return covered
+
+
+def semantic_element_has_complete_formalization(item: dict[str, Any]) -> bool:
+    return item.get("formalization_status") not in BLOCKING_FORMALIZATION_STATUSES
 
 
 def semantic_consistency_review(
@@ -531,41 +548,24 @@ def semantic_consistency_review(
             )
 
     if manifest_fields:
-        for item_index, item in enumerate(ir.get("semantic_items", [])):
+        for item_index, item in enumerate(ir.get("semantic_elements", [])):
             if not isinstance(item, dict):
                 continue
-            for condition_index, condition in enumerate(item.get("conditions", [])):
-                if not isinstance(condition, dict):
-                    continue
-                field = condition.get("field")
-                if isinstance(field, str) and field not in manifest_fields:
+            for field_path, field in iter_expr_fields(item.get("representation")):
+                if field not in manifest_fields:
                     findings.append(
                         ReviewFinding(
                             stage="semantic_consistency_review",
                             severity="error",
-                            path=f"semantic_items[{item_index}].conditions[{condition_index}].field",
-                            message=f"condition references unknown manifest field {field!r}",
+                            path=f"semantic_elements[{item_index}].representation{field_path}",
+                            message=f"representation references unknown manifest field {field!r}",
                             blocking=True,
                         )
                     )
-            for effect_index, effect in enumerate(item.get("effects", [])):
-                if not isinstance(effect, dict):
-                    continue
-                for field_path, field in iter_expr_fields(effect.get("expr")):
-                    if field not in manifest_fields:
-                        findings.append(
-                            ReviewFinding(
-                                stage="semantic_consistency_review",
-                                severity="error",
-                                path=f"semantic_items[{item_index}].effects[{effect_index}].expr{field_path}",
-                                message=f"expression references unknown manifest field {field!r}",
-                                blocking=True,
-                            )
-                        )
 
     item_ids = {
         str(item.get("id"))
-        for item in ir.get("semantic_items", [])
+        for item in ir.get("semantic_elements", [])
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
     reviewed_items = ir.get("review", {}).get("reviewed_items", [])
@@ -577,90 +577,10 @@ def semantic_consistency_review(
                         stage="semantic_consistency_review",
                         severity="warning",
                         path=f"review.reviewed_items[{index}]",
-                        message=f"review references unknown semantic item id {item_id!r}",
+                        message=f"review references unknown semantic element id {item_id!r}",
                     )
                 )
     return findings
-
-
-def lowering_readiness_review(ir: dict[str, Any]) -> dict[str, Any]:
-    ready_items: list[str] = []
-    blocked_items: list[str] = []
-    unsupported_items: list[str] = []
-    findings: list[ReviewFinding] = []
-    for index, item in enumerate(ir.get("semantic_items", [])):
-        if not isinstance(item, dict):
-            continue
-        item_id = str(item.get("id") or f"semantic_items[{index}]")
-        item_path = f"semantic_items[{index}]"
-        effects = item.get("effects", [])
-        if not isinstance(effects, list) or not effects:
-            unsupported_items.append(item_id)
-            findings.append(
-                ReviewFinding(
-                    stage="lowering_readiness_review",
-                    severity="warning",
-                    path=f"{item_path}.effects",
-                    message="item has no effects and cannot be lowered to OracleIR",
-                    blocking=True,
-                )
-            )
-            continue
-
-        item_blocked = False
-        item_unsupported = False
-        for effect_index, effect in enumerate(effects):
-            if not isinstance(effect, dict):
-                item_unsupported = True
-                continue
-            if effect.get("kind") != "compute_expected":
-                item_unsupported = True
-                findings.append(
-                    ReviewFinding(
-                        stage="lowering_readiness_review",
-                        severity="warning",
-                        path=f"{item_path}.effects[{effect_index}].kind",
-                        message="only compute_expected effects are lowerable to current OracleIR",
-                        blocking=True,
-                    )
-                )
-            calls = list(iter_expr_calls(effect.get("expr")))
-            for call_path, call_name in calls:
-                if call_name not in ALLOWED_CALLS:
-                    item_blocked = True
-                    findings.append(
-                        ReviewFinding(
-                            stage="lowering_readiness_review",
-                            severity="error",
-                            path=f"{item_path}.effects[{effect_index}].expr{call_path}",
-                            message=f"call {call_name!r} is not in OracleIR allowlist",
-                            blocking=True,
-                        )
-                    )
-            if not calls and not effect.get("expr"):
-                item_unsupported = True
-                findings.append(
-                    ReviewFinding(
-                        stage="lowering_readiness_review",
-                        severity="warning",
-                        path=f"{item_path}.effects[{effect_index}].expr",
-                        message="effect has no expression to lower",
-                        blocking=True,
-                    )
-                )
-
-        if item_blocked:
-            blocked_items.append(item_id)
-        elif item_unsupported:
-            unsupported_items.append(item_id)
-        else:
-            ready_items.append(item_id)
-    return {
-        "ready_items": ready_items,
-        "blocked_items": blocked_items,
-        "unsupported_items": unsupported_items,
-        "findings": findings,
-    }
 
 
 def human_review_gate(
@@ -703,7 +623,7 @@ def human_review_gate(
                     stage="human_review_gate",
                     severity="warning",
                     path=f"open_questions[{index}]",
-                    message="blocking open question requires a human answer before lowering",
+                    message="blocking open question requires a human answer before acceptance",
                     blocking=True,
                 )
             )
@@ -761,16 +681,3 @@ def iter_expr_fields(expr: Any, path: str = ""):
     elif isinstance(expr, list):
         for index, value in enumerate(expr):
             yield from iter_expr_fields(value, f"{path}[{index}]")
-
-
-def iter_expr_calls(expr: Any, path: str = ""):
-    if isinstance(expr, dict):
-        if isinstance(expr.get("call"), str):
-            yield f"{path}.call", expr["call"]
-        for key, value in expr.items():
-            if key == "call":
-                continue
-            yield from iter_expr_calls(value, f"{path}.{key}")
-    elif isinstance(expr, list):
-        for index, value in enumerate(expr):
-            yield from iter_expr_calls(value, f"{path}[{index}]")
