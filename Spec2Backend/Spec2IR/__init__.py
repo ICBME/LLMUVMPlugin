@@ -17,6 +17,7 @@ from .semantic_ir import (
 )
 from .representation_ast import (
     REPRESENTATION_AST_VERSION,
+    collect_representation_completeness_issues,
     representation_ast_contract,
 )
 from .semantic_repair import (
@@ -43,6 +44,7 @@ __all__ = [
     "SemanticSpecIRValidationError",
     "build_semantic_spec_ir_repair_prompt",
     "build_semantic_spec_ir_prompt",
+    "collect_representation_completeness_issues",
     "collect_semantic_spec_ir_issues",
     "generate_semantic_spec_ir",
     "invoke_semantic_spec_ir_backend",

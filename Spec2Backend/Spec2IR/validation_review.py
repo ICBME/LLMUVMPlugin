@@ -10,9 +10,10 @@ from typing import Any, Iterable
 from rtlagent_bfm.codegen.oracle_ir import load_manifest_summary
 from rtlagent_bfm.loader import load_ir
 
+from .claim_extraction import gap_requires_human_input
 from .representation_ast import (
+    collect_representation_completeness_issues,
     iter_ast_field_refs,
-    representation_requires_human_review,
 )
 from .semantic_ir import (
     BLOCKING_FORMALIZATION_STATUSES,
@@ -116,8 +117,10 @@ def review_semantic_spec_ir(
         "completeness": {
             "normative_claims": completeness["normative_claims"],
             "covered_claims": completeness["covered_claims"],
+            "partial_claims": completeness["partial_claims"],
             "uncovered_claims": completeness["uncovered_claims"],
             "placeholder_only_claims": completeness["placeholder_only_claims"],
+            "claim_obligations": completeness["claim_obligations"],
         },
         "semantic_gaps": {
             "count": len(ir.get("semantic_gaps", [])) if isinstance(ir.get("semantic_gaps"), list) else 0,
@@ -345,8 +348,10 @@ def completeness_review(
         return {
             "normative_claims": [],
             "covered_claims": [],
+            "partial_claims": [],
             "uncovered_claims": [],
             "placeholder_only_claims": [],
+            "claim_obligations": [],
             "findings": findings,
         }
     if expected_claims_error:
@@ -404,6 +409,25 @@ def completeness_review(
         ir_claim_id_to_key=ir_claim_id_to_key,
         expected_by_key=expected_by_key,
     )
+    semantic_claim_obligations, semantic_issue_findings = collect_semantic_claim_obligations(
+        ir.get("semantic_elements", []),
+        ir_claim_id_to_key=ir_claim_id_to_key,
+        expected_by_key=expected_by_key,
+    )
+    question_claim_obligations, question_issue_findings = collect_question_claim_obligations(
+        ir.get("open_questions", []),
+        review=ir.get("review", {}),
+        ir_claim_id_to_key=ir_claim_id_to_key,
+        expected_by_key=expected_by_key,
+    )
+    gap_claim_obligations, gap_issue_findings = collect_gap_claim_obligations(
+        ir.get("semantic_gaps", []),
+        ir_claim_id_to_key=ir_claim_id_to_key,
+        expected_by_key=expected_by_key,
+    )
+    findings.extend(semantic_issue_findings)
+    findings.extend(question_issue_findings)
+    findings.extend(gap_issue_findings)
     covered_claims = sorted(
         set(expected_claim_ids).intersection(
             covered_by_semantic | covered_by_questions | covered_by_gaps
@@ -411,11 +435,13 @@ def completeness_review(
     )
     uncovered_claims: list[str] = []
     placeholder_only_claims: list[str] = []
+    partial_claims: list[str] = []
     expected_claims_by_id = {
         str(claim.get("id")): claim
         for claim in source_claims
         if isinstance(claim.get("id"), str)
     }
+    claim_obligations: list[dict[str, Any]] = []
 
     for claim_id in expected_claim_ids:
         has_semantic = claim_id in covered_by_semantic
@@ -424,9 +450,18 @@ def completeness_review(
             or claim_id in covered_by_questions
             or claim_id in covered_by_gaps
         )
+        claim_missing_obligations = (
+            semantic_claim_obligations.get(claim_id, [])
+            + question_claim_obligations.get(claim_id, [])
+            + gap_claim_obligations.get(claim_id, [])
+        )
         claim = expected_claims_by_id.get(claim_id, {})
         path = source_claim_path(claim, fallback_id=claim_id)
+        status = "partial" if claim_missing_obligations else "complete"
+        if claim_missing_obligations:
+            partial_claims.append(claim_id)
         if not has_semantic and not has_placeholder:
+            status = "uncovered"
             uncovered_claims.append(claim_id)
             findings.append(
                 ReviewFinding(
@@ -437,9 +472,11 @@ def completeness_review(
                     blocking=True,
                 )
             )
-            continue
-        if not has_semantic and has_placeholder:
+        elif not has_semantic and has_placeholder:
+            status = "partial"
             placeholder_only_claims.append(claim_id)
+            if claim_id not in partial_claims:
+                partial_claims.append(claim_id)
             findings.append(
                 ReviewFinding(
                     stage="completeness_review",
@@ -449,14 +486,197 @@ def completeness_review(
                     blocking=True,
                 )
             )
+        claim_obligations.append(
+            {
+                "claim_id": claim_id,
+                "status": status,
+                "missing_obligations": claim_missing_obligations,
+            }
+        )
 
     return {
         "normative_claims": expected_claim_ids,
         "covered_claims": covered_claims,
+        "partial_claims": sorted(set(partial_claims)),
         "uncovered_claims": uncovered_claims,
         "placeholder_only_claims": placeholder_only_claims,
+        "claim_obligations": claim_obligations,
         "findings": findings,
     }
+
+
+def collect_semantic_claim_obligations(
+    value: Any,
+    *,
+    ir_claim_id_to_key: dict[str, tuple[str, int, int, str]],
+    expected_by_key: dict[tuple[str, int, int, str], str],
+) -> tuple[dict[str, list[dict[str, str]]], list[ReviewFinding]]:
+    obligations: dict[str, list[dict[str, str]]] = {}
+    findings: list[ReviewFinding] = []
+    if not isinstance(value, list):
+        return obligations, findings
+    for item_index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        item_issues = semantic_element_formalization_issues(item)
+        if not item_issues:
+            continue
+        expected_claim_ids = expected_claim_ids_for_item(
+            item,
+            ir_claim_id_to_key=ir_claim_id_to_key,
+            expected_by_key=expected_by_key,
+        )
+        for expected_claim_id in expected_claim_ids:
+            claim_obligations = obligations.setdefault(expected_claim_id, [])
+            for issue in item_issues:
+                claim_obligations.append(
+                    {
+                        "semantic_element_id": str(item.get("id") or f"semantic_elements[{item_index}]"),
+                        **issue,
+                    }
+                )
+        for issue in item_issues:
+            issue_path = issue.get("path") or "representation"
+            findings.append(
+                ReviewFinding(
+                    stage="completeness_review",
+                    severity="warning",
+                    path=f"semantic_elements[{item_index}].{issue_path}",
+                    message=issue.get("message", "semantic element is not completely formalized"),
+                    blocking=True,
+                )
+            )
+    return obligations, findings
+
+
+def collect_question_claim_obligations(
+    value: Any,
+    *,
+    review: Any,
+    ir_claim_id_to_key: dict[str, tuple[str, int, int, str]],
+    expected_by_key: dict[tuple[str, int, int, str], str],
+) -> tuple[dict[str, list[dict[str, str]]], list[ReviewFinding]]:
+    obligations: dict[str, list[dict[str, str]]] = {}
+    findings: list[ReviewFinding] = []
+    if not isinstance(value, list):
+        return obligations, findings
+    answered_question_ids = collect_answered_question_ids(review)
+    for question_index, question in enumerate(value):
+        if not isinstance(question, dict):
+            continue
+        question_id = str(question.get("id") or f"open_questions[{question_index}]")
+        status = str(question.get("status", "open"))
+        is_answered = question_id in answered_question_ids
+        if (
+            not bool(question.get("blocking"))
+            or status in {"resolved", "closed", "accepted"}
+            or is_answered
+        ):
+            continue
+        path = f"open_questions[{question_index}]"
+        issue = {
+            "path": path,
+            "code": "blocking_open_question",
+            "message": "blocking open question must be answered or resolved before this claim is complete",
+        }
+        for expected_claim_id in expected_claim_ids_for_item(
+            question,
+            ir_claim_id_to_key=ir_claim_id_to_key,
+            expected_by_key=expected_by_key,
+        ):
+            obligations.setdefault(expected_claim_id, []).append(
+                {
+                    "open_question_id": question_id,
+                    **issue,
+                }
+            )
+        findings.append(
+            ReviewFinding(
+                stage="completeness_review",
+                severity="warning",
+                path=path,
+                message=issue["message"],
+                blocking=True,
+            )
+        )
+    return obligations, findings
+
+
+def collect_gap_claim_obligations(
+    value: Any,
+    *,
+    ir_claim_id_to_key: dict[str, tuple[str, int, int, str]],
+    expected_by_key: dict[tuple[str, int, int, str], str],
+) -> tuple[dict[str, list[dict[str, str]]], list[ReviewFinding]]:
+    obligations: dict[str, list[dict[str, str]]] = {}
+    findings: list[ReviewFinding] = []
+    if not isinstance(value, list):
+        return obligations, findings
+    for gap_index, gap in enumerate(value):
+        if not isinstance(gap, dict) or not gap_requires_human_input(gap):
+            continue
+        path = f"semantic_gaps[{gap_index}]"
+        gap_id = str(gap.get("id") or path)
+        gap_kind = str(gap.get("kind") or "unknown")
+        issue = {
+            "path": path,
+            "code": "semantic_gap_requires_resolution",
+            "message": f"semantic gap {gap_id!r} ({gap_kind}) must be resolved before this claim is complete",
+        }
+        for expected_claim_id in expected_claim_ids_for_item(
+            gap,
+            ir_claim_id_to_key=ir_claim_id_to_key,
+            expected_by_key=expected_by_key,
+        ):
+            obligations.setdefault(expected_claim_id, []).append(
+                {
+                    "semantic_gap_id": gap_id,
+                    "gap_kind": gap_kind,
+                    **issue,
+                }
+            )
+        findings.append(
+            ReviewFinding(
+                stage="completeness_review",
+                severity="warning",
+                path=path,
+                message=issue["message"],
+                blocking=True,
+            )
+        )
+    return obligations, findings
+
+
+def collect_answered_question_ids(review: Any) -> set[str]:
+    answered_question_ids: set[str] = set()
+    if not isinstance(review, dict):
+        return answered_question_ids
+    human_answers = review.get("human_answers", [])
+    if not isinstance(human_answers, list):
+        return answered_question_ids
+    for answer in human_answers:
+        if isinstance(answer, dict) and isinstance(answer.get("question_id"), str):
+            answered_question_ids.add(answer["question_id"])
+    return answered_question_ids
+
+
+def expected_claim_ids_for_item(
+    item: dict[str, Any],
+    *,
+    ir_claim_id_to_key: dict[str, tuple[str, int, int, str]],
+    expected_by_key: dict[tuple[str, int, int, str], str],
+) -> list[str]:
+    expected_ids: list[str] = []
+    for claim_id in item.get("claim_ids", []):
+        if not isinstance(claim_id, str):
+            continue
+        key = ir_claim_id_to_key.get(claim_id)
+        if key is None:
+            continue
+        expected_claim_id = expected_by_key.get(key)
+        if expected_claim_id is not None and expected_claim_id not in expected_ids:
+            expected_ids.append(expected_claim_id)
+    return expected_ids
 
 
 def claim_key(claim: dict[str, Any]) -> tuple[str, int, int, str]:
@@ -512,9 +732,27 @@ def collect_expected_claim_coverage(
 
 
 def semantic_element_has_complete_formalization(item: dict[str, Any]) -> bool:
-    if item.get("formalization_status") in BLOCKING_FORMALIZATION_STATUSES:
-        return False
-    return not representation_requires_human_review(item.get("representation"))
+    return not semantic_element_formalization_issues(item)
+
+
+def semantic_element_formalization_issues(item: dict[str, Any]) -> list[dict[str, str]]:
+    issues: list[dict[str, str]] = []
+    status = item.get("formalization_status")
+    if status in BLOCKING_FORMALIZATION_STATUSES:
+        issues.append(
+            {
+                "path": "formalization_status",
+                "code": "blocking_formalization_status",
+                "message": f"formalization_status {status!r} requires human review before this claim is complete",
+            }
+        )
+    issues.extend(
+        collect_representation_completeness_issues(
+            item.get("representation"),
+            path="representation",
+        )
+    )
+    return issues
 
 
 def semantic_consistency_review(
@@ -608,13 +846,7 @@ def human_review_gate(
             )
         )
 
-    answered_question_ids = set()
-    if isinstance(review, dict):
-        human_answers = review.get("human_answers", [])
-        if isinstance(human_answers, list):
-            for answer in human_answers:
-                if isinstance(answer, dict) and isinstance(answer.get("question_id"), str):
-                    answered_question_ids.add(answer["question_id"])
+    answered_question_ids = collect_answered_question_ids(review)
 
     for index, question in enumerate(ir.get("open_questions", [])):
         if not isinstance(question, dict):

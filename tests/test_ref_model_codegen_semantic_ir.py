@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -126,8 +127,11 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             )
 
             self.assertEqual(review["status"], "needs_human_input")
+            self.assertEqual(review["completeness"]["partial_claims"], ["claim1"])
             self.assertEqual(review["completeness"]["placeholder_only_claims"], ["claim1"])
             self.assertFalse(review["completeness"]["covered_claims"])
+            obligations = review["completeness"]["claim_obligations"][0]["missing_obligations"]
+            self.assertTrue(any(item["code"] == "semantic_claim_placeholder" for item in obligations))
 
     def test_temporal_latency_claim_uses_typed_ast_but_requires_clock_context(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -164,7 +168,11 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             )
 
             self.assertEqual(review["status"], "needs_human_input")
+            self.assertEqual(review["completeness"]["partial_claims"], ["claim1"])
             self.assertEqual(review["completeness"]["placeholder_only_claims"], ["claim1"])
+            obligations = review["completeness"]["claim_obligations"][0]["missing_obligations"]
+            self.assertTrue(any(item["code"] == "missing_temporal_clock" for item in obligations))
+            self.assertTrue(any(item["code"] == "text_trigger" for item in obligations))
 
     def test_temporal_latency_ast_with_clock_context_is_complete(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -220,6 +228,150 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
 
             self.assertEqual(review["status"], "passed")
             self.assertEqual(review["completeness"]["covered_claims"], ["claim1"])
+            self.assertFalse(review["completeness"]["partial_claims"])
+            self.assertFalse(review["completeness"]["claim_obligations"][0]["missing_obligations"])
+
+    def test_complete_claim_still_reports_partial_duplicate_obligations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The done signal must pulse exactly one cycle after digest completion.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            complete_element = semantic_ir["semantic_elements"][0]
+            complete_element["formalization_status"] = "candidate"
+            complete_element["representation"] = {
+                "ast_version": 2,
+                "kind": "temporal_rule",
+                "text": complete_element["summary"],
+                "ast": {
+                    "node": "temporal_rule",
+                    "context": {
+                        "node": "clock_reset_context",
+                        "clock": {
+                            "node": "clock_event",
+                            "edge": "posedge",
+                            "signal": {"node": "signal_ref", "name": "clk"},
+                        },
+                    },
+                    "property": {
+                        "node": "latency_rule",
+                        "trigger": {
+                            "node": "rose",
+                            "signal": {"node": "signal_ref", "name": "digest_complete"},
+                        },
+                        "response": {
+                            "node": "rose",
+                            "signal": {"node": "signal_ref", "name": "done"},
+                        },
+                        "delay": {"node": "delay_range", "min": 1, "max": 1},
+                    },
+                },
+            }
+            partial_element = copy.deepcopy(complete_element)
+            partial_element["id"] = "sem2"
+            partial_element["formalization_status"] = "needs_human_review"
+            partial_element["representation"] = {
+                "ast_version": 2,
+                "kind": "textual_formalization",
+                "text": partial_element["summary"],
+                "ast": {"node": "semantic_claim", "text": partial_element["summary"]},
+            }
+            semantic_ir["semantic_elements"].append(partial_element)
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["completeness"]["covered_claims"], ["claim1"])
+            self.assertEqual(review["completeness"]["partial_claims"], ["claim1"])
+            self.assertFalse(review["completeness"]["placeholder_only_claims"])
+            claim_obligation = review["completeness"]["claim_obligations"][0]
+            self.assertEqual(claim_obligation["status"], "partial")
+            self.assertTrue(
+                any(item["code"] == "semantic_claim_placeholder" for item in claim_obligation["missing_obligations"])
+            )
+
+    def test_complete_claim_still_reports_blocking_open_question_obligation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The done signal must pulse exactly one cycle after digest completion.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            _mark_first_latency_element_complete(semantic_ir)
+            semantic_ir["open_questions"] = [
+                {
+                    "id": "q1",
+                    "blocking": True,
+                    "status": "open",
+                    "question": "Confirm the clock domain for this latency rule.",
+                    "related_items": ["sem1"],
+                    "claim_ids": ["claim1"],
+                    "suggested_answers": ["clk"],
+                }
+            ]
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["status"], "needs_human_input")
+            self.assertEqual(review["completeness"]["covered_claims"], ["claim1"])
+            self.assertEqual(review["completeness"]["partial_claims"], ["claim1"])
+            self.assertFalse(review["completeness"]["placeholder_only_claims"])
+            claim_obligation = review["completeness"]["claim_obligations"][0]
+            self.assertEqual(claim_obligation["status"], "partial")
+            self.assertTrue(
+                any(item["code"] == "blocking_open_question" for item in claim_obligation["missing_obligations"])
+            )
+
+    def test_complete_claim_still_reports_semantic_gap_obligation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The done signal must pulse exactly one cycle after digest completion.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            _mark_first_latency_element_complete(semantic_ir)
+            semantic_ir["semantic_gaps"] = [
+                {
+                    "id": "gap1",
+                    "kind": "missing_context",
+                    "reason": "Clock-domain context still needs human confirmation.",
+                    "resolution": "Confirm and encode the clock context, or remove the stale gap.",
+                    "claim_ids": ["claim1"],
+                }
+            ]
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["status"], "needs_human_input")
+            self.assertEqual(review["completeness"]["covered_claims"], ["claim1"])
+            self.assertEqual(review["completeness"]["partial_claims"], ["claim1"])
+            self.assertFalse(review["completeness"]["placeholder_only_claims"])
+            claim_obligation = review["completeness"]["claim_obligations"][0]
+            self.assertEqual(claim_obligation["status"], "partial")
+            self.assertTrue(
+                any(
+                    item["code"] == "semantic_gap_requires_resolution"
+                    for item in claim_obligation["missing_obligations"]
+                )
+            )
 
     def test_temporal_latency_text_trigger_still_requires_human_review(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -255,6 +407,9 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
 
             self.assertTrue(any("placeholder" in issue.message for issue in issues))
             self.assertEqual(review["status"], "failed")
+            self.assertEqual(review["completeness"]["partial_claims"], ["claim1"])
+            obligations = review["completeness"]["claim_obligations"][0]["missing_obligations"]
+            self.assertTrue(any(item["code"] == "text_trigger" for item in obligations))
 
     def test_protocol_handshake_ast_checks_valid_ready_refs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -283,7 +438,10 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 target="demo_sha",
             )
             self.assertEqual(review["status"], "needs_human_input")
+            self.assertEqual(review["completeness"]["partial_claims"], ["claim1"])
             self.assertEqual(review["completeness"]["placeholder_only_claims"], ["claim1"])
+            obligations = review["completeness"]["claim_obligations"][0]["missing_obligations"]
+            self.assertTrue(any(item["code"] == "missing_protocol_clock" for item in obligations))
 
             semantic_ir["semantic_elements"][0]["representation"]["ast"]["property"]["ready"]["name"] = "valid"
             issues = collect_semantic_spec_ir_issues(
@@ -1017,6 +1175,39 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertTrue(prompt_out.exists())
             self.assertTrue(review_out.exists())
             self.assertEqual(json.loads(review_out.read_text())["status"], "failed")
+
+
+def _mark_first_latency_element_complete(semantic_ir):
+    element = semantic_ir["semantic_elements"][0]
+    element["formalization_status"] = "candidate"
+    element["representation"] = {
+        "ast_version": 2,
+        "kind": "temporal_rule",
+        "text": element["summary"],
+        "ast": {
+            "node": "temporal_rule",
+            "context": {
+                "node": "clock_reset_context",
+                "clock": {
+                    "node": "clock_event",
+                    "edge": "posedge",
+                    "signal": {"node": "signal_ref", "name": "clk"},
+                },
+            },
+            "property": {
+                "node": "latency_rule",
+                "trigger": {
+                    "node": "rose",
+                    "signal": {"node": "signal_ref", "name": "digest_complete"},
+                },
+                "response": {
+                    "node": "rose",
+                    "signal": {"node": "signal_ref", "name": "done"},
+                },
+                "delay": {"node": "delay_range", "min": 1, "max": 1},
+            },
+        },
+    }
 
 
 def _sha_manifest():

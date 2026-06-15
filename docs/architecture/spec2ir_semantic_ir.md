@@ -515,10 +515,29 @@ human_review_gate
 
 覆盖类型决定 review 结果：
 
-- 由完整 semantic element 覆盖：可通过 completeness。
+- 由完整 semantic element 覆盖，且没有 unresolved open question / semantic gap obligation：
+  可通过 completeness。
 - 只被 blocking semantic element、open question 或 semantic gap 覆盖：进入
   `needs_human_input`。
 - 完全未覆盖：`failed`。
+
+`completeness` report 包含：
+
+- `normative_claims`: 从 source spec 重新抽取出的 expected normative claim ids。
+- `covered_claims`: 已被完整 semantic element、open question 或 semantic gap 覆盖的 claim ids。
+- `partial_claims`: 存在不完整覆盖的 claim ids，包括缺少形式化 obligation 的 semantic element、
+  open question 或 semantic gap。
+- `placeholder_only_claims`: 只有 incomplete semantic element、open question 或 semantic gap 覆盖的
+  claim ids。
+- `uncovered_claims`: 没有任何覆盖的 claim ids。
+- `claim_obligations`: 每个 claim 的完整性状态和 missing obligations。missing obligation 会记录
+  `path`、`code`、`message`，并按来源附带 `semantic_element_id`、`open_question_id` 或
+  `semantic_gap_id`，例如 `missing_temporal_clock`、`text_trigger`、`missing_protocol_clock`、
+  `blocking_open_question`、`semantic_gap_requires_resolution` 或 `semantic_claim_placeholder`。
+
+Completeness obligation 由 AST node checker registry 产生；`semantic_element_has_complete_formalization()`
+只是 semantic element structured obligations 的 bool wrapper；open question 和 semantic gap 也会在
+claim 级 completeness review 中生成 blocking obligation，避免完整 AST 与未解决语义补充项并存时被误判通过。
 
 ### `semantic_consistency_review`
 

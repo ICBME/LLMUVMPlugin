@@ -687,26 +687,215 @@ def string_subjects(claim: dict[str, Any]) -> list[str]:
     return [subject for subject in subjects if isinstance(subject, str)]
 
 
-def representation_requires_human_review(representation: Any) -> bool:
+def collect_representation_completeness_issues(
+    representation: Any,
+    path: str = "representation",
+) -> list[dict[str, str]]:
+    issues: list[dict[str, str]] = []
     if not isinstance(representation, dict):
-        return True
+        issues.append(
+            completeness_issue(
+                path,
+                "representation_missing",
+                "representation must be present before this semantic element can be complete",
+            )
+        )
+        return issues
     ast = representation.get("ast")
-    if root_ast_requires_human_review(ast):
-        return True
-    return ast_node_requires_human_review(ast)
+    if not isinstance(ast, dict):
+        issues.append(
+            completeness_issue(
+                f"{path}.ast",
+                "ast_missing",
+                "representation.ast must be a structured AST object",
+            )
+        )
+        return issues
+    collect_ast_completeness_issues(ast, f"{path}.ast", issues, root=True)
+    return issues
 
 
-def root_ast_requires_human_review(expr: Any) -> bool:
+def completeness_issue(path: str, code: str, message: str) -> dict[str, str]:
+    return {
+        "path": path,
+        "code": code,
+        "message": message,
+    }
+
+
+def representation_requires_human_review(representation: Any) -> bool:
+    return bool(collect_representation_completeness_issues(representation))
+
+
+def collect_ast_completeness_issues(
+    expr: Any,
+    path: str,
+    issues: list[dict[str, str]],
+    *,
+    root: bool = False,
+) -> None:
     if not isinstance(expr, dict):
-        return True
+        issues.append(
+            completeness_issue(
+                path,
+                "ast_node_missing",
+                "AST node must be structured before this semantic element can be complete",
+            )
+        )
+        return
+    if root:
+        collect_root_completeness_issues(expr, path, issues)
+    checker = AST_COMPLETENESS_CHECKERS.get(str(expr.get("node")))
+    if checker is not None:
+        checker(expr, path, issues)
+    for key, value in expr.items():
+        if key == "node":
+            continue
+        collect_child_completeness_issues(value, f"{path}.{key}", issues)
+
+
+def collect_child_completeness_issues(
+    value: Any,
+    path: str,
+    issues: list[dict[str, str]],
+) -> None:
+    if isinstance(value, dict):
+        collect_ast_completeness_issues(value, path, issues)
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            collect_child_completeness_issues(item, f"{path}[{index}]", issues)
+
+
+def collect_root_completeness_issues(
+    expr: dict[str, Any],
+    path: str,
+    issues: list[dict[str, str]],
+) -> None:
     node = expr.get("node")
     if node in STRUCTURED_TEXT_FALLBACK_ROOTS and root_uses_text_fallback(expr):
-        return True
+        issues.append(
+            completeness_issue(
+                path,
+                "text_only_root",
+                f"{node} must be repaired from text_expr into typed AST before it is complete",
+            )
+        )
     if node == "temporal_rule" and not temporal_rule_has_clock(expr):
-        return True
+        issues.append(
+            completeness_issue(
+                path,
+                "missing_temporal_clock",
+                "temporal_rule must include clock or context.clock before it is complete",
+            )
+        )
     if node == "protocol_rule" and protocol_rule_requires_clock(expr):
-        return True
-    return False
+        issues.append(
+            completeness_issue(
+                path,
+                "missing_protocol_clock",
+                "handshake protocol_rule must include context.clock before it is complete",
+            )
+        )
+
+
+def check_semantic_claim_completeness(
+    _expr: dict[str, Any],
+    path: str,
+    issues: list[dict[str, str]],
+) -> None:
+    issues.append(
+        completeness_issue(
+            path,
+            "semantic_claim_placeholder",
+            "semantic_claim preserves source text but is not a machine-checkable formalization",
+        )
+    )
+
+
+def check_signal_ref_completeness(
+    expr: dict[str, Any],
+    path: str,
+    issues: list[dict[str, str]],
+) -> None:
+    if expr.get("name") in PLACEHOLDER_SIGNAL_NAMES:
+        issues.append(
+            completeness_issue(
+                f"{path}.name",
+                "placeholder_signal",
+                "placeholder signal must be bound to a concrete signal",
+            )
+        )
+
+
+def check_text_expr_completeness(
+    expr: dict[str, Any],
+    path: str,
+    issues: list[dict[str, str]],
+) -> None:
+    if expr.get("text") in PLACEHOLDER_TEXT_EXPR_VALUES:
+        issues.append(
+            completeness_issue(
+                f"{path}.text",
+                "placeholder_text_expr",
+                "placeholder text expression must be replaced by typed AST",
+            )
+        )
+
+
+def check_clock_reset_context_completeness(
+    expr: dict[str, Any],
+    path: str,
+    issues: list[dict[str, str]],
+) -> None:
+    if expr.get("reset_polarity") == "unknown":
+        issues.append(
+            completeness_issue(
+                f"{path}.reset_polarity",
+                "unknown_reset_polarity",
+                "reset polarity must be resolved before this context is complete",
+            )
+        )
+    if expr.get("reset_synchrony") == "unknown":
+        issues.append(
+            completeness_issue(
+                f"{path}.reset_synchrony",
+                "unknown_reset_synchrony",
+                "reset synchrony must be resolved before this context is complete",
+            )
+        )
+
+
+def check_latency_rule_completeness(
+    expr: dict[str, Any],
+    path: str,
+    issues: list[dict[str, str]],
+) -> None:
+    if contains_ast_node(expr.get("trigger"), "text_expr"):
+        issues.append(
+            completeness_issue(
+                f"{path}.trigger",
+                "text_trigger",
+                "latency_rule.trigger must be a typed event or predicate, not text_expr",
+            )
+        )
+    if contains_ast_node(expr.get("response"), "text_expr"):
+        issues.append(
+            completeness_issue(
+                f"{path}.response",
+                "text_response",
+                "latency_rule.response must be a typed event or predicate, not text_expr",
+            )
+        )
+
+
+AST_COMPLETENESS_CHECKERS = {
+    "clock_reset_context": check_clock_reset_context_completeness,
+    "latency_rule": check_latency_rule_completeness,
+    "semantic_claim": check_semantic_claim_completeness,
+    "signal_ref": check_signal_ref_completeness,
+    "text_expr": check_text_expr_completeness,
+}
 
 
 def root_uses_text_fallback(expr: dict[str, Any]) -> bool:
@@ -743,36 +932,6 @@ def rule_has_context_clock(expr: dict[str, Any]) -> bool:
         return False
     context_clock = context.get("clock")
     return isinstance(context_clock, dict) and context_clock.get("node") == "clock_event"
-
-
-def ast_node_requires_human_review(expr: Any) -> bool:
-    if isinstance(expr, dict):
-        node = expr.get("node")
-        if node == "semantic_claim":
-            return True
-        if node == "latency_rule" and latency_rule_uses_text_endpoint(expr):
-            return True
-        if node == "signal_ref" and expr.get("name") in PLACEHOLDER_SIGNAL_NAMES:
-            return True
-        if node == "text_expr" and expr.get("text") in PLACEHOLDER_TEXT_EXPR_VALUES:
-            return True
-        if node == "clock_reset_context" and (
-            expr.get("reset_polarity") == "unknown"
-            or expr.get("reset_synchrony") == "unknown"
-        ):
-            return True
-        return any(
-            ast_node_requires_human_review(value)
-            for key, value in expr.items()
-            if key != "node"
-        )
-    if isinstance(expr, list):
-        return any(ast_node_requires_human_review(value) for value in expr)
-    return False
-
-
-def latency_rule_uses_text_endpoint(expr: dict[str, Any]) -> bool:
-    return contains_ast_node(expr.get("trigger"), "text_expr") or contains_ast_node(expr.get("response"), "text_expr")
 
 
 def contains_ast_node(expr: Any, node: str) -> bool:
