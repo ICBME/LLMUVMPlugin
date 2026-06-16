@@ -1,6 +1,6 @@
-"""Spec-to-backend analysis and generation stages."""
+"""Backend readiness analysis for SemanticSpecIR lowering."""
 
-from .BackendReadiness import (
+from .readiness import (
     BACKEND_READINESS_SCHEMA_VERSION,
     analyze_backend_readiness,
     load_backend_readiness,

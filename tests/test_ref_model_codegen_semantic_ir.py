@@ -14,6 +14,7 @@ from LLMPlugin import (
     registered_backend_names,
 )
 from LLMPlugin.langgraph_backend import create_langgraph_backend
+from Spec2Backend.BackendReadiness import analyze_backend_readiness
 from Spec2Backend.Spec2IR import (
     build_semantic_spec_ir_repair_prompt,
     build_semantic_spec_ir_prompt,
@@ -1278,6 +1279,159 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 sorted(review["completeness"]["covered_claims"]),
                 ["claim1", "claim2", "claim3"],
             )
+
+    def test_backend_readiness_marks_comb_logic_for_ref_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "notgate.toml"
+            spec = root / "notgate_spec.md"
+            manifest.write_text(_notgate_manifest())
+            spec.write_text(
+                "\n".join(
+                    [
+                        "The module should implement a NOT gate.",
+                        "When in=0, out=1. When in=1, out=0.",
+                    ]
+                )
+                + "\n"
+            )
+            semantic_ir = generate_semantic_spec_ir(
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_notgate",
+            )
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_notgate",
+            )
+
+            readiness = analyze_backend_readiness(
+                semantic_ir,
+                review=review,
+                require_review_passed=True,
+            )
+
+            self.assertEqual(readiness["status"], "ready")
+            self.assertTrue(readiness["review_gate"]["passed"])
+            self.assertGreaterEqual(readiness["summary"]["ref_model_ready_count"], 1)
+            self.assertTrue(
+                all(
+                    "ref_model" in element["recommended_backends"]
+                    for element in readiness["elements"]
+                )
+            )
+
+    def test_backend_readiness_marks_latency_rule_for_sva(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The done signal must pulse exactly one cycle after digest completion.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            _mark_first_latency_element_complete(semantic_ir)
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            readiness = analyze_backend_readiness(
+                semantic_ir,
+                review=review,
+                require_review_passed=True,
+            )
+
+            self.assertEqual(review["status"], "passed")
+            self.assertEqual(readiness["status"], "ready")
+            self.assertEqual(readiness["summary"]["sva_ready_count"], 1)
+            self.assertEqual(readiness["elements"][0]["recommended_backends"], ["sva"])
+
+    def test_backend_readiness_blocks_textual_formalization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("This block has documented behavior.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            readiness = analyze_backend_readiness(
+                semantic_ir,
+                review=review,
+                require_review_passed=False,
+            )
+
+            self.assertEqual(readiness["status"], "needs_human_input")
+            self.assertEqual(readiness["elements"][0]["support_status"], "needs_human_input")
+            self.assertTrue(readiness["elements"][0]["blockers"])
+
+    def test_backend_readiness_handles_malformed_semantic_elements(self):
+        readiness = analyze_backend_readiness(
+            {
+                "target": "demo",
+                "semantic_elements": None,
+            }
+        )
+
+        self.assertEqual(readiness["status"], "unsupported")
+        self.assertEqual(readiness["summary"]["semantic_element_count"], 0)
+        self.assertFalse(readiness["elements"])
+
+    def test_codegen_cli_writes_backend_readiness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "notgate.toml"
+            spec = root / "notgate_spec.md"
+            semantic_ir_path = root / "semantic_ir.json"
+            readiness_path = root / "readiness.json"
+            manifest.write_text(_notgate_manifest())
+            spec.write_text(
+                "\n".join(
+                    [
+                        "The module should implement a NOT gate.",
+                        "When in=0, out=1. When in=1, out=0.",
+                    ]
+                )
+                + "\n"
+            )
+            semantic_ir = generate_semantic_spec_ir(
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_notgate",
+            )
+            semantic_ir_path.write_text(json.dumps(semantic_ir), encoding="utf-8")
+
+            status = codegen_cli_main(
+                [
+                    "analyze-backend-readiness",
+                    "--semantic-ir",
+                    str(semantic_ir_path),
+                    "--manifest",
+                    str(manifest),
+                    "--spec",
+                    str(spec),
+                    "--target",
+                    "demo_notgate",
+                    "--require-review-passed",
+                    "--out",
+                    str(readiness_path),
+                ]
+            )
+
+            self.assertEqual(status, 0)
+            readiness = json.loads(readiness_path.read_text(encoding="utf-8"))
+            self.assertEqual(readiness["status"], "ready")
+            self.assertGreaterEqual(readiness["summary"]["ref_model_ready_count"], 1)
 
     def test_semantic_completeness_review_recomputes_source_claims(self):
         with tempfile.TemporaryDirectory() as tmp:

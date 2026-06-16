@@ -595,6 +595,51 @@ claim 级 completeness review 中生成 blocking obligation，避免完整 AST �
 这层检查仍然只判断 `SemanticSpecIR` 是否完整表达 source semantics，不判断 ref model、SVA 或
 其他 backend 是否支持 lowering。
 
+## Backend readiness
+
+`Spec2Backend/BackendReadiness` 是 `SemanticSpecIR` 和具体 backend lowering 之间的独立分析层。
+它不修改 `SemanticSpecIR`，也不生成 ref model 或 SVA，只输出每个 semantic element / claim 的
+backend 接入状态。
+
+`analyze_backend_readiness()` 输入：
+
+- `semantic_ir`: 已生成的 `SemanticSpecIR`。
+- `review`: 可选的 `review_semantic_spec_ir()` 报告。
+- `require_review_passed`: 为 `True` 时，review 未 `passed` 会把整体 readiness 标记为
+  `blocked_by_review`。
+
+readiness report 包含：
+
+- `review_gate`: review 是否提供、是否通过、是否阻塞 backend 接入。
+- `summary`: semantic element 总数、ref model ready 数、SVA ready 数、需要人工输入数、
+  unsupported 数。
+- `elements`: 每个 semantic element 的 `representation_kind`、root `ast_node`、
+  `support_status`、`recommended_backends`、`lowering_targets`、`blockers` 和 traceability。
+- `claims`: claim 到 semantic elements 和推荐 backend 的聚合视图。
+
+当前 readiness 策略：
+
+- `combinational_relation` 的 `assignment`、`constant_relation`、`conditional_assignment` 和已知
+  `operation_relation` 可进入 `ref_model`。
+- `state_machine`、`sequential_update`、`reset_rule` 中的 typed state/update AST 可进入
+  step-based `ref_model`。
+- `temporal_rule`、`protocol_rule`、`constraint` 可进入 `sva`；需要 clock 的规则必须具备显式
+  `clock_event` / `clock_reset_context`。
+- `semantic_claim`、`text_expr`、blocking `formalization_status` 或 representation completeness
+  issue 会标为 `needs_human_input`。
+- interface declaration 目前视为 backend metadata；example trace 需要后续 test-vector backend。
+
+CLI:
+
+```bash
+rtlagent-codegen analyze-backend-readiness \
+  --semantic-ir semantic_ir.json \
+  --manifest manifest.toml \
+  --spec spec.md \
+  --require-review-passed \
+  --out backend_readiness.json
+```
+
 ### `semantic_consistency_review`
 
 检查：
