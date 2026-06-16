@@ -24,6 +24,7 @@ from .prompt import write_generation_prompt
 from .validation import load_golden_cases, validate_artifact_dir
 from LLMPlugin import create_backend, registered_backend_names
 from Spec2Backend.BackendReadiness import analyze_backend_readiness, write_backend_readiness
+from Spec2Backend.RefModelPlan import build_ref_model_plan, write_ref_model_plan
 from Spec2Backend.Spec2IR import (
     build_semantic_spec_ir_prompt,
     collect_semantic_spec_ir_issues,
@@ -115,6 +116,18 @@ def main(argv: list[str] | None = None) -> int:
     backend_readiness.add_argument("--require-reviewed", action="store_true")
     backend_readiness.add_argument("--require-review-passed", action="store_true")
     backend_readiness.add_argument("--out", type=Path)
+
+    ref_model_plan = subparsers.add_parser("build-ref-model-plan")
+    ref_model_plan.add_argument("--semantic-ir", required=True, type=Path)
+    ref_model_plan.add_argument("--manifest", type=Path)
+    ref_model_plan.add_argument("--spec", action="append", default=[], type=Path)
+    ref_model_plan.add_argument("--ir", type=Path)
+    ref_model_plan.add_argument("--target")
+    ref_model_plan.add_argument("--require-reviewed", action="store_true")
+    ref_model_plan.add_argument("--require-review-passed", action="store_true")
+    ref_model_plan.add_argument("--require-readiness-ready", action="store_true")
+    ref_model_plan.add_argument("--readiness-out", type=Path)
+    ref_model_plan.add_argument("--out", required=True, type=Path)
 
     validate_oracle_ir = subparsers.add_parser("validate-oracle-ir")
     validate_oracle_ir.add_argument("--oracle-ir", required=True, type=Path)
@@ -325,6 +338,41 @@ def main(argv: list[str] | None = None) -> int:
             f"unsupported={summary['unsupported_element_count']}"
         )
         if readiness["status"] in {"ready", "partial", "unsupported"}:
+            return 0
+        return 2
+    if args.command == "build-ref-model-plan":
+        semantic_ir_value = load_semantic_spec_ir(args.semantic_ir)
+        target = args.target or str(semantic_ir_value.get("target") or "dut")
+        review = review_semantic_spec_ir(
+            semantic_ir_value,
+            manifest_path=args.manifest,
+            spec_paths=tuple(args.spec),
+            design_ir_path=args.ir,
+            target=target,
+            require_reviewed=args.require_reviewed,
+        )
+        readiness = analyze_backend_readiness(
+            semantic_ir_value,
+            review=review,
+            require_review_passed=args.require_review_passed,
+        )
+        if args.readiness_out:
+            write_backend_readiness(args.readiness_out, readiness)
+        plan = build_ref_model_plan(
+            semantic_ir_value,
+            readiness=readiness,
+            require_readiness_ready=args.require_readiness_ready or args.require_review_passed,
+        )
+        write_ref_model_plan(args.out, plan)
+        summary = plan["summary"]
+        print(
+            "RefModelPlan "
+            f"{plan['status']}: "
+            f"rules={summary['rule_count']} "
+            f"blocked={summary['blocked_item_count']} "
+            f"not_applicable={summary['not_applicable_count']}"
+        )
+        if plan["status"] in {"ready", "partial", "empty"}:
             return 0
         return 2
     if args.command == "validate-oracle-ir":

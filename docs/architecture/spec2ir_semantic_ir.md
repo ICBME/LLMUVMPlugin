@@ -640,6 +640,49 @@ rtlagent-codegen analyze-backend-readiness \
   --out backend_readiness.json
 ```
 
+## RefModelPlan
+
+`Spec2Backend/RefModelPlan` 是 `SemanticSpecIR` 到 ref model 代码生成之间的计划层。它只消费
+`ref_model` backend ready 的 semantic elements，不处理 SVA-only elements，也不直接生成 Python
+插件。
+
+`build_ref_model_plan()` 输入：
+
+- `semantic_ir`: 已生成的 `SemanticSpecIR`。
+- `readiness`: 可选的 `analyze_backend_readiness()` 报告；未提供时会自动生成。
+- `require_readiness_ready`: 为 `True` 时，readiness 非 `ready` / `partial` 会返回
+  `blocked_by_readiness`。
+
+plan report 包含：
+
+- `rules`: 可进入 ref model codegen 的结构化规则，保留 `semantic_element_id`、`claim_ids`、
+  `evidence` 和 `source_ast_node`。
+- `blocked_items`: 目标是 ref model 但尚不能规划的 semantic elements，例如 textual fallback、
+  blocking formalization status、unsupported ref model operation。
+- `not_applicable`: SVA-only、metadata 或 test-vector backend 的 semantic elements。
+- `summary`: rule、blocked、not applicable 数量。
+
+当前 rule 类型：
+
+- `operation_relation`: 已知 operation，例如 `sha256` 或 `not_gate`，以及 typed operands。
+- `assignment` / `constant_relation` / `conditional_assignment`: 组合逻辑规则。
+- `reset_rule` / `sequential_update` / `state_machine` / `state_transition`: 简单状态更新计划。
+
+RefModelPlan expression 使用稳定 JSON 表达，例如 `field`、`signal`、`literal`、`compare`、
+`unary_op`、`binary_op`、`mux`、`concat`、`slice`、`cast`、`clock_event` 和 `state_transition`。
+后续 Python ref model generator 应只消费 RefModelPlan，而不是直接消费 `RepresentationAST`。
+
+CLI:
+
+```bash
+rtlagent-codegen build-ref-model-plan \
+  --semantic-ir semantic_ir.json \
+  --manifest manifest.toml \
+  --spec spec.md \
+  --require-review-passed \
+  --out ref_model_plan.json
+```
+
 ### `semantic_consistency_review`
 
 检查：

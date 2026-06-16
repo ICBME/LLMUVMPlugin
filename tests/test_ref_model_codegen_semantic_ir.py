@@ -15,6 +15,7 @@ from LLMPlugin import (
 )
 from LLMPlugin.langgraph_backend import create_langgraph_backend
 from Spec2Backend.BackendReadiness import analyze_backend_readiness
+from Spec2Backend.RefModelPlan import build_ref_model_plan
 from Spec2Backend.Spec2IR import (
     build_semantic_spec_ir_repair_prompt,
     build_semantic_spec_ir_prompt,
@@ -1432,6 +1433,213 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             readiness = json.loads(readiness_path.read_text(encoding="utf-8"))
             self.assertEqual(readiness["status"], "ready")
             self.assertGreaterEqual(readiness["summary"]["ref_model_ready_count"], 1)
+
+    def test_ref_model_plan_lowers_notgate_comb_logic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "notgate.toml"
+            spec = root / "notgate_spec.md"
+            manifest.write_text(_notgate_manifest())
+            spec.write_text(
+                "\n".join(
+                    [
+                        "The module should implement a NOT gate.",
+                        "When in=0, out=1. When in=1, out=0.",
+                    ]
+                )
+                + "\n"
+            )
+            semantic_ir = generate_semantic_spec_ir(
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_notgate",
+            )
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_notgate",
+            )
+            readiness = analyze_backend_readiness(
+                semantic_ir,
+                review=review,
+                require_review_passed=True,
+            )
+
+            plan = build_ref_model_plan(semantic_ir, readiness=readiness)
+
+            self.assertEqual(plan["status"], "ready")
+            self.assertEqual(plan["summary"]["rule_count"], 3)
+            self.assertFalse(plan["blocked_items"])
+            operation_rule = next(rule for rule in plan["rules"] if rule["kind"] == "operation_relation")
+            self.assertEqual(operation_rule["operation"], "not_gate")
+            self.assertEqual(operation_rule["operands"], [{"kind": "field", "name": "in"}])
+            conditional_rules = [rule for rule in plan["rules"] if rule["kind"] == "conditional_assignment"]
+            self.assertEqual(len(conditional_rules), 2)
+            self.assertEqual(conditional_rules[0]["target"], {"kind": "signal", "name": "out"})
+
+    def test_ref_model_plan_lowers_sha_operation_operand(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            plan = build_ref_model_plan(semantic_ir)
+
+            self.assertEqual(plan["status"], "ready")
+            self.assertEqual(plan["summary"]["rule_count"], 1)
+            rule = plan["rules"][0]
+            self.assertEqual(rule["kind"], "operation_relation")
+            self.assertEqual(rule["operation"], "sha256")
+            self.assertEqual(rule["operands"], [{"kind": "field", "name": "message"}])
+            self.assertEqual(rule["claim_ids"], ["claim1"])
+
+    def test_ref_model_plan_skips_sva_only_latency_rule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The done signal must pulse exactly one cycle after digest completion.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            _mark_first_latency_element_complete(semantic_ir)
+            readiness = analyze_backend_readiness(semantic_ir)
+
+            plan = build_ref_model_plan(semantic_ir, readiness=readiness)
+
+            self.assertEqual(plan["status"], "empty")
+            self.assertFalse(plan["rules"])
+            self.assertEqual(plan["summary"]["not_applicable_count"], 1)
+            self.assertEqual(plan["not_applicable"][0]["semantic_element_id"], "sem1")
+
+    def test_ref_model_plan_blocks_textual_formalization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("This block has documented behavior.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+
+            plan = build_ref_model_plan(semantic_ir)
+
+            self.assertEqual(plan["status"], "blocked")
+            self.assertEqual(plan["summary"]["blocked_item_count"], 1)
+            self.assertEqual(plan["blocked_items"][0]["semantic_element_id"], "sem1")
+
+    def test_ref_model_plan_blocks_missing_readiness_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+            stale_readiness = {
+                "schema_version": 1,
+                "target": "demo_sha",
+                "status": "ready",
+                "elements": [],
+            }
+
+            plan = build_ref_model_plan(semantic_ir, readiness=stale_readiness)
+
+            self.assertEqual(plan["status"], "blocked")
+            self.assertEqual(plan["blocked_items"][0]["reason"], "backend readiness is missing this semantic element")
+
+    def test_codegen_cli_writes_ref_model_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "notgate.toml"
+            spec = root / "notgate_spec.md"
+            semantic_ir_path = root / "semantic_ir.json"
+            plan_path = root / "ref_model_plan.json"
+            manifest.write_text(_notgate_manifest())
+            spec.write_text(
+                "\n".join(
+                    [
+                        "The module should implement a NOT gate.",
+                        "When in=0, out=1. When in=1, out=0.",
+                    ]
+                )
+                + "\n"
+            )
+            semantic_ir = generate_semantic_spec_ir(
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_notgate",
+            )
+            semantic_ir_path.write_text(json.dumps(semantic_ir), encoding="utf-8")
+
+            status = codegen_cli_main(
+                [
+                    "build-ref-model-plan",
+                    "--semantic-ir",
+                    str(semantic_ir_path),
+                    "--manifest",
+                    str(manifest),
+                    "--spec",
+                    str(spec),
+                    "--target",
+                    "demo_notgate",
+                    "--require-review-passed",
+                    "--out",
+                    str(plan_path),
+                ]
+            )
+
+            self.assertEqual(status, 0)
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            self.assertEqual(plan["status"], "ready")
+            self.assertEqual(plan["summary"]["rule_count"], 3)
+
+    def test_codegen_cli_ref_model_plan_blocks_when_review_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            semantic_ir_path = root / "semantic_ir.json"
+            plan_path = root / "ref_model_plan.json"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("This block has documented behavior.\n")
+            semantic_ir = generate_semantic_spec_ir(
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+            semantic_ir_path.write_text(json.dumps(semantic_ir), encoding="utf-8")
+
+            status = codegen_cli_main(
+                [
+                    "build-ref-model-plan",
+                    "--semantic-ir",
+                    str(semantic_ir_path),
+                    "--manifest",
+                    str(manifest),
+                    "--spec",
+                    str(spec),
+                    "--target",
+                    "demo_sha",
+                    "--require-review-passed",
+                    "--out",
+                    str(plan_path),
+                ]
+            )
+
+            self.assertEqual(status, 2)
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            self.assertEqual(plan["status"], "blocked_by_readiness")
 
     def test_semantic_completeness_review_recomputes_source_claims(self):
         with tempfile.TemporaryDirectory() as tmp:
