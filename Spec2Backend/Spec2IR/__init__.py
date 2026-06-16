@@ -26,6 +26,7 @@ from .semantic_repair import (
     repair_semantic_spec_ir_with_review,
     write_semantic_repair_artifacts,
 )
+from .semantic_obligation_coverage import collect_obligation_coverage
 from .validation_review import (
     REVIEW_SCHEMA_VERSION,
     ReviewFinding,
@@ -45,6 +46,7 @@ __all__ = [
     "build_semantic_spec_ir_repair_prompt",
     "build_semantic_spec_ir_prompt",
     "collect_representation_completeness_issues",
+    "collect_obligation_coverage",
     "collect_semantic_spec_ir_issues",
     "generate_semantic_spec_ir",
     "invoke_semantic_spec_ir_backend",

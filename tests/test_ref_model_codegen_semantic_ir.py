@@ -429,7 +429,8 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 target="demo_sha",
             )
 
-            self.assertEqual(review["completeness"]["covered_claims"], ["claim1"])
+            self.assertFalse(review["completeness"]["covered_claims"])
+            self.assertEqual(review["completeness"]["trace_covered_claims"], ["claim1"])
             self.assertEqual(review["completeness"]["partial_claims"], ["claim1"])
             self.assertFalse(review["completeness"]["placeholder_only_claims"])
             claim_obligation = review["completeness"]["claim_obligations"][0]
@@ -467,7 +468,8 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             )
 
             self.assertEqual(review["status"], "needs_human_input")
-            self.assertEqual(review["completeness"]["covered_claims"], ["claim1"])
+            self.assertFalse(review["completeness"]["covered_claims"])
+            self.assertEqual(review["completeness"]["trace_covered_claims"], ["claim1"])
             self.assertEqual(review["completeness"]["partial_claims"], ["claim1"])
             self.assertFalse(review["completeness"]["placeholder_only_claims"])
             claim_obligation = review["completeness"]["claim_obligations"][0]
@@ -503,7 +505,8 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             )
 
             self.assertEqual(review["status"], "needs_human_input")
-            self.assertEqual(review["completeness"]["covered_claims"], ["claim1"])
+            self.assertFalse(review["completeness"]["covered_claims"])
+            self.assertEqual(review["completeness"]["trace_covered_claims"], ["claim1"])
             self.assertEqual(review["completeness"]["partial_claims"], ["claim1"])
             self.assertFalse(review["completeness"]["placeholder_only_claims"])
             claim_obligation = review["completeness"]["claim_obligations"][0]
@@ -801,6 +804,190 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(review["completeness"]["covered_claims"], ["claim1"])
             self.assertFalse(review["completeness"]["uncovered_claims"])
             self.assertEqual(review["semantic_gaps"]["count"], 0)
+            coverage = review["completeness"]["obligation_coverage"]
+            self.assertEqual(coverage["summary"]["claim_count"], 1)
+            self.assertEqual(coverage["summary"]["uncovered_obligation_count"], 0)
+            self.assertEqual(coverage["claims"][0]["status"], "covered")
+            operation_obligation = next(
+                obligation
+                for obligation in coverage["claims"][0]["obligations"]
+                if obligation["kind"] == "operation"
+            )
+            self.assertEqual(operation_obligation["status"], "covered")
+
+    def test_semantic_completeness_review_blocks_operation_without_typed_operands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["semantic_elements"][0]["representation"]["ast"]["operands"] = []
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["status"], "needs_human_input")
+            self.assertFalse(review["completeness"]["covered_claims"])
+            self.assertEqual(review["completeness"]["trace_covered_claims"], ["claim1"])
+            self.assertEqual(review["completeness"]["partial_claims"], ["claim1"])
+            coverage = review["completeness"]["obligation_coverage"]
+            operation_obligation = next(
+                obligation
+                for obligation in coverage["claims"][0]["obligations"]
+                if obligation["kind"] == "operation"
+            )
+            self.assertEqual(operation_obligation["status"], "partial")
+            self.assertTrue(
+                any(
+                    issue["code"] == "operation_operands_missing"
+                    for issue in operation_obligation["issues"]
+                )
+            )
+
+    def test_semantic_completeness_review_blocks_operation_wrong_operand(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest_with_two_hex_fields())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["semantic_elements"][0]["representation"]["ast"]["operands"] = [
+                {"node": "field_ref", "name": "key"}
+            ]
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["status"], "needs_human_input")
+            self.assertFalse(review["completeness"]["covered_claims"])
+            operation_obligation = next(
+                obligation
+                for obligation in review["completeness"]["obligation_coverage"]["claims"][0]["obligations"]
+                if obligation["kind"] == "operation"
+            )
+            self.assertEqual(operation_obligation["status"], "partial")
+            self.assertTrue(
+                any(
+                    issue["code"] == "operation_operand_mismatch"
+                    for issue in operation_obligation["issues"]
+                )
+            )
+
+    def test_semantic_completeness_review_blocks_truth_table_constant_relation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "truth.toml"
+            spec = root / "truth_spec.md"
+            manifest.write_text(_truth_table_manifest())
+            spec.write_text("x | y\n0 | 1\n")
+            semantic_ir = generate_semantic_spec_ir(
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_truth",
+            )
+            semantic_ir["semantic_elements"] = [
+                {
+                    "id": "sem1",
+                    "kind": "combinational_behavior",
+                    "summary": "y is always 1",
+                    "formalization_status": "candidate",
+                    "confidence": 0.8,
+                    "subjects": ["x", "y"],
+                    "representation": {
+                        "ast_version": 2,
+                        "kind": "combinational_relation",
+                        "text": "y is always 1",
+                        "ast": {
+                            "node": "constant_relation",
+                            "target": {"node": "signal_ref", "name": "y"},
+                            "value": {"node": "literal", "value": 1},
+                        },
+                    },
+                    "evidence": [semantic_ir["evidence"][0]["id"]],
+                    "claim_ids": ["claim1"],
+                    "provenance": {"source": "test"},
+                }
+            ]
+            semantic_ir["semantic_gaps"] = []
+            semantic_ir["open_questions"] = []
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_truth",
+            )
+
+            self.assertEqual(review["status"], "needs_human_input")
+            self.assertFalse(review["completeness"]["covered_claims"])
+            truth_obligation = review["completeness"]["obligation_coverage"]["claims"][0]["obligations"][0]
+            self.assertEqual(truth_obligation["kind"], "truth_table_row")
+            self.assertEqual(truth_obligation["status"], "uncovered")
+
+    def test_semantic_completeness_review_blocks_latency_without_delay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The done signal must pulse exactly one cycle after digest completion.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            element = semantic_ir["semantic_elements"][0]
+            element["formalization_status"] = "candidate"
+            element["representation"] = {
+                "ast_version": 2,
+                "kind": "temporal_rule",
+                "text": element["summary"],
+                "ast": {
+                    "node": "temporal_rule",
+                    "context": {
+                        "node": "clock_reset_context",
+                        "clock": {
+                            "node": "clock_event",
+                            "edge": "posedge",
+                            "signal": {"node": "signal_ref", "name": "clk"},
+                        },
+                    },
+                    "property": {
+                        "node": "implication",
+                        "antecedent": {
+                            "node": "rose",
+                            "signal": {"node": "signal_ref", "name": "digest_complete"},
+                        },
+                        "consequent": {
+                            "node": "rose",
+                            "signal": {"node": "signal_ref", "name": "done"},
+                        },
+                    },
+                },
+            }
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["status"], "needs_human_input")
+            self.assertFalse(review["completeness"]["covered_claims"])
+            timing_obligation = next(
+                obligation
+                for obligation in review["completeness"]["obligation_coverage"]["claims"][0]["obligations"]
+                if obligation["kind"] == "timing"
+            )
+            self.assertEqual(timing_obligation["status"], "uncovered")
 
     def test_semantic_review_blocks_incomplete_formalization_status(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1436,6 +1623,24 @@ def _notgate_manifest():
                 "",
                 "[[field]]",
                 'name = "in"',
+                'kind = "int"',
+                "min = 0",
+                "max = 1",
+            ]
+        )
+        + "\n"
+    )
+
+
+def _truth_table_manifest():
+    return (
+        "\n".join(
+            [
+                'name = "demo_truth"',
+                'driver = "demo_driver:Driver"',
+                "",
+                "[[field]]",
+                'name = "x"',
                 'kind = "int"',
                 "min = 0",
                 "max = 1",

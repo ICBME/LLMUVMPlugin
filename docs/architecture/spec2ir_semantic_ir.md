@@ -554,7 +554,9 @@ human_review_gate
 `completeness` report 包含：
 
 - `normative_claims`: 从 source spec 重新抽取出的 expected normative claim ids。
-- `covered_claims`: 已被完整 semantic element、open question 或 semantic gap 覆盖的 claim ids。
+- `covered_claims`: 已被完整 semantic element 覆盖，且没有 obligation-level 缺口的 claim ids。
+- `trace_covered_claims`: 被 semantic element、open question 或 semantic gap 以任意形式引用的
+  claim ids，用于审查覆盖链路，但不代表语义完整。
 - `partial_claims`: 存在不完整覆盖的 claim ids，包括缺少形式化 obligation 的 semantic element、
   open question 或 semantic gap。
 - `placeholder_only_claims`: 只有 incomplete semantic element、open question 或 semantic gap 覆盖的
@@ -564,10 +566,28 @@ human_review_gate
   `path`、`code`、`message`，并按来源附带 `semantic_element_id`、`open_question_id` 或
   `semantic_gap_id`，例如 `missing_temporal_clock`、`text_trigger`、`missing_protocol_clock`、
   `blocking_open_question`、`semantic_gap_requires_resolution` 或 `semantic_claim_placeholder`。
+- `obligation_coverage`: claim decomposition 到 typed `RepresentationAST` 的覆盖矩阵。每个
+  `atomic_obligation` 会被标为 `covered`、`partial`、`uncovered`、`blocked_by_question` 或
+  `blocked_by_gap`，并记录覆盖它的 semantic element、open question 或 semantic gap。
 
 Completeness obligation 由 AST node checker registry 产生；`semantic_element_has_complete_formalization()`
 只是 semantic element structured obligations 的 bool wrapper；open question 和 semantic gap 也会在
 claim 级 completeness review 中生成 blocking obligation，避免完整 AST 与未解决语义补充项并存时被误判通过。
+此外，`semantic_obligation_coverage.py` 会把 `spec_claims[].decomposition.atomic_obligations[]`
+逐条对齐到 typed AST。例如：
+
+- `operation` 必须由 `operation_relation` 覆盖，并要求 typed operands；只保留 operation name
+  而没有 operand 引用时会产生 `operation_operands_missing`。
+- `trigger` / `response` 必须由 `latency_rule`、`implication`、event 或 assignment 类节点覆盖，
+  不能停留在 `text_expr`。
+- `timing` 必须由 `delay_range` 覆盖；clock event 只覆盖 `clock` obligation。
+- `protocol` 可由 `protocol_rule.property.handshake_rule` 覆盖。
+- `state_transition` 可由 `state_transition` 或 `fsm.transitions` 覆盖。
+- `truth_table_row` 可由 typed `conditional_assignment` 或后续 truth-table AST 覆盖，不能由
+  无条件 `constant_relation` 覆盖。
+
+这层检查仍然只判断 `SemanticSpecIR` 是否完整表达 source semantics，不判断 ref model、SVA 或
+其他 backend 是否支持 lowering。
 
 ### `semantic_consistency_review`
 

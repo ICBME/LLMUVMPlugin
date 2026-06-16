@@ -24,6 +24,7 @@ from .semantic_ir import (
     load_semantic_spec_ir,
     sha256_text,
 )
+from .semantic_obligation_coverage import collect_obligation_coverage
 
 
 REVIEW_SCHEMA_VERSION = 1
@@ -118,10 +119,12 @@ def review_semantic_spec_ir(
         "completeness": {
             "normative_claims": completeness["normative_claims"],
             "covered_claims": completeness["covered_claims"],
+            "trace_covered_claims": completeness["trace_covered_claims"],
             "partial_claims": completeness["partial_claims"],
             "uncovered_claims": completeness["uncovered_claims"],
             "placeholder_only_claims": completeness["placeholder_only_claims"],
             "claim_obligations": completeness["claim_obligations"],
+            "obligation_coverage": completeness["obligation_coverage"],
         },
         "semantic_gaps": {
             "count": len(ir.get("semantic_gaps", [])) if isinstance(ir.get("semantic_gaps"), list) else 0,
@@ -349,10 +352,12 @@ def completeness_review(
         return {
             "normative_claims": [],
             "covered_claims": [],
+            "trace_covered_claims": [],
             "partial_claims": [],
             "uncovered_claims": [],
             "placeholder_only_claims": [],
             "claim_obligations": [],
+            "obligation_coverage": {"summary": {}, "claims": []},
             "findings": findings,
         }
     if expected_claims_error:
@@ -426,14 +431,30 @@ def completeness_review(
         ir_claim_id_to_key=ir_claim_id_to_key,
         expected_by_key=expected_by_key,
     )
+    obligation_coverage = collect_obligation_coverage(
+        source_claims,
+        semantic_elements=ir.get("semantic_elements", []),
+        open_questions=ir.get("open_questions", []),
+        semantic_gaps=ir.get("semantic_gaps", []),
+        review=ir.get("review", {}),
+        ir_claim_id_to_key=ir_claim_id_to_key,
+        expected_by_key=expected_by_key,
+    )
+    obligation_coverage_missing = {
+        claim_id: list(missing)
+        for claim_id, missing in obligation_coverage.get("missing_by_claim", {}).items()
+        if isinstance(claim_id, str) and isinstance(missing, list)
+    }
     findings.extend(semantic_issue_findings)
     findings.extend(question_issue_findings)
     findings.extend(gap_issue_findings)
-    covered_claims = sorted(
+    findings.extend(obligation_coverage_findings(obligation_coverage_missing))
+    trace_covered_claims = sorted(
         set(expected_claim_ids).intersection(
             covered_by_semantic | covered_by_questions | covered_by_gaps
         )
     )
+    covered_claims: list[str] = []
     uncovered_claims: list[str] = []
     placeholder_only_claims: list[str] = []
     partial_claims: list[str] = []
@@ -455,12 +476,15 @@ def completeness_review(
             semantic_claim_obligations.get(claim_id, [])
             + question_claim_obligations.get(claim_id, [])
             + gap_claim_obligations.get(claim_id, [])
+            + obligation_coverage_missing.get(claim_id, [])
         )
         claim = expected_claims_by_id.get(claim_id, {})
         path = source_claim_path(claim, fallback_id=claim_id)
         status = "partial" if claim_missing_obligations else "complete"
         if claim_missing_obligations:
             partial_claims.append(claim_id)
+        if has_semantic and not claim_missing_obligations:
+            covered_claims.append(claim_id)
         if not has_semantic and not has_placeholder:
             status = "uncovered"
             uncovered_claims.append(claim_id)
@@ -497,13 +521,36 @@ def completeness_review(
 
     return {
         "normative_claims": expected_claim_ids,
-        "covered_claims": covered_claims,
+        "covered_claims": sorted(covered_claims),
+        "trace_covered_claims": trace_covered_claims,
         "partial_claims": sorted(set(partial_claims)),
         "uncovered_claims": uncovered_claims,
         "placeholder_only_claims": placeholder_only_claims,
         "claim_obligations": claim_obligations,
+        "obligation_coverage": {
+            "summary": obligation_coverage.get("summary", {}),
+            "claims": obligation_coverage.get("claims", []),
+        },
         "findings": findings,
     }
+
+
+def obligation_coverage_findings(
+    missing_by_claim: dict[str, list[dict[str, str]]],
+) -> list[ReviewFinding]:
+    findings: list[ReviewFinding] = []
+    for claim_id, issues in missing_by_claim.items():
+        for issue in issues:
+            findings.append(
+                ReviewFinding(
+                    stage="completeness_review",
+                    severity="warning",
+                    path=issue.get("path", f"spec_claims[{claim_id}]"),
+                    message=issue.get("message", "claim obligation is not covered by typed RepresentationAST"),
+                    blocking=True,
+                )
+            )
+    return findings
 
 
 def collect_semantic_claim_obligations(

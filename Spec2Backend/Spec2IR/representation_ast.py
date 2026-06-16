@@ -308,7 +308,7 @@ def ast_for_claim(
         if parsed_constant:
             return parsed_constant
 
-        parsed_operation = parse_operation_relation(summary)
+        parsed_operation = parse_operation_relation(summary, manifest_fields)
         if parsed_operation:
             return parsed_operation
 
@@ -493,13 +493,13 @@ def parse_constant_relation(summary: str, manifest_fields: set[str]) -> dict[str
     }
 
 
-def parse_operation_relation(summary: str) -> dict[str, Any] | None:
+def parse_operation_relation(summary: str, manifest_fields: set[str]) -> dict[str, Any] | None:
     text = summary.lower()
     if "not gate" in text:
         return {
             "node": "operation_relation",
             "operation": "not_gate",
-            "operands": [],
+            "operands": default_not_gate_operands(manifest_fields),
             "text": summary,
         }
     sha_match = re.search(r"\bsha-?(224|256|384|512)\b", text)
@@ -507,10 +507,30 @@ def parse_operation_relation(summary: str) -> dict[str, Any] | None:
         return {
             "node": "operation_relation",
             "operation": f"sha{sha_match.group(1)}",
-            "operands": [],
+            "operands": default_hash_operands(summary, manifest_fields),
             "text": summary,
         }
     return None
+
+
+def default_hash_operands(summary: str, manifest_fields: set[str]) -> list[dict[str, Any]]:
+    lowered = summary.lower()
+    preferred = ("message", "msg", "data", "payload", "input", "block")
+    for name in preferred:
+        if name in manifest_fields:
+            return [field_ref(name)]
+    for name in preferred:
+        if re.search(rf"\b{name}\b", lowered):
+            return [signal_ref(name)]
+    return []
+
+
+def default_not_gate_operands(manifest_fields: set[str]) -> list[dict[str, Any]]:
+    if "in" in manifest_fields:
+        return [field_ref("in")]
+    if len(manifest_fields) == 1:
+        return [field_ref(next(iter(manifest_fields)))]
+    return []
 
 
 def parse_latency_rule(summary: str) -> dict[str, Any] | None:
