@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 import json
 from pathlib import Path
 import subprocess
 from typing import Any, Callable, Protocol
 
 from ConnectGraph import ObservationContext, flush_observer
+from harness_optimization.optimization import utc_timestamp
+from harness_optimization.paths import RunPathResolver, resolved_artifact_path
+from harness_optimization.records import mapping
 
 from .coverage_feedback import CoverageFeedbackResult
 from .harness_evidence.optimization import (
@@ -17,7 +19,6 @@ from .harness_evidence.optimization import (
 from .harness_evidence.plugins import HarnessPluginRegistry
 from .harness_evidence.trace import HarnessTraceBuilder, HarnessTraceOutputs
 from .harness_evidence.rollup import CampaignTraceRollupBuilder, campaign_trace_rollup_path
-from .run_adapters import RunPathResolver
 
 
 class RoundEvaluationBackend(Protocol):
@@ -53,12 +54,6 @@ class EvaluationConfigView(Protocol):
     observation_out: Path | None
     monitoring_out: Path | None
     cwd: Path | None
-
-
-def utc_timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
 @dataclass(frozen=True)
 class RunEvaluationAdapter:
     config: EvaluationConfigView
@@ -83,7 +78,7 @@ class RunEvaluationAdapter:
         return payload
 
     def round_payload(self, stage_results: dict[str, object]) -> dict[str, Any]:
-        manifest = _mapping(stage_results.get("round_manifest"))
+        manifest = mapping(stage_results.get("round_manifest"))
         feedback = stage_results.get("coverage_feedback")
         return {
             "schema_version": 1,
@@ -112,8 +107,8 @@ class RunEvaluationAdapter:
         payload: dict[str, Any],
         evaluation_path: Path,
     ) -> None:
-        artifacts = _mapping(payload.get("manifest_artifacts"))
-        observation_events = _resolved_artifact_path(
+        artifacts = mapping(payload.get("manifest_artifacts"))
+        observation_events = resolved_artifact_path(
             artifacts.get("observation_events"),
         ) or self.paths.path_from_cwd(self.config.observation_out)
         flush_observer(self.observation_context.observer)
@@ -124,7 +119,7 @@ class RunEvaluationAdapter:
             result = HarnessTraceBuilder(
                 observation_events=observation_events,
                 monitoring=(
-                    _resolved_artifact_path(artifacts.get("monitoring"))
+                    resolved_artifact_path(artifacts.get("monitoring"))
                     or self.paths.path_from_cwd(self.config.monitoring_out)
                 ),
                 round_manifest=self._round_manifest_path(),
@@ -252,8 +247,8 @@ class CampaignEvaluationAdapter:
         payload: dict[str, Any],
         campaign_manifest: dict[str, Any],
     ) -> None:
-        artifacts = _mapping(campaign_manifest.get("artifacts"))
-        observation_events = _resolved_artifact_path(
+        artifacts = mapping(campaign_manifest.get("artifacts"))
+        observation_events = resolved_artifact_path(
             artifacts.get("observation_events"),
             cwd=self.cwd,
         )
@@ -266,11 +261,11 @@ class CampaignEvaluationAdapter:
         try:
             result = HarnessTraceBuilder(
                 observation_events=observation_events,
-                monitoring=_resolved_artifact_path(
+                monitoring=resolved_artifact_path(
                     artifacts.get("monitoring"),
                     cwd=self.cwd,
                 ),
-                campaign_manifest=_resolved_artifact_path(
+                campaign_manifest=resolved_artifact_path(
                     artifacts.get("campaign_manifest"),
                     cwd=self.cwd,
                 ),
@@ -299,20 +294,3 @@ class CampaignEvaluationAdapter:
             payload["harness_trace"]["campaign_rollup"] = {
                 "summary": campaign_rollup.get("summary", {}),
             }
-
-
-def _mapping(value: object) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _resolved_artifact_path(
-    value: object,
-    *,
-    cwd: Path | None = None,
-) -> Path | None:
-    if not isinstance(value, str) or not value:
-        return None
-    path = Path(value)
-    if path.is_absolute() or cwd is None:
-        return path
-    return cwd / path

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 import inspect
 import os
@@ -33,6 +33,30 @@ class ObservationContext:
     parent_event_id: str | None = None
     observer: Observer | None = None
     strict: bool = False
+
+    def with_overrides(
+        self,
+        *,
+        run_id: str | None = None,
+        round_id: str | None = None,
+        stage_id: str | None = None,
+        parent_event_id: str | None = None,
+        observer: Observer | None = None,
+        strict: bool | None = None,
+    ) -> "ObservationContext":
+        return replace(
+            self,
+            run_id=self.run_id if run_id is None else run_id,
+            round_id=self.round_id if round_id is None else round_id,
+            stage_id=self.stage_id if stage_id is None else stage_id,
+            parent_event_id=(
+                self.parent_event_id
+                if parent_event_id is None
+                else parent_event_id
+            ),
+            observer=self.observer if observer is None else observer,
+            strict=self.strict if strict is None else strict,
+        )
 
     @classmethod
     def from_env(cls, observer: Observer | None = None) -> "ObservationContext":

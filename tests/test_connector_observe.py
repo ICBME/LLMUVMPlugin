@@ -83,6 +83,21 @@ class TestConnectorObserve(unittest.TestCase):
         self.assertEqual(case_id(same_stimulus), "explicit-id")
         self.assertEqual(case_payload_sha256(base), case_payload_sha256(same_stimulus))
 
+    def test_observation_context_with_overrides_preserves_existing_fields(self):
+        context = ObservationContext(
+            run_id="run-1",
+            round_id="round-1",
+            stage_id="stage-1",
+            parent_event_id="parent-1",
+        )
+
+        updated = context.with_overrides(round_id="round-2", stage_id="stage-2")
+
+        self.assertEqual(updated.run_id, "run-1")
+        self.assertEqual(updated.round_id, "round-2")
+        self.assertEqual(updated.stage_id, "stage-2")
+        self.assertEqual(updated.parent_event_id, "parent-1")
+
     def test_orchestrator_runs_step_and_records_trace_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

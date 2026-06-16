@@ -41,22 +41,18 @@ class ObservationRuntime:
         stage_id_env = os.getenv("CONNECTOR_OBSERVE_STAGE_ID")
         parent_event_id_env = os.getenv("CONNECTOR_OBSERVE_PARENT_EVENT_ID")
         if run_id_env or round_id_env or stage_id_env or parent_event_id_env:
-            context = ObservationContext(
+            context = context.with_overrides(
                 run_id=run_id_env or context.run_id,
                 round_id=round_id_env or context.round_id,
                 stage_id=stage_id_env or context.stage_id,
                 parent_event_id=parent_event_id_env or context.parent_event_id,
-                observer=context.observer,
-                strict=context.strict,
             )
         if run_id or round_id or stage_id or parent_event_id:
-            context = ObservationContext(
+            context = context.with_overrides(
                 run_id=run_id or context.run_id,
                 round_id=round_id or context.round_id,
                 stage_id=stage_id or context.stage_id,
                 parent_event_id=parent_event_id or context.parent_event_id,
-                observer=context.observer,
-                strict=context.strict,
             )
         return cls(context=context, observer=observer, topology_out=topology_out)
 

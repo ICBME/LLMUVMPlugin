@@ -1,20 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Mapping
 
-from .orchestrator import StepPolicy
-
-
-@dataclass(frozen=True)
-class RunPlanProfile:
-    """Named run-level DAG profile expressed as stage names."""
-
-    name: str
-    stage_names: tuple[str, ...]
-    description: str = ""
-    mode: str | None = None
-    stage_policies: Mapping[str, StepPolicy] = field(default_factory=dict)
+from harness_optimization.planning import RunPlanProfile, profile_stage_names as _profile_stage_names
 
 
 DEFAULT_RUN_PLAN_PROFILES: Mapping[str, RunPlanProfile] = {
@@ -187,7 +175,13 @@ def profile_stage_names(
     name: str,
     profiles: Mapping[str, RunPlanProfile] = DEFAULT_RUN_PLAN_PROFILES,
 ) -> tuple[str, ...]:
-    try:
-        return profiles[name].stage_names
-    except KeyError as exc:
-        raise ValueError(f"unknown run plan profile: {name}") from exc
+    return _profile_stage_names(name, profiles)
+
+
+__all__ = [
+    "DEFAULT_CAMPAIGN_PLAN_PROFILES",
+    "DEFAULT_RUN_PLAN_PROFILES",
+    "DEFAULT_RUN_PLAN_STAGE_NAMES",
+    "RunPlanProfile",
+    "profile_stage_names",
+]

@@ -16,16 +16,23 @@ from .harness_evidence.optimization import (
     harness_optimization_paths,
 )
 from .orchestrator import PipelineContext, PipelineOrchestrator, StepSpec
+from harness_optimization.paths import manifest_path_from_value, path_from_cwd, run_cwd
+from harness_optimization.planning import (
+    RunPlan,
+    RunPlanExecutor,
+    RunResults,
+    RunStage,
+    RunPlanProfile,
+    RunStageFactory,
+    RunStageRegistry,
+)
 from .run_adapters import RunBackends
 from .run_evaluation import CampaignEvaluationAdapter, EvaluationBackends
 from .run_orchestrator import FuzzRunConfig, FuzzRunOrchestrator
-from .run_plan import RunPlan, RunPlanExecutor, RunResults, RunStage
 from .run_profiles import (
     DEFAULT_CAMPAIGN_PLAN_PROFILES,
     DEFAULT_RUN_PLAN_PROFILES,
-    RunPlanProfile,
 )
-from .run_stage_registry import RunStageFactory, RunStageRegistry
 from .topology import FULL_FUZZ_TOPOLOGY, PipelineTopology
 
 
@@ -406,14 +413,7 @@ class CampaignRoundScheduler:
         )
 
     def _round_context(self, round_id: str) -> ObservationContext:
-        return ObservationContext(
-            run_id=self.observation_context.run_id,
-            round_id=round_id,
-            stage_id=self.observation_context.stage_id,
-            parent_event_id=self.observation_context.parent_event_id,
-            observer=self.observation_context.observer,
-            strict=self.observation_context.strict,
-        )
+        return self.observation_context.with_overrides(round_id=round_id)
 
     def _round_manifest(
         self,
@@ -456,13 +456,14 @@ class CampaignRoundScheduler:
         manifest: dict[str, Any],
         value: str,
     ) -> Path:
-        path = Path(value)
-        if path.is_absolute():
-            return path
-        cwd = manifest.get("cwd")
-        if isinstance(cwd, str) and cwd:
-            return Path(cwd) / path
-        return manifest_path.parent / path
+        resolved = manifest_path_from_value(
+            value,
+            manifest_path=manifest_path,
+            cwd=manifest.get("cwd"),
+        )
+        if resolved is None:
+            raise ValueError(f"{manifest_path}: missing manifest path value")
+        return resolved
 
     def _optional_state_path(
         self,
@@ -1428,20 +1429,10 @@ class CampaignOrchestrator:
         return resolved
 
     def _path_from_cwd(self, path: Path | None) -> Path | None:
-        if path is None:
-            return None
-        path = Path(path)
-        if path.is_absolute() or self.config.cwd is None:
-            return path
-        cwd = self.config.cwd
-        base = cwd if cwd.is_absolute() else Path.cwd() / cwd
-        return base / path
+        return path_from_cwd(path, self.config.cwd)
 
     def _run_cwd(self) -> Path:
-        if self.config.cwd is None:
-            return Path.cwd()
-        cwd = Path(self.config.cwd)
-        return cwd if cwd.is_absolute() else Path.cwd() / cwd
+        return run_cwd(self.config.cwd)
 
     def _validate(self) -> None:
         if self.config.rounds < 1:

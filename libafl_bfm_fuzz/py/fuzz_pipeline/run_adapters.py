@@ -2,38 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-import shlex
 import shutil
 import subprocess
-from typing import Callable, MutableMapping, Protocol
+from typing import Callable, Protocol
 
 from ConnectGraph import ObservationContext, observation_make_vars
-
-
-class FuzzRunConfigView(Protocol):
-    target: str
-    corpus: Path
-    libafl_manifest: Path
-    target_config: Path | None
-    directives: Path | None
-    iters: int
-    max_seeds: int
-    seed: int
-    cargo: str
-    cwd: Path | None
-    topology_out: Path | None
-    make: str
-    verilog_sources: str | None
-    toplevel: str | None
-    functional_coverage: Path | None
-    feedback_functional_coverage: Path | None
-    verilator_coverage: str
-    extra_make_vars: tuple[str, ...]
-    directives_out: Path | None
-    heuristic_directives_out: Path | None
-    feedback_corpus: Path | None
-    observation_out: Path | None
-    monitoring_out: Path | None
+from harness_optimization.paths import FuzzRunConfigView, RunPathResolver, split_tool_command
 
 
 class CorpusGeneratorBackend(Protocol):
@@ -88,96 +62,6 @@ class RunBackends:
     corpus_generator: CorpusGeneratorBackend | None = None
     uvm_replay: ReplayBackend | None = None
     coverage_report: CoverageReportBackend | None = None
-
-
-def split_tool_command(value: str, default: str) -> list[str]:
-    return shlex.split(value) or [default]
-
-
-@dataclass
-class RunPathResolver:
-    config: FuzzRunConfigView
-    artifacts: MutableMapping[str, Path] = field(default_factory=dict)
-
-    def path_from_cwd(self, path: Path | None) -> Path | None:
-        if path is None:
-            return None
-        path = Path(path)
-        if path.is_absolute() or self.config.cwd is None:
-            return path
-        cwd = self.config.cwd
-        base = cwd if cwd.is_absolute() else Path.cwd() / cwd
-        return base / path
-
-    def run_cwd(self) -> Path:
-        if self.config.cwd is None:
-            return Path.cwd()
-        cwd = Path(self.config.cwd)
-        return cwd if cwd.is_absolute() else Path.cwd() / cwd
-
-    def required_artifact(self, role: str) -> Path:
-        try:
-            path = self.artifacts[role]
-        except KeyError as exc:
-            raise ValueError(f"missing required artifact role: {role}") from exc
-        if path is None:
-            raise ValueError(f"missing required artifact role: {role}")
-        return path
-
-    def optional_artifact(self, role: str) -> Path | None:
-        return self.artifacts.get(role)
-
-    def make_value(self, path: Path | None) -> str:
-        resolved = self.path_from_cwd(path)
-        return str(resolved) if resolved is not None else ""
-
-    def feedback_corpus(self) -> Path:
-        path = self.path_from_cwd(self.config.feedback_corpus)
-        if path is None:
-            raise ValueError(
-                "missing required artifact path for feedback replay: feedback_corpus"
-            )
-        return path
-
-    def feedback_directives(self) -> Path:
-        path = self.path_from_cwd(self.config.directives_out)
-        if path is None:
-            raise ValueError(
-                "missing required artifact path for feedback replay: directives_out"
-            )
-        return path
-
-    def feedback_functional_coverage(self) -> Path | None:
-        if self.config.feedback_functional_coverage is not None:
-            return self.path_from_cwd(self.config.feedback_functional_coverage)
-        if self.config.functional_coverage is None or self.config.feedback_corpus is None:
-            return None
-        functional_coverage = self.path_from_cwd(self.config.functional_coverage)
-        if functional_coverage is None:
-            return None
-        return functional_coverage.with_name(
-            f"{functional_coverage.stem}_feedback{functional_coverage.suffix}"
-        )
-
-    def heuristic_directives(self) -> Path | None:
-        if self.config.heuristic_directives_out is not None:
-            return self.path_from_cwd(self.config.heuristic_directives_out)
-        if self.config.directives_out is None:
-            return None
-        directives = self.path_from_cwd(self.config.directives_out)
-        if directives is None:
-            return None
-        return directives.with_name(f"{directives.stem}_heuristic{directives.suffix}")
-
-    def manifest_path(self, path: Path | None) -> str | None:
-        resolved = self.path_from_cwd(path)
-        return str(resolved) if resolved is not None else None
-
-    def artifact_exists(self, path: Path | None) -> bool:
-        resolved = self.path_from_cwd(path)
-        return resolved.exists() if resolved is not None else False
-
-
 @dataclass(frozen=True)
 class CorpusGeneratorAdapter:
     config: FuzzRunConfigView
