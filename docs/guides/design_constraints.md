@@ -9,6 +9,12 @@
 - 新目标必须通过 manifest 和 plugin 接入。
 - Manifest schema 是 Rust generator 和 Python validator/replay 的共享契约。
 - IR 只描述语义绑定，不描述协议行为。
+- 新实现应遵守分层 import 规则：
+  `ConnectGraph.*` 用于通用 connector 能力，
+  `harness_optimization.*` 用于共享 planning/runtime/optimization helper，
+  `fuzz_pipeline.harness_evidence.*` 与业务 facade 用于 `libafl_bfm_fuzz` 语义。
+- `fuzz_pipeline.harness*.py`、`fuzz_pipeline.run_plan`、`fuzz_pipeline.run_stage_registry`
+  视为兼容入口，不应作为新模块的默认依赖目标。
 
 ## IR 约束
 

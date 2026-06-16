@@ -1,3 +1,9 @@
+"""Compatibility facade for observation helpers.
+
+New code should prefer ``ConnectGraph.observation`` directly unless it needs
+the fuzz_pipeline import path for backward compatibility.
+"""
+
 from ConnectGraph.observation import (  # noqa: F401
     ObservationRuntime,
     close_observation,

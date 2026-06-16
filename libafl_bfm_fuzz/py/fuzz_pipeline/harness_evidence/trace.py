@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from connector_observe.trace import (
+from ConnectGraph.trace import (
     FINAL_EVENT_TYPES,
     read_json_object,
     read_jsonl_events,

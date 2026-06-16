@@ -55,7 +55,13 @@ from fuzz_pipeline import (  # noqa: E402
     validate_harness_plugin_registry,
 )
 from harness_optimization.io import read_optional_json  # noqa: E402
-from harness_optimization.runtime import read_runtime_metrics  # noqa: E402
+from harness_optimization.runtime import (  # noqa: E402
+    FUNCTIONAL_COVERAGE_OUT_ENV as SHARED_LEGACY_FUNCTIONAL_COVERAGE_OUT_ENV,
+    REPLAY_CORPUS_ENV as SHARED_LEGACY_REPLAY_CORPUS_ENV,
+    REPLAY_TARGET_CONFIG_ENV as SHARED_LEGACY_REPLAY_TARGET_CONFIG_ENV,
+    REPLAY_TARGET_ENV as SHARED_LEGACY_REPLAY_TARGET_ENV,
+    read_runtime_metrics,
+)
 from fuzz_pipeline.harness_candidate_regression import (  # noqa: E402
     adapt_candidate_actions,
     classify_gap_actionability,
@@ -792,6 +798,13 @@ def test_read_runtime_metrics_raises_on_invalid_json() -> None:
             read_runtime_metrics(path)
 
 
+def test_shared_runtime_legacy_env_constants_are_preserved() -> None:
+    assert SHARED_LEGACY_REPLAY_TARGET_ENV == "FUZZ_TARGET"
+    assert SHARED_LEGACY_REPLAY_TARGET_CONFIG_ENV == "FUZZ_TARGET_CONFIG"
+    assert SHARED_LEGACY_REPLAY_CORPUS_ENV == "LIBAFL_CORPUS"
+    assert SHARED_LEGACY_FUNCTIONAL_COVERAGE_OUT_ENV == "UVM_FUNCTIONAL_COVERAGE_OUT"
+
+
 def test_runtime_action_schema_validation() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -1209,6 +1222,21 @@ def test_harness_plugin_registry_contract_validation_flags_invalid_plugin() -> N
     assert any("must contain only" in message for message in messages)
     assert any("payload-required actions must define" in message for message in messages)
     assert any("provided together" in message for message in messages)
+
+
+def test_fuzz_pipeline_plugin_registry_instance_methods_keep_business_kinds() -> None:
+    registry = default_harness_plugin_registry()
+
+    snapshot = registry.to_json()
+    provenance = registry.provenance_json()
+    validation = registry.validation_json()
+
+    assert snapshot["kind"] == "libafl_bfm_fuzz.harness_plugin_registry"
+    assert snapshot["snapshot_schema"]["kind"] == (
+        "libafl_bfm_fuzz.harness_plugin_registry.schema"
+    )
+    assert provenance["kind"] == "libafl_bfm_fuzz.harness_plugin_provenance"
+    assert validation["kind"] == "libafl_bfm_fuzz.harness_plugin_contract_validation"
 
 
 def test_candidate_regression_strict_plugin_validation_gates_invalid_registry() -> None:

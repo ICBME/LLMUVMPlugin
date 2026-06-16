@@ -74,6 +74,10 @@
 - `harness_evidence/`：集中保存 harness 采集、评测、LLM dataset、optimization proposal、
   plugin/runtime action 和 candidate regression 逻辑；旧的 `harness*.py` 模块保留为
   compatibility wrapper，便于已有 import 平滑迁移。
+- `harness_plugins.py` / `harness_runtime_actions.py`：`libafl_bfm_fuzz` 业务 facade。
+  前者保留 plugin registry / provenance / validation 的业务 artifact kind，后者保留
+  `FUZZ_TARGET`、`LIBAFL_CORPUS`、`HARNESS_*` runtime env contract。若只需要通用 helper，
+  应直接引用 `harness_optimization.plugins` / `harness_optimization.runtime`。
 - `harness_evidence/optimization.py`：从 campaign evaluation、harness evaluation、LLM
   dataset、campaign rollup 和 action effect report 生成 optimization
   task/proposal/schema decision/advice report；可显式注入真实 LLM optimizer backend 写出
@@ -106,6 +110,15 @@
 - `observable.py` 位于 `py/fuzz_uvm/`，集中封装 pyUVM replay driver/ref-model、
   scoreboard 和 functional coverage adapter；adapter 委托 `ReplayPipelineOrchestrator`
   执行 connector step。
+
+推荐 import 规则：
+
+- 需要通用 connector 编排时，优先引用 `ConnectGraph`。
+- 需要共享 planning/path/runtime/optimization protocol 时，优先引用
+  `harness_optimization`。
+- 需要 fuzz harness 业务层语义时，优先引用 `fuzz_pipeline.harness_evidence.*` 或
+  `fuzz_pipeline.harness_plugins` / `fuzz_pipeline.harness_runtime_actions`。
+- `fuzz_pipeline` 根包继续提供兼容导出，但更适合作为用户入口，不应成为新内部模块的默认依赖面。
 
 ## Corpus Generation Flow
 

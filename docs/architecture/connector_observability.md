@@ -118,6 +118,19 @@ Harness evidence 相关实现现在集中在 `py/fuzz_pipeline/harness_evidence/
 `py/fuzz_pipeline/harness*.py` 文件保留为兼容 re-export wrapper，方便已有脚本和测试继续
 使用原 import 路径；新代码应优先引用 `harness_evidence` 下的模块。
 
+推荐 import 规则：
+
+- 需要通用 connector / observer / topology / step orchestration 时，优先直接引用
+  `ConnectGraph.*`。
+- 需要通用 run planning、path resolver、optimization helper protocol 时，优先直接引用
+  `harness_optimization.*`。
+- 需要 `libafl_bfm_fuzz` 业务语义，例如 harness evidence、candidate regression、
+  runtime action env contract、plugin artifact kind 时，优先引用
+  `fuzz_pipeline.harness_evidence.*` 或 `fuzz_pipeline.harness_runtime_actions` /
+  `fuzz_pipeline.harness_plugins` 这些业务 facade。
+- `fuzz_pipeline.harness*.py`、`fuzz_pipeline.run_plan`、`fuzz_pipeline.run_stage_registry`
+  继续保留给历史脚本和测试；除非需要兼容旧 import 路径，新代码不要再把它们当作首选入口。
+
 `py/fuzz_pipeline/harness_evidence/records.py`
 
 - 把通用 connector final event 投影为 harness execution record。

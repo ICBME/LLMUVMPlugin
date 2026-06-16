@@ -25,6 +25,9 @@ from .optimization import (
 from .plugins import (
     HarnessGapActionabilityContext,
     HarnessPluginRegistry,
+    plugin_registry_provenance_json,
+    plugin_registry_to_json,
+    plugin_registry_validation_json,
     require_valid_harness_plugin_registry,
 )
 from harness_optimization.io import (
@@ -36,7 +39,7 @@ from harness_optimization.io import (
     required_path as _required_path,
     write_json as _write_json,
 )
-from harness_optimization.runtime import (
+from ..harness_runtime_actions import (
     RUNTIME_METRICS_OUT_ENV,
     read_runtime_metrics,
     runtime_metric_snapshot,
@@ -292,7 +295,7 @@ class HarnessCandidateRegressionBackend:
         candidate_manifest: dict[str, Any],
     ) -> dict[str, Any]:
         plugin_registry = self._plugin_registry()
-        plugin_validation = plugin_registry.validation_json()
+        plugin_validation = plugin_registry_validation_json(plugin_registry)
         if self.settings.strict_plugin_validation:
             plugin_validation = require_valid_harness_plugin_registry(
                 plugin_registry,
@@ -311,7 +314,10 @@ class HarnessCandidateRegressionBackend:
         regression_dir = sandbox_dir / "candidate_regression"
         regression_dir.mkdir(parents=True, exist_ok=True)
         plugin_provenance_path = regression_dir / "candidate_plugin_provenance.json"
-        _write_json(plugin_provenance_path, plugin_registry.provenance_json())
+        _write_json(
+            plugin_provenance_path,
+            plugin_registry_provenance_json(plugin_registry),
+        )
         baseline_manifest_path = _required_path(
             mapping(task.get("artifacts")).get("campaign_manifest")
             or mapping(task.get("sources")).get("campaign_manifest")
@@ -656,7 +662,7 @@ class HarnessCandidateRegressionBackend:
             "candidate_metrics": candidate_metrics,
             "acceptance_thresholds": self.settings.thresholds.to_json(),
             "plugin_validation": plugin_validation,
-            "plugin_provenance": plugin_registry.provenance_json(),
+            "plugin_provenance": plugin_registry_provenance_json(plugin_registry),
             "stability_summary": paired_validation_summary,
             "artifacts": {
                 "candidate_regression_config": str(run_config_path),
@@ -2457,9 +2463,9 @@ def build_candidate_gap_actionability_report(
         "candidate_uncovered_line_count": candidate_uncovered,
         "uncovered_line_delta": delta,
         "remaining_gaps": gaps,
-        "plugin_registry": registry.to_json(),
-        "plugin_validation": registry.validation_json(),
-        "plugin_provenance": registry.provenance_json(),
+        "plugin_registry": plugin_registry_to_json(registry),
+        "plugin_validation": plugin_registry_validation_json(registry),
+        "plugin_provenance": plugin_registry_provenance_json(registry),
         "summary": {
             "baseline_uncovered_line_count": baseline_uncovered,
             "candidate_uncovered_line_count": candidate_uncovered,
@@ -2602,9 +2608,9 @@ def build_gap_actionability_minimal_candidate_proposal(
         "actions": actions,
         "evidence_refs": proposal_refs,
         "skipped_recommendations": skipped,
-        "plugin_registry": registry.to_json(),
-        "plugin_validation": registry.validation_json(),
-        "plugin_provenance": registry.provenance_json(),
+        "plugin_registry": plugin_registry_to_json(registry),
+        "plugin_validation": plugin_registry_validation_json(registry),
+        "plugin_provenance": plugin_registry_provenance_json(registry),
         "summary": {
             "remaining_gap_count": len(
                 list_value(gap_actionability_report.get("remaining_gaps"))
@@ -2755,9 +2761,9 @@ def build_candidate_action_effect_report(
         "run_id": task.get("run_id"),
         "proposal_id": proposal.get("proposal_id"),
         "candidate_id": candidate_manifest.get("candidate_id"),
-        "plugin_registry": registry.to_json(),
-        "plugin_validation": registry.validation_json(),
-        "plugin_provenance": registry.provenance_json(),
+        "plugin_registry": plugin_registry_to_json(registry),
+        "plugin_validation": plugin_registry_validation_json(registry),
+        "plugin_provenance": plugin_registry_provenance_json(registry),
         "variants": variants,
         "actions": aggregate_actions,
         "summary": {

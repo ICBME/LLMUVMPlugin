@@ -8,7 +8,7 @@ from ConnectGraph.observers import NullObserver
 from ConnectGraph.topology import topology_out_from_env
 from fuzz_bfm.target_config import TargetConfig
 from harness_optimization.io import path_sha256
-from harness_optimization.runtime import (
+from .harness_runtime_actions import (
     functional_coverage_output_from_target,
     replay_corpus_from_env,  # noqa: F401
     replay_target_from_env,  # noqa: F401

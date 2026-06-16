@@ -92,6 +92,14 @@ connector 事件、monitor 汇总和 topology JSON 的格式见
 - 将结构覆盖导出为 structured coverage export，并聚合为 `rtl_gap`。
 - 生成 generic mutation directives。
 
+实现分层建议：
+
+- `ConnectGraph`：通用 connector event、observer、topology 和 step orchestration。
+- `harness_optimization`：通用 run planning、path helper、optimization protocol、
+  plugin/runtime helper 内核。
+- `fuzz_pipeline`：`libafl_bfm_fuzz` 业务编排和 facade；新业务代码优先依赖
+  `harness_evidence.*`、`harness_plugins`、`harness_runtime_actions`，而不是兼容 wrapper。
+
 目标插件负责：
 
 - DUT reset 和事务时序。

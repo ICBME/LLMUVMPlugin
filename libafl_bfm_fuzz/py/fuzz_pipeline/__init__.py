@@ -10,17 +10,17 @@ from .campaign_orchestrator import (
     normalize_campaign_modes,
     run_feedback_campaign_pipeline,
 )
-from .harness_evidence.trace import (
+from .harness_trace import (
     HarnessTraceBuilder,
     HarnessTraceOutputs,
     HarnessTraceResult,
 )
-from .harness_evidence.analysis import HarnessAnalyzer, UvmFuzzHarnessAnalyzer
-from .harness_evidence.llm_tasks import (
+from .harness_analysis import HarnessAnalyzer, UvmFuzzHarnessAnalyzer
+from .harness_llm_tasks import (
     HarnessLlmDatasetBuilder,
     HarnessLlmDatasetBuilderProtocol,
 )
-from .harness_evidence.candidate_regression import (
+from .harness_candidate_regression import (
     CandidateAcceptanceThresholds,
     CandidateActionAdapter,
     CandidateActionAdapterContext,
@@ -35,7 +35,11 @@ from .harness_evidence.candidate_regression import (
     build_gap_actionability_minimal_candidate_proposal,
     select_candidate_variants,
 )
-from .harness_evidence.plugins import (
+from .harness_metadata import (
+    HarnessMetadataExtractorProtocol,
+    UvmFuzzMetadataExtractor,
+)
+from .harness_plugins import (
     HarnessActionPlugin,
     HarnessGapActionabilityContext,
     HarnessPluginRegistry,
@@ -46,21 +50,12 @@ from .harness_evidence.plugins import (
     require_valid_harness_plugin_registry,
     validate_harness_plugin_registry,
 )
-from .harness_evidence.metadata import (
-    HarnessMetadataExtractorProtocol,
-    UvmFuzzMetadataExtractor,
+from .harness_records import (
+    HarnessRecordProjector,
+    HarnessRecordProjectorProtocol,
 )
-from .harness_evidence.runtime_actions import (
-    CoverageFeedbackTuningRuntime,
-    HarnessRuntimeActionManager,
-    MmioReadbackRuntime,
-    ReplayProbeRuntime,
-    RuntimeActionConfig,
-    RuntimeActionEntry,
-    ScoreboardCheckRuntime,
-    load_runtime_action_config,
-)
-from .harness_evidence.optimization import (
+from .harness_optimization import (
+    ADVICE_REPORT_KIND,
     CANDIDATE_EVALUATION_KIND,
     CANDIDATE_MANIFEST_KIND,
     DECISION_KIND,
@@ -69,7 +64,6 @@ from .harness_evidence.optimization import (
     PATCH_KIND,
     PROPOSAL_KIND,
     TASK_KIND,
-    ADVICE_REPORT_KIND,
     HarnessCandidateEvaluationBackend,
     HarnessOptimizationAdapter,
     HarnessOptimizationPaths,
@@ -91,8 +85,18 @@ from .harness_evidence.optimization import (
     harness_optimization_paths,
     validate_harness_optimization_proposal,
 )
-from .harness_evidence.records import HarnessRecordProjector, HarnessRecordProjectorProtocol
-from .harness_evidence.rollup import CampaignTraceRollupBuilder, campaign_trace_rollup_path
+from .harness_runtime_actions import (
+    CoverageFeedbackTuningRuntime,
+    HarnessRuntimeActionManager,
+    MmioReadbackRuntime,
+    ReplayProbeRuntime,
+    RuntimeActionConfig,
+    RuntimeActionEntry,
+    ScoreboardCheckRuntime,
+    load_runtime_action_config,
+    replay_corpus_from_env,
+)
+from .harness_rollup import CampaignTraceRollupBuilder, campaign_trace_rollup_path
 from .orchestrator import (
     PipelineContext,
     PipelineOrchestrator,
@@ -101,10 +105,7 @@ from .orchestrator import (
     external_command_step,
 )
 from .observation import ObservationRuntime
-from .replay_orchestrator import (
-    ReplayPipelineOrchestrator,
-    replay_corpus_from_env,
-)
+from .replay_orchestrator import ReplayPipelineOrchestrator
 from .run_adapters import (
     CorpusGeneratorAdapter,
     CorpusGeneratorBackend,
