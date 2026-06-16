@@ -20,6 +20,7 @@ from .representation_ast import (
     collect_representation_completeness_issues,
     representation_ast_contract,
 )
+from .claim_extraction import collect_source_claim_coverage
 from .semantic_repair import (
     build_semantic_spec_ir_repair_prompt,
     repair_semantic_spec_ir_file,
@@ -48,6 +49,7 @@ __all__ = [
     "collect_representation_completeness_issues",
     "collect_obligation_coverage",
     "collect_semantic_spec_ir_issues",
+    "collect_source_claim_coverage",
     "generate_semantic_spec_ir",
     "invoke_semantic_spec_ir_backend",
     "load_semantic_spec_ir",

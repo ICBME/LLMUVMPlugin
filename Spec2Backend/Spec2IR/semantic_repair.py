@@ -54,6 +54,7 @@ def build_semantic_spec_ir_repair_prompt(
         "constraints": [
             "Return one complete corrected SemanticSpecIR object under the top-level key semantic_spec_ir.",
             "Preserve or repair spec_claims for every normative or behavior-relevant source statement.",
+            "Every source fragment reported by source_claim_coverage.uncovered_spans must be represented by a traceable spec_claim or an explicit blocking human-review path.",
             "Every normative spec_claim must be covered by semantic_elements[].claim_ids, open_questions[].claim_ids, or semantic_gaps[].claim_ids.",
             "Preserve traceability: every semantic element must cite evidence from the original spec text.",
             "Do not fabricate source quotes; evidence quotes must appear in the referenced source line range.",

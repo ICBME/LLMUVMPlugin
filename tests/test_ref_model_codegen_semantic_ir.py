@@ -372,6 +372,9 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(review["completeness"]["covered_claims"], ["claim1"])
             self.assertFalse(review["completeness"]["partial_claims"])
             self.assertFalse(review["completeness"]["claim_obligations"][0]["missing_obligations"])
+            source_coverage = review["completeness"]["source_claim_coverage"]
+            self.assertEqual(source_coverage["summary"]["uncovered_span_count"], 0)
+            self.assertEqual(source_coverage["spans"][0]["claim_ids"], ["claim1"])
 
     def test_complete_claim_still_reports_partial_duplicate_obligations(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1302,8 +1305,48 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
 
             self.assertEqual(review["status"], "failed")
             self.assertEqual(review["completeness"]["uncovered_claims"], ["claim1", "claim2"])
+            source_coverage = review["completeness"]["source_claim_coverage"]
+            self.assertEqual(source_coverage["summary"]["uncovered_span_count"], 2)
+            self.assertEqual(len(source_coverage["uncovered_spans"]), 2)
             self.assertTrue(
                 any(finding["stage"] == "completeness_review" for finding in review["findings"])
+            )
+            self.assertTrue(
+                any(
+                    "source semantic span" in finding["message"]
+                    for finding in review["findings"]
+                )
+            )
+
+    def test_semantic_completeness_review_handles_malformed_ir_spec_claims(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text(
+                "The block computes SHA-256 over the input message.\n"
+                "Reset must clear the busy flag to zero.\n"
+            )
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["spec_claims"] = None
+
+            review = review_semantic_spec_ir(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+            self.assertEqual(review["status"], "failed")
+            self.assertEqual(review["completeness"]["uncovered_claims"], ["claim1", "claim2"])
+            source_coverage = review["completeness"]["source_claim_coverage"]
+            self.assertEqual(source_coverage["summary"]["uncovered_span_count"], 2)
+            self.assertFalse(
+                any(
+                    "could not extract expected spec claims" in finding["message"]
+                    for finding in review["findings"]
+                )
             )
 
     def test_semantic_review_requires_spec_paths_for_trusted_review(self):

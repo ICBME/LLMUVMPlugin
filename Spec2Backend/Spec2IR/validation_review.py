@@ -10,7 +10,7 @@ from typing import Any, Iterable
 from rtlagent_bfm.codegen.oracle_ir import load_manifest_summary
 from rtlagent_bfm.loader import load_ir
 
-from .claim_extraction import gap_requires_human_input
+from .claim_extraction import collect_source_claim_coverage, gap_requires_human_input
 from .representation_ast import (
     collect_representation_completeness_issues,
     iter_ast_field_refs,
@@ -75,12 +75,30 @@ def review_semantic_spec_ir(
     findings: list[ReviewFinding] = []
     expected_claims: list[dict[str, Any]] | None = None
     expected_claims_error = ""
+    source_claim_coverage = empty_source_claim_coverage()
+    source_documents = ()
     if spec_path_tuple:
         try:
-            expected_claims = extract_spec_claims(load_source_documents(spec_path_tuple))
+            source_documents = load_source_documents(spec_path_tuple)
+            expected_claims = extract_spec_claims(source_documents)
         except Exception as exc:  # noqa: BLE001 - keep review report structured
             expected_claims = []
             expected_claims_error = str(exc)
+        try:
+            source_claim_coverage = collect_source_claim_coverage(
+                source_documents,
+                ir_spec_claims_for_review(ir),
+            )
+        except Exception as exc:  # noqa: BLE001 - keep review report structured
+            findings.append(
+                ReviewFinding(
+                    stage="completeness_review",
+                    severity="error",
+                    path="spec_claims",
+                    message=f"could not collect source claim coverage: {exc}",
+                    blocking=True,
+                )
+            )
     findings.extend(
         schema_review(
             ir,
@@ -93,6 +111,7 @@ def review_semantic_spec_ir(
         ir,
         expected_claims=expected_claims,
         expected_claims_error=expected_claims_error,
+        source_claim_coverage=source_claim_coverage,
     )
     findings.extend(completeness["findings"])
     findings.extend(
@@ -125,6 +144,7 @@ def review_semantic_spec_ir(
             "placeholder_only_claims": completeness["placeholder_only_claims"],
             "claim_obligations": completeness["claim_obligations"],
             "obligation_coverage": completeness["obligation_coverage"],
+            "source_claim_coverage": completeness["source_claim_coverage"],
         },
         "semantic_gaps": {
             "count": len(ir.get("semantic_gaps", [])) if isinstance(ir.get("semantic_gaps"), list) else 0,
@@ -274,7 +294,7 @@ def traceability_review(
                 )
             )
 
-    for index, claim in enumerate(ir.get("spec_claims", [])):
+    for index, claim in enumerate(ir_spec_claims_for_review(ir)):
         path = f"spec_claims[{index}]"
         if not isinstance(claim, dict):
             continue
@@ -337,8 +357,10 @@ def completeness_review(
     *,
     expected_claims: list[dict[str, Any]] | None,
     expected_claims_error: str = "",
+    source_claim_coverage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     findings: list[ReviewFinding] = []
+    source_claim_coverage = source_claim_coverage or empty_source_claim_coverage()
     if expected_claims is None:
         findings.append(
             ReviewFinding(
@@ -358,6 +380,7 @@ def completeness_review(
             "placeholder_only_claims": [],
             "claim_obligations": [],
             "obligation_coverage": {"summary": {}, "claims": []},
+            "source_claim_coverage": source_claim_coverage,
             "findings": findings,
         }
     if expected_claims_error:
@@ -388,7 +411,7 @@ def completeness_review(
     }
     ir_claim_id_to_key = {
         str(claim.get("id")): claim_key(claim)
-        for claim in ir.get("spec_claims", [])
+        for claim in ir_spec_claims_for_review(ir)
         if isinstance(claim, dict)
         and isinstance(claim.get("id"), str)
         and claim.get("normative", True)
@@ -449,6 +472,7 @@ def completeness_review(
     findings.extend(question_issue_findings)
     findings.extend(gap_issue_findings)
     findings.extend(obligation_coverage_findings(obligation_coverage_missing))
+    findings.extend(source_claim_coverage_findings(source_claim_coverage))
     trace_covered_claims = sorted(
         set(expected_claim_ids).intersection(
             covered_by_semantic | covered_by_questions | covered_by_gaps
@@ -531,8 +555,65 @@ def completeness_review(
             "summary": obligation_coverage.get("summary", {}),
             "claims": obligation_coverage.get("claims", []),
         },
+        "source_claim_coverage": {
+            "summary": source_claim_coverage.get("summary", {}),
+            "spans": source_claim_coverage.get("spans", []),
+            "uncovered_spans": source_claim_coverage.get("uncovered_spans", []),
+        },
         "findings": findings,
     }
+
+
+def empty_source_claim_coverage() -> dict[str, Any]:
+    return {
+        "summary": {
+            "semantic_span_count": 0,
+            "covered_span_count": 0,
+            "uncovered_span_count": 0,
+        },
+        "spans": [],
+        "uncovered_spans": [],
+    }
+
+
+def ir_spec_claims_for_review(ir: dict[str, Any]) -> list[dict[str, Any]]:
+    spec_claims = ir.get("spec_claims")
+    if not isinstance(spec_claims, list):
+        return []
+    return [
+        claim
+        for claim in spec_claims
+        if isinstance(claim, dict)
+    ]
+
+
+def source_claim_coverage_findings(source_claim_coverage: dict[str, Any]) -> list[ReviewFinding]:
+    findings: list[ReviewFinding] = []
+    uncovered_spans = source_claim_coverage.get("uncovered_spans", [])
+    if not isinstance(uncovered_spans, list):
+        return findings
+    for span in uncovered_spans:
+        if not isinstance(span, dict):
+            continue
+        source_id = str(span.get("source_id") or "unknown")
+        line_start = span.get("line_start")
+        line_end = span.get("line_end")
+        path = f"sources[{source_id}].lines[{line_start}-{line_end}]"
+        reason = str(span.get("reason") or "semantic")
+        text = str(span.get("text") or "").strip()
+        findings.append(
+            ReviewFinding(
+                stage="completeness_review",
+                severity="warning",
+                path=path,
+                message=(
+                    f"source semantic span ({reason}) is not represented by any IR spec_claim: "
+                    f"{text[:160]}"
+                ),
+                blocking=True,
+            )
+        )
+    return findings
 
 
 def obligation_coverage_findings(

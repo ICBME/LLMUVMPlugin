@@ -569,12 +569,18 @@ human_review_gate
 - `obligation_coverage`: claim decomposition 到 typed `RepresentationAST` 的覆盖矩阵。每个
   `atomic_obligation` 会被标为 `covered`、`partial`、`uncovered`、`blocked_by_question` 或
   `blocked_by_gap`，并记录覆盖它的 semantic element、open question 或 semantic gap。
+- `source_claim_coverage`: source semantic span 到 IR `spec_claims` 的覆盖报告。review 会重新扫描
+  source spec 中带有 `must`、`shall`、`when`、`reset`、`valid/ready`、`clock/cycle`、operation、
+  interface、state transition、truth table 等语义信号的 fragment，并检查这些 fragment 是否被
+  IR `spec_claims` 以相同 source line range 和文本语义覆盖。未覆盖 span 会生成 blocking
+  completeness warning，表示当前 IR 无法证明源文本语义已经进入 claim 层。
 
 Completeness obligation 由 AST node checker registry 产生；`semantic_element_has_complete_formalization()`
 只是 semantic element structured obligations 的 bool wrapper；open question 和 semantic gap 也会在
 claim 级 completeness review 中生成 blocking obligation，避免完整 AST 与未解决语义补充项并存时被误判通过。
 此外，`semantic_obligation_coverage.py` 会把 `spec_claims[].decomposition.atomic_obligations[]`
-逐条对齐到 typed AST。例如：
+逐条对齐到 typed AST。obligation 到 AST 的匹配通过 `OBLIGATION_AST_MATCHERS` registry
+扩展，新增 obligation kind 时应注册对应 matcher，而不是在主流程继续堆分支。例如：
 
 - `operation` 必须由 `operation_relation` 覆盖，并要求 typed operands；只保留 operation name
   而没有 operand 引用时会产生 `operation_operands_missing`。

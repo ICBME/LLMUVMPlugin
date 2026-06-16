@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Hashable, Mapping
 
 from .claim_extraction import gap_requires_human_input
@@ -10,6 +11,7 @@ from .schema import BLOCKING_FORMALIZATION_STATUSES
 
 
 ClaimKeyLike = Hashable
+ObligationMatcher = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
 
 
 def collect_obligation_coverage(
@@ -237,33 +239,10 @@ def semantic_element_covers_obligation(
 
 def ast_covers_obligation(ast: dict[str, Any], obligation: dict[str, Any]) -> dict[str, Any]:
     kind = str(obligation.get("kind") or "")
-    if kind == "interface_port":
-        return ast_covers_interface_port(ast, obligation)
-    if kind == "condition":
-        return ast_covers_condition(ast)
-    if kind == "trigger":
-        return ast_covers_trigger(ast)
-    if kind == "response":
-        return ast_covers_response(ast)
-    if kind == "timing":
-        return ast_covers_timing(ast)
-    if kind == "clock":
-        return ast_covers_clock(ast)
-    if kind == "reset":
-        return ast_covers_reset(ast)
-    if kind == "protocol":
-        return ast_covers_protocol(ast)
-    if kind == "operation":
-        return ast_covers_operation(ast, obligation)
-    if kind == "state_transition":
-        return ast_covers_state_transition(ast)
-    if kind == "truth_table_row":
-        return ast_covers_truth_table_row(ast)
-    if kind in {"behavior", "constraint"}:
-        return ast_covers_behavior(ast)
     if kind == "assumption":
         return covered()
-    return ast_covers_behavior(ast)
+    matcher = OBLIGATION_AST_MATCHERS.get(kind, ast_covers_behavior)
+    return matcher(ast, obligation)
 
 
 def ast_covers_interface_port(ast: dict[str, Any], obligation: dict[str, Any]) -> dict[str, Any]:
@@ -278,7 +257,7 @@ def ast_covers_interface_port(ast: dict[str, Any], obligation: dict[str, Any]) -
     return none()
 
 
-def ast_covers_condition(ast: dict[str, Any]) -> dict[str, Any]:
+def ast_covers_condition(ast: dict[str, Any], _obligation: dict[str, Any] | None = None) -> dict[str, Any]:
     if ast.get("node") == "conditional_assignment":
         return typed_or_partial(ast.get("condition"), "condition_text_fallback", "condition must be typed AST")
     if ast.get("node") == "state_transition" and "condition" in ast:
@@ -291,7 +270,7 @@ def ast_covers_condition(ast: dict[str, Any]) -> dict[str, Any]:
     return none()
 
 
-def ast_covers_trigger(ast: dict[str, Any]) -> dict[str, Any]:
+def ast_covers_trigger(ast: dict[str, Any], _obligation: dict[str, Any] | None = None) -> dict[str, Any]:
     for node in iter_ast_nodes(ast):
         if node.get("node") == "latency_rule":
             return typed_or_partial(node.get("trigger"), "text_trigger", "latency trigger must be typed AST")
@@ -300,7 +279,7 @@ def ast_covers_trigger(ast: dict[str, Any]) -> dict[str, Any]:
     return none()
 
 
-def ast_covers_response(ast: dict[str, Any]) -> dict[str, Any]:
+def ast_covers_response(ast: dict[str, Any], _obligation: dict[str, Any] | None = None) -> dict[str, Any]:
     for node in iter_ast_nodes(ast):
         node_kind = node.get("node")
         if node_kind in {"assignment", "constant_relation", "conditional_assignment"}:
@@ -315,17 +294,17 @@ def ast_covers_response(ast: dict[str, Any]) -> dict[str, Any]:
     return none()
 
 
-def ast_covers_timing(ast: dict[str, Any]) -> dict[str, Any]:
+def ast_covers_timing(ast: dict[str, Any], _obligation: dict[str, Any] | None = None) -> dict[str, Any]:
     if any(node.get("node") == "delay_range" for node in iter_ast_nodes(ast)):
         return covered()
     return none()
 
 
-def ast_covers_clock(ast: dict[str, Any]) -> dict[str, Any]:
+def ast_covers_clock(ast: dict[str, Any], _obligation: dict[str, Any] | None = None) -> dict[str, Any]:
     return covered() if any(node.get("node") == "clock_event" for node in iter_ast_nodes(ast)) else none()
 
 
-def ast_covers_reset(ast: dict[str, Any]) -> dict[str, Any]:
+def ast_covers_reset(ast: dict[str, Any], _obligation: dict[str, Any] | None = None) -> dict[str, Any]:
     for node in iter_ast_nodes(ast):
         if node.get("node") == "reset_rule":
             return covered()
@@ -334,7 +313,7 @@ def ast_covers_reset(ast: dict[str, Any]) -> dict[str, Any]:
     return none()
 
 
-def ast_covers_protocol(ast: dict[str, Any]) -> dict[str, Any]:
+def ast_covers_protocol(ast: dict[str, Any], _obligation: dict[str, Any] | None = None) -> dict[str, Any]:
     for node in iter_ast_nodes(ast):
         if node.get("node") == "protocol_rule":
             property_expr = node.get("property")
@@ -378,7 +357,7 @@ def ast_covers_operation(ast: dict[str, Any], obligation: dict[str, Any]) -> dic
     return none()
 
 
-def ast_covers_state_transition(ast: dict[str, Any]) -> dict[str, Any]:
+def ast_covers_state_transition(ast: dict[str, Any], _obligation: dict[str, Any] | None = None) -> dict[str, Any]:
     for node in iter_ast_nodes(ast):
         if node.get("node") == "state_transition":
             return covered()
@@ -387,7 +366,7 @@ def ast_covers_state_transition(ast: dict[str, Any]) -> dict[str, Any]:
     return none()
 
 
-def ast_covers_truth_table_row(ast: dict[str, Any]) -> dict[str, Any]:
+def ast_covers_truth_table_row(ast: dict[str, Any], _obligation: dict[str, Any] | None = None) -> dict[str, Any]:
     if ast.get("node") == "conditional_assignment":
         return covered()
     for node in iter_ast_nodes(ast):
@@ -396,7 +375,7 @@ def ast_covers_truth_table_row(ast: dict[str, Any]) -> dict[str, Any]:
     return none()
 
 
-def ast_covers_behavior(ast: dict[str, Any]) -> dict[str, Any]:
+def ast_covers_behavior(ast: dict[str, Any], _obligation: dict[str, Any] | None = None) -> dict[str, Any]:
     if ast.get("node") == "semantic_claim":
         return partial_coverage(
             "representation.ast",
@@ -410,6 +389,23 @@ def ast_covers_behavior(ast: dict[str, Any]) -> dict[str, Any]:
             "behavior must be represented as typed AST",
         )
     return covered()
+
+
+OBLIGATION_AST_MATCHERS: dict[str, ObligationMatcher] = {
+    "behavior": ast_covers_behavior,
+    "clock": ast_covers_clock,
+    "condition": ast_covers_condition,
+    "constraint": ast_covers_behavior,
+    "interface_port": ast_covers_interface_port,
+    "operation": ast_covers_operation,
+    "protocol": ast_covers_protocol,
+    "reset": ast_covers_reset,
+    "response": ast_covers_response,
+    "state_transition": ast_covers_state_transition,
+    "timing": ast_covers_timing,
+    "trigger": ast_covers_trigger,
+    "truth_table_row": ast_covers_truth_table_row,
+}
 
 
 def typed_or_partial(value: Any, code: str, message: str) -> dict[str, Any]:

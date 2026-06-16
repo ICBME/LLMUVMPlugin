@@ -28,6 +28,26 @@ class ClaimCandidate:
     provenance: str = "paragraph"
 
 
+@dataclass(frozen=True)
+class SourceSemanticSpan:
+    source_id: str
+    line_start: int
+    line_end: int
+    text: str
+    kind: str
+    reason: str
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "source_id": self.source_id,
+            "line_start": self.line_start,
+            "line_end": self.line_end,
+            "text": self.text,
+            "kind": self.kind,
+            "reason": self.reason,
+        }
+
+
 def extract_spec_claims(documents: tuple[SourceDocument, ...]) -> list[dict[str, Any]]:
     claims: list[dict[str, Any]] = []
     for document in documents:
@@ -35,6 +55,60 @@ def extract_spec_claims(documents: tuple[SourceDocument, ...]) -> list[dict[str,
             claim_id = f"claim{len(claims) + 1}"
             claims.append(claim_from_candidate(candidate, claim_id))
     return claims
+
+
+def collect_source_claim_coverage(
+    documents: tuple[SourceDocument, ...],
+    claims: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Check whether normative-looking source spans are represented by claims."""
+
+    spans = extract_source_semantic_spans(documents)
+    span_entries = []
+    uncovered = []
+    for span in spans:
+        matching_claims = matching_claim_ids_for_span(span, claims)
+        status = "covered" if matching_claims else "uncovered"
+        entry = {
+            **span.payload(),
+            "status": status,
+            "claim_ids": matching_claims,
+        }
+        span_entries.append(entry)
+        if not matching_claims:
+            uncovered.append(entry)
+    return {
+        "summary": {
+            "semantic_span_count": len(spans),
+            "covered_span_count": len(spans) - len(uncovered),
+            "uncovered_span_count": len(uncovered),
+        },
+        "spans": span_entries,
+        "uncovered_spans": uncovered,
+    }
+
+
+def extract_source_semantic_spans(documents: tuple[SourceDocument, ...]) -> list[SourceSemanticSpan]:
+    spans: list[SourceSemanticSpan] = []
+    for document in documents:
+        for candidate in iter_claim_candidates(document):
+            for fragment in split_claim_summaries(candidate.summary):
+                if not fragment:
+                    continue
+                reason = normative_reason(fragment)
+                if not reason:
+                    continue
+                spans.append(
+                    SourceSemanticSpan(
+                        source_id=candidate.source_id,
+                        line_start=candidate.line_start,
+                        line_end=candidate.line_end,
+                        text=fragment,
+                        kind=classify_claim_kind(fragment),
+                        reason=reason,
+                    )
+                )
+    return dedupe_source_spans(spans)
 
 
 def iter_claim_candidates(document: SourceDocument) -> list[ClaimCandidate]:
@@ -317,6 +391,105 @@ def normalize_identifier(text: str) -> str:
 
 def normalize_claim_text(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip()).lower()
+
+
+def normative_reason(text: str) -> str:
+    lowered = text.lower()
+    keyword_groups = [
+        ("normative_modal", r"\b(must|shall|should|required|requires?)\b"),
+        ("temporal_or_event", r"\b(cycle|clock|posedge|negedge|pulse|latency|after|before)\b"),
+        ("condition", r"\b(when|if|unless|only if)\b"),
+        ("reset", r"\b(reset|rst|clear|clears)\b"),
+        ("protocol", r"\b(valid|ready|handshake|transaction|request|response|bus)\b"),
+        ("operation", r"\b(compute|computes|implement|implements|produce|produces|xor|sha-?\d+)\b"),
+        ("interface", r"\b(input|output|inout|port|interface)\b"),
+        ("constraint", r"\b(always|never|illegal|range|constraint|stable|hold|holds)\b"),
+        ("state", r"\b(fsm|state|transition)\b"),
+    ]
+    if lowered.startswith("truth table row:"):
+        return "truth_table"
+    for reason, pattern in keyword_groups:
+        if re.search(pattern, lowered):
+            return reason
+    return ""
+
+
+def dedupe_source_spans(spans: list[SourceSemanticSpan]) -> list[SourceSemanticSpan]:
+    result: list[SourceSemanticSpan] = []
+    seen: set[tuple[str, int, int, str]] = set()
+    for span in spans:
+        key = (
+            span.source_id,
+            span.line_start,
+            span.line_end,
+            normalize_claim_text(span.text),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(span)
+    return result
+
+
+def matching_claim_ids_for_span(
+    span: SourceSemanticSpan,
+    claims: list[dict[str, Any]],
+) -> list[str]:
+    matching: list[str] = []
+    for claim in claims:
+        claim_id = claim.get("id")
+        if not isinstance(claim_id, str):
+            continue
+        if claim.get("source_id") != span.source_id:
+            continue
+        if not ranges_overlap(
+            span.line_start,
+            span.line_end,
+            safe_int(claim.get("line_start")),
+            safe_int(claim.get("line_end")),
+        ):
+            continue
+        if span_matches_claim_text(span.text, claim):
+            matching.append(claim_id)
+    return matching
+
+
+def span_matches_claim_text(span_text: str, claim: dict[str, Any]) -> bool:
+    span_norm = normalize_claim_text(span_text)
+    claim_text = normalize_claim_text(
+        " ".join(
+            str(claim.get(key) or "")
+            for key in ("summary", "quote")
+        )
+    )
+    if not span_norm or not claim_text:
+        return False
+    if span_norm in claim_text or claim_text in span_norm:
+        return True
+    return token_overlap_ratio(span_norm, claim_text) >= 0.72
+
+
+def token_overlap_ratio(left: str, right: str) -> float:
+    left_tokens = set(re.findall(r"[a-z0-9_]+", left.lower()))
+    right_tokens = set(re.findall(r"[a-z0-9_]+", right.lower()))
+    if not left_tokens:
+        return 0.0
+    return len(left_tokens.intersection(right_tokens)) / len(left_tokens)
+
+
+def ranges_overlap(
+    left_start: int,
+    left_end: int,
+    right_start: int,
+    right_end: int,
+) -> bool:
+    if right_start <= 0 or right_end <= 0:
+        return False
+    return left_start <= right_end and right_start <= left_end
+
+
+def safe_int(value: Any) -> int:
+    return value if isinstance(value, int) else 0
 
 
 def classify_claim_kind(summary: str) -> str:

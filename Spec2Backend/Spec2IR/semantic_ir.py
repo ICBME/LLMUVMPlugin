@@ -243,6 +243,7 @@ def build_semantic_spec_ir_prompt(
         "constraints": [
             "Return one complete SemanticSpecIR object under the top-level key semantic_spec_ir.",
             "Extract atomic spec_claims for every normative or behavior-relevant statement in the specs.",
+            "Every source fragment with normative or behavior semantics must be represented by at least one spec_claim with correct source line provenance.",
             "For every spec_claim include a stable fingerprint and decomposition.atomic_obligations for condition, trigger, response, timing, clock/reset, protocol, interface, operation, state transition, truth-table row, or fallback behavior semantics.",
             "Every normative spec_claim must be covered by semantic_elements[].claim_ids, open_questions[].claim_ids, or semantic_gaps[].claim_ids.",
             "Every semantic element must cite at least one evidence id from the original spec text.",
