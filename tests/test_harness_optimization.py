@@ -8,6 +8,8 @@ import sys
 import tempfile
 from typing import Any
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "libafl_bfm_fuzz" / "py"))
 
@@ -52,6 +54,8 @@ from fuzz_pipeline import (  # noqa: E402
     select_candidate_variants,
     validate_harness_plugin_registry,
 )
+from harness_optimization.io import read_optional_json  # noqa: E402
+from harness_optimization.runtime import read_runtime_metrics  # noqa: E402
 from fuzz_pipeline.harness_candidate_regression import (  # noqa: E402
     adapt_candidate_actions,
     classify_gap_actionability,
@@ -768,6 +772,24 @@ class FakeScoreboardStage:
 
     def scoreboard_summary(self, checker: ResultScoreboard) -> dict[str, Any]:
         return checker.summary()
+
+
+def test_read_optional_json_raises_on_invalid_json() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "broken.json"
+        path.write_text("{not json}\n", encoding="utf-8")
+
+        with pytest.raises(json.JSONDecodeError):
+            read_optional_json(path)
+
+
+def test_read_runtime_metrics_raises_on_invalid_json() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "runtime_metrics.json"
+        path.write_text("{not json}\n", encoding="utf-8")
+
+        with pytest.raises(json.JSONDecodeError):
+            read_runtime_metrics(path)
 
 
 def test_runtime_action_schema_validation() -> None:

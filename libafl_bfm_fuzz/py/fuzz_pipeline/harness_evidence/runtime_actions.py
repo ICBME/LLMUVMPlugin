@@ -8,15 +8,17 @@ import os
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from harness_optimization.runtime import (
+    COVERAGE_FEEDBACK_TUNING_CONFIG_ENV,
+    MMIO_READBACK_CONFIG_ENV,
+    REPLAY_PROBE_CONFIG_ENV,
+    SCOREBOARD_CHECK_CONFIG_ENV,
+    merge_runtime_metrics,
+    runtime_action_plugin_specs_from_env,
+    runtime_metrics_path_from_env,
+)
+
 from .plugins import build_harness_plugin
-
-
-REPLAY_PROBE_CONFIG_ENV = "HARNESS_REPLAY_PROBE_CONFIG"
-SCOREBOARD_CHECK_CONFIG_ENV = "HARNESS_SCOREBOARD_CHECK_CONFIG"
-COVERAGE_FEEDBACK_TUNING_CONFIG_ENV = "HARNESS_COVERAGE_FEEDBACK_TUNING_CONFIG"
-MMIO_READBACK_CONFIG_ENV = "HARNESS_MMIO_READBACK_CONFIG"
-RUNTIME_METRICS_OUT_ENV = "HARNESS_RUNTIME_METRICS_OUT"
-RUNTIME_ACTION_PLUGINS_ENV = "HARNESS_RUNTIME_ACTION_PLUGINS"
 
 
 @dataclass(frozen=True)
@@ -63,74 +65,6 @@ def load_runtime_action_config(
         for index, item in enumerate(raw_entries)
     )
     return RuntimeActionConfig(action_type=action_type, path=path, entries=entries)
-
-
-def runtime_metrics_path_from_env() -> Path | None:
-    value = os.getenv(RUNTIME_METRICS_OUT_ENV)
-    return Path(value) if value is not None and value.strip() else None
-
-
-def extra_make_var_value(values: Iterable[str], name: str) -> str | None:
-    prefix = f"{name}="
-    for item in values:
-        text = str(item)
-        if text.startswith(prefix):
-            value = text[len(prefix) :]
-            return value if value else None
-    return None
-
-
-def merge_runtime_metrics(
-    path: Path | None,
-    section: str,
-    metrics: Mapping[str, Any],
-    *,
-    config_path: Path | None = None,
-) -> dict[str, Any]:
-    if path is None:
-        return {"sections": {section: dict(metrics)}, "summary": dict(metrics)}
-    payload = read_runtime_metrics(path)
-    sections = payload.setdefault("sections", {})
-    if not isinstance(sections, dict):
-        sections = {}
-        payload["sections"] = sections
-    value = dict(metrics)
-    if config_path is not None:
-        value["config"] = str(config_path)
-    sections[section] = value
-    payload["summary"] = runtime_metrics_summary(payload)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return payload
-
-
-def read_runtime_metrics(path: Path | None) -> dict[str, Any]:
-    if path is None or not path.exists():
-        return {
-            "schema_version": 1,
-            "kind": "libafl_bfm_fuzz.harness_runtime_action_metrics",
-            "sections": {},
-            "summary": {},
-        }
-    value = json.loads(path.read_text(encoding="utf-8"))
-    return value if isinstance(value, dict) else {}
-
-
-def runtime_metrics_summary(payload: Mapping[str, Any]) -> dict[str, int | float]:
-    summary: dict[str, int | float] = {}
-    sections = payload.get("sections")
-    if not isinstance(sections, dict):
-        return summary
-    for section, metrics in sections.items():
-        if not isinstance(metrics, dict):
-            continue
-        for key, value in metrics.items():
-            if key == "config":
-                continue
-            number = _number(value)
-            if number is not None:
-                summary[f"{section}_{key}"] = number
-    return summary
 
 
 @dataclass(frozen=True)
@@ -326,18 +260,6 @@ def _hook_kwargs(hook: Any, kwargs: Mapping[str, Any]) -> dict[str, Any]:
     ):
         return dict(kwargs)
     return {name: value for name, value in kwargs.items() if name in parameters}
-
-
-def runtime_action_plugin_specs_from_env() -> tuple[str, ...]:
-    value = os.getenv(RUNTIME_ACTION_PLUGINS_ENV)
-    if value is None or not value.strip():
-        return ()
-    return tuple(
-        item.strip()
-        for chunk in value.splitlines()
-        for item in chunk.split(",")
-        if item.strip()
-    )
 
 
 class ReplayProbeRuntime:

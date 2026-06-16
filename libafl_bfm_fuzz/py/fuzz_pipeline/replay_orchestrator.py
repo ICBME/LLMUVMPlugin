@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -8,10 +7,15 @@ from ConnectGraph import ObservationContext, observation_context_from_env
 from ConnectGraph.observers import NullObserver
 from ConnectGraph.topology import topology_out_from_env
 from fuzz_bfm.target_config import TargetConfig
+from harness_optimization.io import path_sha256
+from harness_optimization.runtime import (
+    functional_coverage_output_from_target,
+    replay_corpus_from_env,  # noqa: F401
+    replay_target_from_env,  # noqa: F401
+)
 
 from .harness_evidence.collection import (
     functional_coverage_metrics,
-    path_sha256,
     replay_case_metadata,
     replay_context_metrics,
     replay_result_metrics,
@@ -159,7 +163,7 @@ class ReplayPipelineOrchestrator:
         )
 
     def functional_coverage_output(self, config: TargetConfig) -> Path:
-        output_path = functional_coverage_output_from_env(config)
+        output_path = functional_coverage_output_from_target(config.name)
         self.context.artifacts["functional_coverage"] = output_path
         return output_path
 
@@ -312,20 +316,3 @@ class ReplayPipelineOrchestrator:
             ),
             self.context,
         )
-
-
-def replay_target_from_env() -> str:
-    target = os.getenv("FUZZ_TARGET")
-    if target is None and os.getenv("FUZZ_TARGET_CONFIG") is None:
-        raise RuntimeError("FUZZ_TARGET or FUZZ_TARGET_CONFIG must be set")
-    return target or "dut"
-
-
-def replay_corpus_from_env(target: str | None = None) -> Path:
-    target_name = target or os.getenv("FUZZ_TARGET", "dut")
-    return Path(os.getenv("LIBAFL_CORPUS", f"coverage/{target_name}_corpus.jsonl"))
-
-
-def functional_coverage_output_from_env(config: TargetConfig) -> Path:
-    default_path = Path("coverage") / f"{config.name}_uvm_functional_coverage.json"
-    return Path(os.getenv("UVM_FUNCTIONAL_COVERAGE_OUT", str(default_path)))

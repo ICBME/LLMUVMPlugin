@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 from pathlib import Path
 from typing import Any
 
-from connector_observe import ObservationContext
+from ConnectGraph import ObservationContext
 from fuzz_feedback.advisors import (
     build_llm_prompt,
     maybe_call_llm,
@@ -15,6 +14,7 @@ from fuzz_feedback.advisors import (
 from fuzz_feedback.coverage import build_summary
 from fuzz_feedback.feedback_loop import build_gap_feedback, build_mutation_feedback
 from fuzz_feedback.mutation_planner import plan_mutations_from_rtl_gaps
+from harness_optimization.io import read_optional_json, write_json
 
 from .harness_evidence.runtime_actions import CoverageFeedbackTuningRuntime
 from .orchestrator import PipelineContext, PipelineOrchestrator, StepSpec
@@ -454,20 +454,6 @@ def run_coverage_feedback_pipeline(
     context: ObservationContext,
 ) -> CoverageFeedbackResult:
     return CoverageFeedbackPipeline(config, context).run()
-
-
-def read_optional_json(path: Path | None) -> dict | None:
-    if path is None or not path.exists():
-        return None
-    value = json.loads(path.read_text(encoding="utf-8"))
-    return value if isinstance(value, dict) else None
-
-
-def write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
 def summary_metrics(summary: dict[str, Any]) -> dict[str, Any]:
     return {
         "uncovered_line_count": int(summary.get("uncovered_line_count", 0)),

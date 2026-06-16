@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
-from connector_observe import ObservationContext
-from connector_observe.trace import read_json_object
+from ConnectGraph import ObservationContext
+from ConnectGraph.trace import read_json_object
 
 from ..campaign_orchestrator import CampaignConfig, CampaignOrchestrator
 from .optimization import (
@@ -27,12 +27,21 @@ from .plugins import (
     HarnessPluginRegistry,
     require_valid_harness_plugin_registry,
 )
-from .records import mapping
-from .runtime_actions import (
+from harness_optimization.io import (
+    artifact_path as _artifact_path,
+    campaign_cwd as _campaign_cwd,
+    optional_artifact as _optional_artifact,
+    optional_existing_artifact as _optional_existing_artifact,
+    path_or_none as _path_or_none,
+    required_path as _required_path,
+    write_json as _write_json,
+)
+from harness_optimization.runtime import (
     RUNTIME_METRICS_OUT_ENV,
     read_runtime_metrics,
-    runtime_metrics_summary,
+    runtime_metric_snapshot,
 )
+from .records import mapping
 from ..run_adapters import RunBackends
 from ..run_evaluation import EvaluationBackends
 from ..run_orchestrator import FuzzRunOrchestrator
@@ -3132,12 +3141,6 @@ def candidate_metric_snapshot(
     return metrics
 
 
-def runtime_metric_snapshot(path: Path | None) -> dict[str, float | int]:
-    if path is None or not path.exists():
-        return {}
-    return runtime_metrics_summary(read_runtime_metrics(path))
-
-
 def _merge_campaign_round_metrics(
     metrics: dict[str, float | int],
     campaign_manifest: dict[str, Any],
@@ -3228,54 +3231,5 @@ def _setting_int(
     return int(baseline_value if baseline_value is not None else default)
 
 
-def _artifact_path(
-    artifacts: dict[str, Any],
-    role: str,
-    cwd: Path | None,
-) -> Path | None:
-    path = _path_or_none(artifacts.get(role))
-    if path is None:
-        return None
-    if path.is_absolute() or cwd is None:
-        return path
-    return cwd / path
-
-
-def _campaign_cwd(
-    campaign_manifest: dict[str, Any],
-    fallback: Path | None,
-) -> Path | None:
-    return _path_or_none(campaign_manifest.get("cwd")) or fallback
-
-
-def _required_path(value: Any) -> Path:
-    path = _path_or_none(value)
-    if path is None:
-        raise ValueError(f"expected non-empty path, got {value!r}")
-    return path
-
-
-def _path_or_none(value: Any) -> Path | None:
-    if not isinstance(value, str | Path) or not str(value):
-        return None
-    return Path(value)
-
-
 def _optional_str(value: Any) -> str | None:
     return str(value) if value is not None and str(value) else None
-
-
-def _optional_artifact(name: str, path: Path | None) -> dict[str, str]:
-    return {name: str(path)} if path is not None else {}
-
-
-def _optional_existing_artifact(name: str, path: Path | None) -> dict[str, str]:
-    return {name: str(path)} if path is not None and path.exists() else {}
-
-
-def _write_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(value, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )

@@ -17,7 +17,7 @@ from .coverage_feedback import (
     CoverageFeedbackResult,
     run_coverage_feedback_pipeline,
 )
-from .harness_evidence.runtime_actions import (
+from harness_optimization.runtime import (
     COVERAGE_FEEDBACK_TUNING_CONFIG_ENV,
     RUNTIME_METRICS_OUT_ENV,
     extra_make_var_value,
