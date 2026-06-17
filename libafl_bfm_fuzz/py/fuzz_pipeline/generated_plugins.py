@@ -6,6 +6,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from fuzz_bfm.target_config import TargetConfig
+from fuzz_pipeline.plugin_contract_spec import (
+    PLUGIN_MANIFEST_FIELDS,
+    PLUGIN_VALIDATION_ORDER,
+    current_plugin_contract_hash,
+)
 from fuzz_uvm.contracts import (
     PluginContractError,
     ensure_json_serializable,
@@ -13,20 +18,6 @@ from fuzz_uvm.contracts import (
     validate_coverage_plugin,
     validate_ref_model_plugin,
     validate_scoreboard_plugin,
-)
-
-
-PLUGIN_MANIFEST_FIELDS = (
-    "ref_model",
-    "comparator",
-    "scoreboard",
-    "coverage_model",
-)
-PLUGIN_VALIDATION_ORDER = (
-    "ref_model",
-    "comparator",
-    "scoreboard",
-    "coverage_model",
 )
 
 
@@ -225,11 +216,34 @@ def validate_generated_plugin_bundle(
     *,
     config: TargetConfig | None = None,
     import_plugins: bool = True,
+    require_contract_hash: bool = True,
+    expected_contract_hash: str | None = None,
 ) -> GeneratedPluginValidationReport:
     normalized = normalize_generated_plugin_bundle(bundle)
     issues: list[PluginValidationIssue] = []
     validated_roles: list[str] = []
     comparator_plugin: Any = None
+    expected_hash = expected_contract_hash or current_plugin_contract_hash()
+    bundle_hash = normalized.metadata.get("contract_hash")
+
+    if bundle_hash is None:
+        if require_contract_hash:
+            issues.append(
+                PluginValidationIssue(
+                    role="metadata.contract_hash",
+                    message="generated plugin bundle must include current contract_hash",
+                )
+            )
+    elif str(bundle_hash) != expected_hash:
+        issues.append(
+            PluginValidationIssue(
+                role="metadata.contract_hash",
+                message=(
+                    "generated plugin bundle contract_hash mismatch: "
+                    f"got {bundle_hash!r}, expected {expected_hash!r}"
+                ),
+            )
+        )
 
     if not normalized.plugins:
         issues.append(
@@ -292,6 +306,8 @@ def validate_generated_plugin_bundle(
         validated_roles=tuple(validated_roles),
         issues=tuple(issues),
         metadata={
+            "contract_hash": expected_hash,
+            "bundle_contract_hash": bundle_hash,
             "import_plugins": import_plugins,
             "source_metadata": dict(normalized.metadata),
         },

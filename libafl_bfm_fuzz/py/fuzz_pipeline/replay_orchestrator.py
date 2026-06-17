@@ -163,6 +163,8 @@ class ReplayPipelineOrchestrator:
         *,
         config: TargetConfig | None = None,
         import_plugins: bool = True,
+        require_contract_hash: bool = True,
+        expected_contract_hash: str | None = None,
         handler: Callable[[], Any] | None = None,
         report_path: Path | str | None = None,
     ) -> GeneratedPluginValidationReport:
@@ -182,12 +184,15 @@ class ReplayPipelineOrchestrator:
                         normalized_bundle,
                         config=config,
                         import_plugins=import_plugins,
+                        require_contract_hash=require_contract_hash,
+                        expected_contract_hash=expected_contract_hash,
                     )
                 ),
                 metrics=plugin_validation_report_metrics,
                 metadata={
                     "target": normalized_bundle.target,
                     "import_plugins": import_plugins,
+                    "require_contract_hash": require_contract_hash,
                 },
             ),
             self.context,

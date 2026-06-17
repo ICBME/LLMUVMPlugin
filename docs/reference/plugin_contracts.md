@@ -95,6 +95,52 @@ target_manifest -> ref_model / comparator / scoreboard / functional_coverage
 comparator -> scoreboard
 ```
 
+LLM prompt 中的接口约束必须从 `fuzz_pipeline.plugin_contract_spec` 生成：
+
+```python
+from fuzz_pipeline.plugin_contract_spec import render_llm_plugin_contract_prompt
+
+prompt_contract = render_llm_plugin_contract_prompt()
+```
+
+不要在 codegen prompt 中维护独立的手写接口规则；接口变更后，contract hash、LLM prompt
+片段和下面的文档片段应一起更新。
+
+<!-- GENERATED_PLUGIN_CONTRACTS_START -->
+`schema_version`: `1`
+`contract_hash`: `56d281554834239465edb1c9036ea4a77056f4468ea2c3b33955f9c5a7510392`
+
+LLM 生成环节必须使用这个 contract hash，并在 `GeneratedPluginBundle.metadata.contract_hash` 中原样返回。
+
+| Role | Protocol | Required Methods | Manifest Field |
+| --- | --- | --- | --- |
+| `ref_model` | `ReferenceModelPlugin` | def predict(self, case) -> ExpectedResult | `ref_model` |
+| `comparator` | `ComparatorPlugin` | def compare(self, actual, expected, record) -> ComparisonResult | `comparator` |
+| `scoreboard` | `ScoreboardPlugin` | def write(self, record) -> None<br>def check(self) -> None<br>def summary(self) -> dict[str, Any] | `scoreboard` |
+| `coverage_model` | `FunctionalCoveragePlugin` | def sample(self, case) -> None<br>def sample_record(self, record) -> None<br>def to_json(self) -> dict[str, Any] | `coverage_model` |
+
+Hard constraints:
+
+- Generate pure Python plugins only; do not generate UVM components.
+- Use constructor def __init__(self, target=None, config=None).
+- Return only JSON-serializable metadata, summary(), and to_json() payloads.
+- Prefer ref_model + comparator + ResultScoreboard before generating a full custom scoreboard.
+- GeneratedPluginBundle.metadata.contract_hash must equal the current contract_hash.
+
+Generated artifact flow:
+
+```text
+generation_context -> generated_artifact_bundle -> plugin_contract_validator -> plugin_registry -> target_manifest_overlay -> target_manifest
+```
+
+JSON artifact:
+
+- `generated_artifact_bundle.json`
+- `plugin_validation_report.json`
+- `plugin_registry.json`
+- `target_manifest_overlay.json`
+<!-- GENERATED_PLUGIN_CONTRACTS_END -->
+
 初版 Python 接口位于 `fuzz_pipeline.generated_plugins`：
 
 - `GeneratedPluginBundle`：LLM/codegen 输出的目标名和 plugin spec 集合。
@@ -115,6 +161,7 @@ comparator -> scoreboard
     "coverage_model": "generated.my_dut_coverage:MyCoverageModel"
   },
   "metadata": {
+    "contract_hash": "56d281554834239465edb1c9036ea4a77056f4468ea2c3b33955f9c5a7510392",
     "generator": "llm"
   }
 }
@@ -123,7 +170,8 @@ comparator -> scoreboard
 `plugins` 只允许使用这些 role：`ref_model`、`comparator`、`scoreboard`、
 `coverage_model`。每个值必须是 `module:Object`。`validate_generated_plugin_bundle()`
 默认会 import 并实例化 plugin，然后调用对应契约 validator；如只做静态检查，可传入
-`import_plugins=False`。
+`import_plugins=False`。`metadata.contract_hash` 必须与当前 contract hash 一致，否则
+validation report 会标记为 invalid。
 
 生成物链路推荐持久化以下 JSON artifact，均可由 `fuzz_pipeline.generated_plugins` 读取：
 

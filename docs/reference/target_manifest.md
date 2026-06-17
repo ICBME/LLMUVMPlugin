@@ -75,6 +75,9 @@ LLM/codegen 生成物不直接进入 replay。生成器应先输出
     "ref_model": "generated.my_dut_ref_model:MyRefModel",
     "comparator": "generated.my_dut_comparator:MyComparator",
     "scoreboard": "fuzz_uvm.scoreboards:ResultScoreboard"
+  },
+  "metadata": {
+    "contract_hash": "56d281554834239465edb1c9036ea4a77056f4468ea2c3b33955f9c5a7510392"
   }
 }
 ```

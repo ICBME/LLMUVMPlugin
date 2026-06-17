@@ -119,6 +119,14 @@ from .orchestrator import (
     StepSpec,
     external_command_step,
 )
+from .plugin_contract_spec import (
+    build_plugin_contract_spec,
+    current_plugin_contract_hash,
+    generated_contract_doc_block,
+    plugin_contract_hash,
+    render_llm_plugin_contract_prompt,
+    render_plugin_contract_docs_fragment,
+)
 from .observation import ObservationRuntime
 from .replay_orchestrator import ReplayPipelineOrchestrator
 from .run_adapters import (
@@ -275,9 +283,13 @@ __all__ = [
     "build_harness_optimization_patch",
     "build_harness_optimization_task",
     "build_manifest_overlay",
+    "build_plugin_contract_spec",
     "build_plugin_registry",
     "default_harness_plugin_registry",
     "apply_manifest_overlay",
+    "current_plugin_contract_hash",
+    "generated_contract_doc_block",
+    "plugin_contract_hash",
     "load_generated_plugin_bundle",
     "load_manifest_overlay",
     "load_plugin_registry",
@@ -297,6 +309,8 @@ __all__ = [
     "load_harness_plugin_registry",
     "normalize_campaign_modes",
     "replay_corpus_from_env",
+    "render_llm_plugin_contract_prompt",
+    "render_plugin_contract_docs_fragment",
     "run_coverage_feedback_stage_pipeline",
     "run_coverage_report_pipeline",
     "run_feedback_fuzz_pipeline",

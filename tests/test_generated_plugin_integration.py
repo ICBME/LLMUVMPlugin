@@ -25,6 +25,14 @@ from fuzz_pipeline.generated_plugins import (  # noqa: E402
     write_generated_plugin_json,
 )
 from fuzz_pipeline.orchestrator import PipelineContext  # noqa: E402
+from fuzz_pipeline.plugin_contract_spec import (  # noqa: E402
+    GENERATED_CONTRACT_DOC_END,
+    GENERATED_CONTRACT_DOC_START,
+    build_plugin_contract_spec,
+    current_plugin_contract_hash,
+    render_llm_plugin_contract_prompt,
+    render_plugin_contract_docs_fragment,
+)
 from fuzz_pipeline.replay_orchestrator import ReplayPipelineOrchestrator  # noqa: E402
 from fuzz_pipeline.topology import FULL_FUZZ_TOPOLOGY, GENERATED_PLUGIN_TOPOLOGY  # noqa: E402
 from fuzz_uvm.observable import ObservableScoreboardAdapter, ReplayStageAdapter  # noqa: E402
@@ -63,6 +71,7 @@ def test_generated_plugin_bundle_validates_and_overlays_manifest() -> None:
                     "scoreboard": "fuzz_uvm.scoreboards:ResultScoreboard",
                     "coverage_model": "generated_demo:CoverageModel",
                 },
+                metadata=_bundle_metadata(),
             )
 
             report = validate_generated_plugin_bundle(bundle, config=config)
@@ -86,6 +95,7 @@ def test_generated_plugin_artifacts_round_trip_json() -> None:
         bundle = GeneratedPluginBundle(
             target="demo",
             plugins={"ref_model": "generated_demo:RefModel"},
+            metadata=_bundle_metadata(),
         )
         report = validate_generated_plugin_bundle(bundle, import_plugins=False)
         registry = build_plugin_registry(report)
@@ -130,9 +140,67 @@ def test_plugin_validation_report_requires_json_bool_valid() -> None:
             raise AssertionError("expected PluginContractError")
 
 
+def test_contract_spec_prompt_and_docs_use_same_hash() -> None:
+    spec = build_plugin_contract_spec()
+    prompt = render_llm_plugin_contract_prompt(spec)
+    fragment = render_plugin_contract_docs_fragment(spec)
+
+    assert spec["contract_hash"] == current_plugin_contract_hash()
+    assert spec["contract_hash"] in prompt
+    assert "metadata.contract_hash" in prompt
+    assert spec["contract_hash"] in fragment
+    assert "ComparatorPlugin" in fragment
+
+
+def test_plugin_contract_docs_generated_fragment_is_current() -> None:
+    docs_path = ROOT / "docs" / "reference" / "plugin_contracts.md"
+    text = docs_path.read_text(encoding="utf-8")
+    start = text.index(GENERATED_CONTRACT_DOC_START) + len(GENERATED_CONTRACT_DOC_START)
+    end = text.index(GENERATED_CONTRACT_DOC_END)
+    actual = text[start:end].strip()
+    expected = render_plugin_contract_docs_fragment().strip()
+
+    assert actual == expected
+
+
+def test_target_manifest_docs_reference_current_contract_hash() -> None:
+    docs_path = ROOT / "docs" / "reference" / "target_manifest.md"
+    text = docs_path.read_text(encoding="utf-8")
+
+    assert current_plugin_contract_hash() in text
+
+
+def test_generated_plugin_bundle_rejects_stale_contract_hash() -> None:
+    report = validate_generated_plugin_bundle(
+        {
+            "target": "demo",
+            "plugins": {"ref_model": "generated_demo:RefModel"},
+            "metadata": {"contract_hash": "stale"},
+        },
+        import_plugins=False,
+    )
+
+    assert report.valid is False
+    assert report.issues[0].role == "metadata.contract_hash"
+
+
+def test_generated_plugin_bundle_rejects_missing_contract_hash() -> None:
+    report = validate_generated_plugin_bundle(
+        {
+            "target": "demo",
+            "plugins": {"ref_model": "generated_demo:RefModel"},
+            "metadata": {},
+        },
+        import_plugins=False,
+    )
+
+    assert report.valid is False
+    assert report.issues[0].role == "metadata.contract_hash"
+
+
 def test_generated_plugin_bundle_rejects_empty_plugin_set() -> None:
     report = validate_generated_plugin_bundle(
-        {"target": "demo", "plugins": {}},
+        {"target": "demo", "plugins": {}, "metadata": _bundle_metadata()},
         import_plugins=False,
     )
 
@@ -189,6 +257,7 @@ def test_replay_orchestrator_runs_generated_plugin_connector_flow() -> None:
                 "ref_model": "generated_demo:RefModel",
                 "comparator": "generated_demo:Comparator",
             },
+            metadata=_bundle_metadata(),
         )
 
         published = pipeline.publish_generated_plugin_bundle(bundle)
@@ -286,3 +355,7 @@ class InProcessScoreboardPlugins:
             comparator=comparator,
         )
         return self.scoreboard
+
+
+def _bundle_metadata() -> dict[str, str]:
+    return {"contract_hash": current_plugin_contract_hash()}
