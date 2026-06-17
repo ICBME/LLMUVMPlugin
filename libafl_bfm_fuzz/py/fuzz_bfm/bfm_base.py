@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, field
+from typing import Any, Mapping, Protocol
 
 from .corpus import FuzzCase
 
 
 @dataclass(frozen=True)
 class ReplayResult:
-    actual: str
-    expected: str | None = None
+    actual: Any
+    expected: Any | None = None
     detail: str = ""
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 class TargetDriver(Protocol):

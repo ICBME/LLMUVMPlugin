@@ -98,20 +98,29 @@ def validate_artifact_dir(
     for python_file in python_files:
         validate_python_file(python_file)
 
-    paths = (root, *(Path(path) for path in extra_python_paths))
+    paths = (
+        root,
+        _framework_python_path(),
+        *(Path(path) for path in extra_python_paths),
+    )
     with python_path(paths):
+        contracts = _load_replay_contracts()
         ref_model_obj = None
-        if ref_model:
-            ref_model_obj = _build_plugin(ref_model, target=target, config=None)
-            _require_callables(ref_model_obj, ref_model, ("predict",))
-        if scoreboard:
-            scoreboard_obj = _build_plugin(scoreboard, target=target, config=None)
-            _require_callables(scoreboard_obj, scoreboard, ("write", "check", "summary"))
-            summary = scoreboard_obj.summary()
-            if not isinstance(summary, dict):
-                raise ArtifactValidationError(f"{scoreboard}: summary() must return a dict")
-        if ref_model_obj is not None:
-            _validate_golden_cases(ref_model_obj, tuple(golden_cases))
+        try:
+            if ref_model:
+                ref_model_obj = _build_plugin(ref_model, target=target, config=None)
+                contracts.validate_ref_model_plugin(ref_model_obj, spec=ref_model)
+            if scoreboard:
+                scoreboard_obj = _build_plugin(scoreboard, target=target, config=None)
+                contracts.validate_scoreboard_plugin(scoreboard_obj, spec=scoreboard)
+            if ref_model_obj is not None:
+                _validate_golden_cases(
+                    ref_model_obj,
+                    tuple(golden_cases),
+                    normalize_expected=contracts.normalize_expected,
+                )
+        except contracts.PluginContractError as exc:
+            raise ArtifactValidationError(str(exc)) from exc
 
 
 def validate_python_file(path: str | Path) -> None:
@@ -209,16 +218,15 @@ def _build_plugin(spec: str, **kwargs: Any) -> Any:
     return plugin_cls(**call_kwargs)
 
 
-def _require_callables(obj: Any, spec: str, names: tuple[str, ...]) -> None:
-    for name in names:
-        if not callable(getattr(obj, name, None)):
-            raise ArtifactValidationError(f"{spec}: missing callable {name}()")
-
-
-def _validate_golden_cases(ref_model: Any, golden_cases: tuple[GoldenCase, ...]) -> None:
+def _validate_golden_cases(
+    ref_model: Any,
+    golden_cases: tuple[GoldenCase, ...],
+    *,
+    normalize_expected: Any,
+) -> None:
     for golden_case in golden_cases:
         result = ref_model.predict(golden_case.to_fuzz_case())
-        actual = _expected_value(result)
+        actual = normalize_expected(result, spec="golden case ref model").expected
         if actual != golden_case.expected:
             raise ArtifactValidationError(
                 f"golden case line {golden_case.line_no}: expected "
@@ -226,12 +234,16 @@ def _validate_golden_cases(ref_model: Any, golden_cases: tuple[GoldenCase, ...])
             )
 
 
-def _expected_value(result: Any) -> Any:
-    if hasattr(result, "expected"):
-        return result.expected
-    if isinstance(result, dict) and "expected" in result:
-        return result["expected"]
-    return result
+def _framework_python_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "libafl_bfm_fuzz" / "py"
+
+
+def _load_replay_contracts() -> Any:
+    try:
+        from fuzz_uvm import contracts
+    except Exception as exc:  # noqa: BLE001 - surface import path issues clearly
+        raise ArtifactValidationError(f"failed to import fuzz_uvm contracts: {exc}") from exc
+    return contracts
 
 
 @contextmanager

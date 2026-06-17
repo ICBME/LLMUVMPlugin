@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from fuzz_bfm.bfm_base import ReplayResult
-from fuzz_uvm.ref_models import ExpectedResult
+from fuzz_uvm.contracts import ExpectedResult
 
 
 ADDR_CTRL = 0x08

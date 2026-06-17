@@ -35,13 +35,28 @@ class MyDriver:
 
 - `reset()` 在 replay 开始前调用一次。
 - `execute(case)` 将一个 `FuzzCase` 转换为 DUT transaction。
-- 返回 `ReplayResult(actual=..., expected=..., detail=...)`。
+- 返回 `ReplayResult(actual=..., expected=..., detail=..., metadata=...)`。
 - 如果 expected 由 ref model 提供，driver 可以只填 actual。
+
+## 通用结果类型
+
+ref model、scoreboard 和 comparator 的公共接口集中在
+`fuzz_uvm.contracts`。
+
+```python
+from fuzz_uvm.contracts import ComparisonResult, ExpectedResult
+```
+
+`ExpectedResult.expected` 可以是字符串、整数、列表、dict 等可比较对象。
+`detail` 用于人类可读诊断，`metadata` 用于传递结构化上下文。
+
+`ComparisonResult.passed` 表示当前 record 是否通过。失败时建议填充 `reason`，
+这样默认 scoreboard 能在 `check()` 失败时给出稳定错误信息。
 
 ## Reference Model Plugin
 
 ```python
-from fuzz_uvm.ref_models import ExpectedResult
+from fuzz_uvm.contracts import ExpectedResult
 
 
 class MyRefModel:
@@ -57,6 +72,8 @@ class MyRefModel:
 - 不驱动 DUT。
 - 不依赖仿真时间。
 - 只根据 case 计算 expected。
+- `predict()` 推荐返回 `ExpectedResult`。框架也会归一化带 `expected` 字段的
+  mapping 或具有 `expected` 属性的对象。
 
 ## Scoreboard Plugin
 
@@ -75,8 +92,33 @@ class MyScoreboard:
         ...
 ```
 
-默认 scoreboard 比较 `record.result.actual` 和 `record.result.expected`。
+默认 scoreboard 使用 `DefaultComparator` 比较 `record.result.actual` 和
+`record.result.expected`。如果 ref model 返回了 `detail` 或 `metadata`，运行时会将
+它们放入 `record.result.metadata["ref_model"]`。
+
 如果目标处于 smoke replay、只关心无异常执行，应配置自定义 scoreboard。
+
+## Comparator Plugin
+
+简单目标通常不需要自定义 scoreboard，只需要替换比较规则。Comparator 是一个轻量
+接口：
+
+```python
+from fuzz_uvm.contracts import ComparisonResult
+
+
+class MyComparator:
+    def compare(self, actual, expected, record) -> ComparisonResult:
+        if normalize(actual) == normalize(expected):
+            return ComparisonResult(passed=True)
+        return ComparisonResult(
+            passed=False,
+            reason=f"actual={actual!r} expected={expected!r}",
+        )
+```
+
+`ResultScoreboard(target, comparator=MyComparator())` 会使用该 comparator。完整自定义
+scoreboard 仍然适合乱序响应、跨 transaction 状态检查、多通道协议等场景。
 
 ## Functional Coverage Plugin
 

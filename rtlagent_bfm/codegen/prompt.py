@@ -48,7 +48,8 @@ def build_generation_prompt(
             "No DSL is available in this phase.",
             "Use the generated IR as binding/context only; protocol behavior comes from the spec.",
             "Reference model must not drive DUT signals or depend on simulation time.",
-            "Scoreboard must implement write(record), check(), and summary().",
+            "Use fuzz_uvm.contracts.ExpectedResult for reference-model outputs.",
+            "Scoreboard must implement fuzz_uvm.contracts.ScoreboardPlugin.",
             "Generated files must be candidates until validation promotes them to final artifacts.",
         ],
         "inputs": {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 import json
 from pathlib import Path
@@ -12,6 +13,7 @@ from fuzz_pipeline.harness_runtime_actions import (
     HarnessRuntimeActionManager,
     ScoreboardCheckRuntime,
 )
+from fuzz_uvm.contracts import ExpectedResult, normalize_expected
 from fuzz_uvm.functional_coverage import build_coverage_model
 from fuzz_uvm.ref_models import build_ref_model
 from fuzz_uvm.scoreboards import build_scoreboard
@@ -168,14 +170,16 @@ class ObservableReplayDriverAdapter:
                 driver=self.target_driver,
             )
             return result
-        expected = self.stage.predict_ref_model(self.ref_model, case, index=index)
+        expected = normalize_expected(
+            self.stage.predict_ref_model(self.ref_model, case, index=index)
+        )
         await self.runtime_actions.after_ref_model(
             index=index,
             case=case,
             expected=expected,
             driver=self.target_driver,
         )
-        final_result = replace(result, expected=expected.expected)
+        final_result = _with_expected(result, expected)
         await self.runtime_actions.sample_after_execute(
             index=index,
             case=case,
@@ -264,3 +268,21 @@ class ObservableCoverageAdapter:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
         return summary
+
+
+def _with_expected(result: Any, expected: ExpectedResult) -> Any:
+    metadata: dict[str, Any] = {}
+    existing_metadata = getattr(result, "metadata", {})
+    if isinstance(existing_metadata, Mapping):
+        metadata.update(existing_metadata)
+    ref_metadata: dict[str, Any] = {}
+    if expected.detail:
+        ref_metadata["detail"] = expected.detail
+    if expected.metadata:
+        ref_metadata["metadata"] = dict(expected.metadata)
+    if ref_metadata:
+        metadata["ref_model"] = ref_metadata
+    try:
+        return replace(result, expected=expected.expected, metadata=metadata)
+    except TypeError:
+        return replace(result, expected=expected.expected)

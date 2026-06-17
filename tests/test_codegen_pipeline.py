@@ -448,12 +448,14 @@ def _valid_bundle():
                 "path": "generated/ref_model.py",
                 "content": "\n".join(
                     [
+                        "from fuzz_uvm.contracts import ExpectedResult",
+                        "",
                         "class DemoRefModel:",
                         "    def __init__(self, target=None, config=None):",
                         "        self.target = target",
                         "",
                         "    def predict(self, case):",
-                        "        return {'expected': f\"{case.data['op']}:{case.data['value']}\"}",
+                        "        return ExpectedResult(expected=f\"{case.data['op']}:{case.data['value']}\")",
                         "",
                     ]
                 ),

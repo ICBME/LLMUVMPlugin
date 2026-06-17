@@ -96,10 +96,12 @@ LLM 返回 strict JSON：
 `rtlagent_bfm.codegen.validation` 当前提供三层检查：
 
 1. 静态检查：Python 语法、AST 解析、禁止明显危险的进程/网络/文件访问入口。
-2. 插件契约检查：ref model 必须有 `predict(case)`；scoreboard 必须有
-   `write(record)`、`check()`、`summary()`，且 `summary()` 返回 dict。
+2. 插件契约检查：ref model 必须满足 `fuzz_uvm.contracts.ReferenceModelPlugin`
+   的 `predict(case)` 接口；scoreboard 必须满足
+   `fuzz_uvm.contracts.ScoreboardPlugin` 的 `write(record)`、`check()`、
+   `summary()` 接口，且 `summary()` 返回 dict。
 3. Golden case 检查：可选地调用 ref model 的 `predict(case)`，比较返回的
-   `expected` 与 directed expected。
+   `ExpectedResult.expected` 与 directed expected。
 
 这些检查只能证明候选产物满足初步接入条件，不能替代完整 replay、coverage 和人工
 review。复杂状态机、乱序响应、多周期 monitor-driven scoreboard 应在后续 DSL 或更强
