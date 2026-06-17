@@ -12,7 +12,8 @@
 - 新实现应遵守分层 import 规则：
   `ConnectGraph.*` 用于通用 connector 能力，
   `harness_optimization.*` 用于共享 planning/runtime/optimization helper，以及 candidate
-  regression 的中立执行模型（如 `candidate_execution`），
+  regression 的中立执行模型与规则内核（如 `candidate_execution`、
+  `candidate_validation`、`rules`），
   `fuzz_pipeline.harness_evidence.*` 与业务 facade 用于 `libafl_bfm_fuzz` 语义。
 - `fuzz_pipeline.harness*.py`、`fuzz_pipeline.run_plan`、`fuzz_pipeline.run_stage_registry`
   视为兼容入口，不应作为新模块的默认依赖目标。

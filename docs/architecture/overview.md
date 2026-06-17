@@ -96,8 +96,11 @@ connector 事件、monitor 汇总和 topology JSON 的格式见
 
 - `ConnectGraph`：通用 connector event、observer、topology 和 step orchestration。
 - `harness_optimization`：通用 run planning、path helper、optimization protocol、
-  plugin/runtime helper 内核，以及 candidate regression 共用的 execution model /
-  config payload / adapter result 数据结构。
+  plugin/runtime helper 内核，以及 candidate regression 共用的 execution model、
+  candidate validation kernel 和 protocol/rules kernel。
+  其中 `candidate_execution.py` 负责候选执行模型与 adapter 结果，
+  `candidate_validation.py` 负责 repeat/variant/promotion 等候选验证公共计算，
+  `rules.py` 负责 proposal schema、payload DSL、metric gate 和 final decision 规则。
 - `fuzz_pipeline`：`libafl_bfm_fuzz` 业务编排和 facade；新业务代码优先依赖
   `harness_evidence.*`、`harness_plugins`、`harness_runtime_actions`，而不是兼容 wrapper。
 

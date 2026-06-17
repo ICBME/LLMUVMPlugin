@@ -162,6 +162,9 @@ Harness evidence 相关实现现在集中在 `py/fuzz_pipeline/harness_evidence/
 - `HarnessOptimizationAdapter` 从 campaign evaluation、harness evaluation、LLM dataset
   和 campaign rollup 构造 task；optimizer backend 只返回 proposal，不直接修改源码或
   harness artifact。
+- proposal schema、payload DSL、metric gate 和 final decision 的共享规则内核已下沉到
+  `harness_optimization.rules`；本模块主要保留 `libafl_bfm_fuzz` 的 artifact kind、
+  task 组装和业务 facade。
 - 默认 `NoopHarnessOptimizerBackend` 生成 schema-valid no-op proposal；
   decision stage 只做 schema-level accept/reject，并将 `application_status` 标为
   `not_applied`。
@@ -205,6 +208,10 @@ Harness evidence 相关实现现在集中在 `py/fuzz_pipeline/harness_evidence/
   metrics、paired delta、mean/worst/variance 和 flaky metric 标记；主
   `baseline_metrics` / `candidate_metrics` 使用 repeat 均值，final decision 会用
   `max_flaky_metric_count` 拦截不稳定候选。
+- candidate execution 的共享模型仍在 `harness_optimization.candidate_execution`；
+  repeat/variant/promotion 等候选验证公共计算已下沉到
+  `harness_optimization.candidate_validation`，本模块主要保留 sandbox campaign 装配、
+  runtime artifact 读取和 `libafl_bfm_fuzz` 业务策略。
 - candidate evaluation report 会带上 baseline/candidate metrics、candidate campaign
   artifacts、matched baseline artifacts、paired validation artifacts、adapter metrics、
   variant evaluations、action effect report、variant ranking、promotion package 和
