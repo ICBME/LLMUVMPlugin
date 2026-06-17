@@ -36,6 +36,7 @@ CONFIG_TEXT = """
 name = "demo"
 toplevel = "demo_top"
 driver = "demo_driver:Driver"
+comparator = "demo_compare:Comparator"
 
 [[field]]
 name = "mode"
@@ -138,6 +139,7 @@ class TestLibAflBfmGeneric(unittest.TestCase):
             config = load_target_config("demo", targets_dir=tmp_path)
 
             self.assertEqual(config.coverpoints[0].name, "payload_pattern")
+            self.assertEqual(config.comparator, "demo_compare:Comparator")
             self.assertEqual(config.coverpoints[0].patterns, ("zero", "ff", "increment"))
             self.assertEqual(config.crosses[0].coverpoints, ("mode", "payload_pattern"))
 

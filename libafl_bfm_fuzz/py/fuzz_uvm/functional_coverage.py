@@ -4,27 +4,18 @@ from collections import Counter
 from itertools import product
 import json
 from pathlib import Path
-from typing import Any, Iterable, Protocol
+from typing import Any, Iterable
 
 from fuzz_bfm.corpus import FuzzCase
 from fuzz_bfm.plugin_loader import build_plugin
 from fuzz_bfm.target_config import CoverpointSpec, FieldSpec, TargetConfig, load_target_config
+from fuzz_uvm.contracts import FunctionalCoveragePlugin, validate_coverage_plugin
 
 
 MAX_EXPECTED_CROSS_BINS = 1024
 
 
-class FunctionalCoverageProtocol(Protocol):
-    target: str
-
-    def sample(self, case: FuzzCase) -> None:
-        ...
-
-    def sample_record(self, record: Any) -> None:
-        ...
-
-    def to_json(self) -> dict[str, Any]:
-        ...
+FunctionalCoverageProtocol = FunctionalCoveragePlugin
 
 
 def build_coverage_model(
@@ -33,7 +24,8 @@ def build_coverage_model(
 ) -> FunctionalCoverageProtocol:
     config = config or _try_load_target_config(target)
     if config is not None and config.coverage_model:
-        return build_plugin(config.coverage_model, target=target, config=config)
+        plugin = build_plugin(config.coverage_model, target=target, config=config)
+        return validate_coverage_plugin(plugin, spec=config.coverage_model)
     return GenericCoverageModel(target=target, config=config)
 
 

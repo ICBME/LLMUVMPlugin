@@ -40,7 +40,7 @@ class MyDriver:
 
 ## 通用结果类型
 
-ref model、scoreboard 和 comparator 的公共接口集中在
+ref model、comparator、scoreboard 和 coverage 的公共接口集中在
 `fuzz_uvm.contracts`。
 
 ```python
@@ -52,6 +52,78 @@ from fuzz_uvm.contracts import ComparisonResult, ExpectedResult
 
 `ComparisonResult.passed` 表示当前 record 是否通过。失败时建议填充 `reason`，
 这样默认 scoreboard 能在 `check()` 失败时给出稳定错误信息。
+
+`metadata`、`summary()` 和 `to_json()` 必须能被 `json.dumps()` 序列化。
+
+## LLM 生成物硬约束
+
+LLM 生成物应是纯 Python plugin，不应生成 UVM component。所有生成类都使用统一
+constructor：
+
+```python
+def __init__(self, target=None, config=None):
+    self.target = target
+    self.config = config
+```
+
+禁止事项：
+
+- 不继承 `uvm_component`，不直接 import/use `cocotb` 或 DUT handle。
+- 不依赖仿真时间，不调用 `Timer`、`RisingEdge`、`time.sleep` 等等待逻辑。
+- 不访问网络、进程或文件系统。
+- 不在 module import 阶段执行业务逻辑。
+- 不返回不可 JSON 序列化的 `metadata`、`summary()` 或 `to_json()`。
+
+推荐生成顺序：
+
+1. 优先生成 `ReferenceModelPlugin`。
+2. 如默认 `actual == expected` 不足，生成 `ComparatorPlugin`。
+3. 只有乱序、多 transaction 状态、多通道匹配等情况才生成完整 `ScoreboardPlugin`。
+4. 覆盖率需求独立生成 `FunctionalCoveragePlugin`。
+
+## 生成物接入拓扑
+
+LLM/codegen 不直接改写 replay runtime。生成物先进入 pipeline 的显式 Connector 链路：
+
+```text
+generation_context -> generated_artifact_bundle
+generated_artifact_bundle -> plugin_contract_validator
+plugin_contract_validator -> plugin_registry
+plugin_registry -> target_manifest_overlay
+target_manifest_overlay -> target_manifest
+target_manifest -> ref_model / comparator / scoreboard / functional_coverage
+comparator -> scoreboard
+```
+
+初版 Python 接口位于 `fuzz_pipeline.generated_plugins`：
+
+- `GeneratedPluginBundle`：LLM/codegen 输出的目标名和 plugin spec 集合。
+- `GeneratedPluginValidationReport`：契约校验结果。
+- `GeneratedPluginRegistry`：验证通过后允许进入 manifest overlay 的 plugin refs。
+- `TargetManifestOverlay`：最终写入 `ref_model`、`comparator`、`scoreboard`、
+  `coverage_model` 等 manifest 字段的更新。
+
+推荐的 bundle JSON 形态：
+
+```json
+{
+  "target": "my_dut",
+  "plugins": {
+    "ref_model": "generated.my_dut_ref_model:MyRefModel",
+    "comparator": "generated.my_dut_comparator:MyComparator",
+    "scoreboard": "fuzz_uvm.scoreboards:ResultScoreboard",
+    "coverage_model": "generated.my_dut_coverage:MyCoverageModel"
+  },
+  "metadata": {
+    "generator": "llm"
+  }
+}
+```
+
+`plugins` 只允许使用这些 role：`ref_model`、`comparator`、`scoreboard`、
+`coverage_model`。每个值必须是 `module:Object`。`validate_generated_plugin_bundle()`
+默认会 import 并实例化 plugin，然后调用对应契约 validator；如只做静态检查，可传入
+`import_plugins=False`。
 
 ## Reference Model Plugin
 
@@ -120,9 +192,19 @@ class MyComparator:
 `ResultScoreboard(target, comparator=MyComparator())` 会使用该 comparator。完整自定义
 scoreboard 仍然适合乱序响应、跨 transaction 状态检查、多通道协议等场景。
 
+Manifest 中可通过 `comparator` 字段接入：
+
+```toml
+scoreboard = "fuzz_uvm.scoreboards:ResultScoreboard"
+comparator = "generated.my_dut_comparator:MyComparator"
+```
+
 ## Functional Coverage Plugin
 
 ```python
+from fuzz_uvm.contracts import FunctionalCoveragePlugin
+
+
 class MyCoverageModel:
     def __init__(self, target=None, config=None):
         self.target = target
@@ -140,8 +222,8 @@ class MyCoverageModel:
 要求：
 
 - `sample(case)` 是兼容入口，只依赖 stimulus `FuzzCase`。
-- `sample_record(record)` 是可选增强入口；如果存在，UVM subscriber 会优先调用它，
-  使 coverage model 能看到 `record.result`、`record.error` 和 scoreboard 相关上下文。
+- `sample_record(record)` 是 replay 入口；如果不需要 result/error 上下文，可以在其中
+  简单转调 `sample(record.case)`。
 - `to_json()` 返回可序列化 summary。
 
 默认 coverage model 统计 schema 字段、可选 manifest coverpoint/cross 和相邻字段

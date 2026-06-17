@@ -55,6 +55,7 @@ class TargetConfig:
     monitor: str | None = None
     ref_model: str | None = None
     scoreboard: str | None = None
+    comparator: str | None = None
     coverage_model: str | None = None
     sequence_schema: str | None = None
     harness_optimization_plugins: tuple[str, ...] = ()
@@ -101,6 +102,7 @@ def load_target_config(
         monitor=str(data["monitor"]) if "monitor" in data else None,
         ref_model=str(data["ref_model"]) if "ref_model" in data else None,
         scoreboard=str(data["scoreboard"]) if "scoreboard" in data else None,
+        comparator=str(data["comparator"]) if "comparator" in data else None,
         coverage_model=str(data["coverage_model"]) if "coverage_model" in data else None,
         sequence_schema=str(data["sequence_schema"]) if "sequence_schema" in data else None,
         harness_optimization_plugins=_string_tuple(

@@ -14,6 +14,7 @@ reset = "reset_n"
 driver = "my_project.my_driver:MyDriver"
 ref_model = "my_project.my_ref_model:MyRefModel"
 scoreboard = "fuzz_uvm.scoreboards:ResultScoreboard"
+comparator = "my_project.compare:MyComparator"
 coverage_model = "my_project.coverage:MyCoverageModel"
 
 [signals]
@@ -52,6 +53,8 @@ hex_len = 16
 - `[signals]`：插件可用的 signal 映射。
 - `ref_model` / `oracle`：reference model plugin。
 - `scoreboard`：scoreboard plugin。
+- `comparator`：默认 `ResultScoreboard` 使用的 comparator plugin，也可注入到声明了
+  `comparator` constructor 参数的自定义 scoreboard。
 - `coverage_model`：functional coverage plugin。
 - `bfm_ir`：指向 `rtlagent_bfm` IR 文件。
 - `sequence_schema`：保留给 sequence plugin/schema 扩展。
@@ -60,18 +63,32 @@ hex_len = 16
 
 ## LLM 生成产物接入
 
-codegen 流程中，LLM 生成的 ref model / scoreboard 或 OracleIR 生成的 ref model
-bundle 会先写入 candidate 目录。验证通过后，工具会将候选产物提升到 final 目录，并更新
-manifest：
+LLM/codegen 生成物不直接进入 replay。生成器应先输出
+`GeneratedPluginBundle`，由 `artifact_bundle_to_contract_validation` connector 做契约校验；
+校验通过后生成 `GeneratedPluginRegistry` 和 `TargetManifestOverlay`，再由
+`manifest_overlay_to_target_manifest` 形成有效 replay manifest：
 
-```toml
-bfm_ir = "generated/final/my_dut_ir.json"
-ref_model = "generated.my_dut_ref_model:MyRefModel"
-scoreboard = "generated.my_dut_scoreboard:MyScoreboard"
+```json
+{
+  "target": "my_dut",
+  "plugins": {
+    "ref_model": "generated.my_dut_ref_model:MyRefModel",
+    "comparator": "generated.my_dut_comparator:MyComparator",
+    "scoreboard": "fuzz_uvm.scoreboards:ResultScoreboard"
+  }
+}
 ```
 
-这些字段与手写 plugin 使用同一加载路径。未验证的 candidate artifact 不应被 manifest
-引用。
+overlay 最终等价于更新 manifest 字段：
+
+```toml
+ref_model = "generated.my_dut_ref_model:MyRefModel"
+scoreboard = "fuzz_uvm.scoreboards:ResultScoreboard"
+comparator = "generated.my_dut_comparator:MyComparator"
+```
+
+这些字段与手写 plugin 使用同一加载路径。未生成有效
+`GeneratedPluginValidationReport` 的 candidate artifact 不应被 manifest 或 overlay 引用。
 
 ## Field Schema
 

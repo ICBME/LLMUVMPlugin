@@ -97,17 +97,34 @@ class ResultScoreboard:
 
 
 def build_scoreboard(config: TargetConfig) -> ScoreboardPlugin:
+    comparator = build_comparator(config)
     if config.scoreboard is None:
-        return ResultScoreboard(config.name, config=config)
+        return ResultScoreboard(config.name, config=config, comparator=comparator)
 
     from fuzz_bfm.plugin_loader import build_plugin
 
-    plugin = build_plugin(config.scoreboard, target=config.name, config=config)
+    plugin = build_plugin(
+        config.scoreboard,
+        target=config.name,
+        config=config,
+        comparator=comparator,
+    )
     return validate_scoreboard_plugin(plugin, spec=config.scoreboard)
+
+
+def build_comparator(config: TargetConfig) -> ComparatorPlugin | None:
+    if config.comparator is None:
+        return None
+
+    from fuzz_bfm.plugin_loader import build_plugin
+
+    plugin = build_plugin(config.comparator, target=config.name, config=config)
+    return validate_comparator_plugin(plugin, spec=config.comparator)
 
 
 __all__ = [
     "ResultScoreboard",
     "ScoreboardFailure",
+    "build_comparator",
     "build_scoreboard",
 ]

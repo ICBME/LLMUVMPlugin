@@ -181,9 +181,11 @@ Makefile 会把 `CARGO` 作为一个完整 wrapper 字符串传给 pipeline runn
    `manifest_to_replay_driver`、`driver_reset_to_dut` 和 `case_to_dut`。
 6. 可选 ref model 填充 expected，并观测 `manifest_to_ref_model` 和
    `case_to_ref_model`。
-7. Scoreboard 通过 `ObservableScoreboardAdapter` 检查 result，并观测
+7. 可选 comparator 由 manifest 构建，并可观测 `manifest_to_comparator`；编排层显式
+   注入 scoreboard 时可额外观测 `comparator_to_scoreboard`。
+8. Scoreboard 通过 `ObservableScoreboardAdapter` 检查 result，并观测
    `manifest_to_scoreboard`、`driver_to_scoreboard` 和 `scoreboard_to_report`。
-8. Functional coverage subscriber 通过 `ObservableCoverageAdapter` 输出 JSON summary，并观测
+9. Functional coverage subscriber 通过 `ObservableCoverageAdapter` 输出 JSON summary，并观测
    `manifest_to_functional_coverage`、`driver_to_functional_coverage` 和
    `functional_coverage_to_summary`。默认路径由 `ReplayPipelineOrchestrator` 解析为
    `coverage/<target>_uvm_functional_coverage.json`，可由

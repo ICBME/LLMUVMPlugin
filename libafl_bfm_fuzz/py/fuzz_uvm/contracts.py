@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from typing import Any, Mapping, Protocol, runtime_checkable
 
 
@@ -51,6 +52,18 @@ class ComparatorPlugin(Protocol):
         ...
 
 
+@runtime_checkable
+class FunctionalCoveragePlugin(Protocol):
+    def sample(self, case: Any) -> None:
+        ...
+
+    def sample_record(self, record: Any) -> None:
+        ...
+
+    def to_json(self) -> dict[str, Any]:
+        ...
+
+
 class DefaultComparator:
     """Default actual/expected equality comparator."""
 
@@ -67,7 +80,11 @@ def normalize_expected(value: Any, *, spec: str = "reference model") -> Expected
     """Normalize plugin output into the public ExpectedResult contract."""
 
     if isinstance(value, ExpectedResult):
-        return value
+        return ExpectedResult(
+            expected=value.expected,
+            detail=_optional_string(value.detail),
+            metadata=_metadata_mapping(value.metadata, spec=spec),
+        )
     if isinstance(value, Mapping):
         if "expected" not in value:
             raise PluginContractError(f"{spec}: predict() mapping must contain 'expected'")
@@ -141,6 +158,7 @@ def validate_scoreboard_plugin(
     summary = plugin.summary()
     if not isinstance(summary, dict):
         raise PluginContractError(f"{spec}: summary() must return a dict")
+    ensure_json_serializable(summary, spec=f"{spec}: summary()")
     return plugin
 
 
@@ -151,6 +169,26 @@ def validate_comparator_plugin(
 ) -> ComparatorPlugin:
     _require_callables(plugin, spec, ("compare",))
     return plugin
+
+
+def validate_coverage_plugin(
+    plugin: Any,
+    *,
+    spec: str = "functional coverage",
+) -> FunctionalCoveragePlugin:
+    _require_callables(plugin, spec, ("sample", "sample_record", "to_json"))
+    summary = plugin.to_json()
+    if not isinstance(summary, dict):
+        raise PluginContractError(f"{spec}: to_json() must return a dict")
+    ensure_json_serializable(summary, spec=f"{spec}: to_json()")
+    return plugin
+
+
+def ensure_json_serializable(value: Any, *, spec: str) -> None:
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError) as exc:
+        raise PluginContractError(f"{spec} must be JSON-serializable: {exc}") from exc
 
 
 def _require_callables(obj: Any, spec: str, names: tuple[str, ...]) -> None:
@@ -170,7 +208,9 @@ def _metadata_mapping(value: Any, *, spec: str) -> Mapping[str, Any]:
         return {}
     if not isinstance(value, Mapping):
         raise PluginContractError(f"{spec}: metadata must be a mapping")
-    return dict(value)
+    metadata = dict(value)
+    ensure_json_serializable(metadata, spec=f"{spec}: metadata")
+    return metadata
 
 
 __all__ = [
@@ -178,12 +218,15 @@ __all__ = [
     "ComparisonResult",
     "DefaultComparator",
     "ExpectedResult",
+    "FunctionalCoveragePlugin",
     "PluginContractError",
     "ReferenceModelPlugin",
     "ScoreboardPlugin",
+    "ensure_json_serializable",
     "normalize_comparison",
     "normalize_expected",
     "validate_comparator_plugin",
+    "validate_coverage_plugin",
     "validate_ref_model_plugin",
     "validate_scoreboard_plugin",
 ]

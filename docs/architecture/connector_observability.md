@@ -825,6 +825,9 @@ corpus -> corpus_validator
 corpus -> replay_context
 target_manifest -> replay_driver
 target_manifest -> ref_model
+target_manifest -> comparator
+target_manifest -> scoreboard
+comparator -> scoreboard
 replay_context -> sequencer
 sequencer -> replay_driver
 replay_driver -> dut
@@ -844,6 +847,9 @@ functional_coverage -> functional_coverage_summary
 - `corpus_to_replay_context`
 - `manifest_to_replay_driver`
 - `manifest_to_ref_model`
+- `manifest_to_comparator`
+- `manifest_to_scoreboard`
+- `comparator_to_scoreboard`
 - `replay_context_to_sequence`
 - `case_to_replay_driver`
 - `driver_reset_to_dut`
@@ -857,6 +863,29 @@ functional_coverage -> functional_coverage_summary
 这些连接覆盖了从生成 stimulus 到 replay 检查和 functional coverage 导出的主要
 harness 层级。实际事件数量取决于当前入口和配置；例如无 directives 的
 `generate-corpus` 不会触发 `directives_to_corpus_generator`。
+
+生成插件接入使用同一套拓扑机制，当前新增以下边：
+
+```text
+generation_context -> generated_artifact_bundle
+llm_response -> generated_artifact_bundle
+generated_artifact_bundle -> plugin_contract_validator
+plugin_contract_validator -> plugin_registry
+plugin_registry -> target_manifest_overlay
+target_manifest_overlay -> target_manifest
+```
+
+对应 connector 名称：
+
+- `generation_context_to_artifact_bundle`
+- `llm_response_to_artifact_bundle`
+- `artifact_bundle_to_contract_validation`
+- `contract_validation_to_plugin_registry`
+- `plugin_registry_to_manifest_overlay`
+- `manifest_overlay_to_target_manifest`
+
+这条链路把 LLM/codegen 输出限制在 `GeneratedPluginBundle`、契约校验报告、plugin registry
+和 manifest overlay 这些结构化产物中；replay runtime 仍只消费有效 `target_manifest`。
 
 ## 已接入的 feedback 连接
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -32,6 +33,25 @@ from .harness_evidence.collection import (
     replay_context_metrics,
     replay_result_metrics,
     scoreboard_metrics,
+)
+from .generated_plugins import (
+    GeneratedPluginBundle,
+    GeneratedPluginRegistry,
+    GeneratedPluginValidationReport,
+    TargetManifestOverlay,
+    apply_manifest_overlay,
+    build_manifest_overlay,
+    build_plugin_registry,
+    generated_plugin_bundle_metrics,
+    manifest_overlay_metrics,
+    normalize_generated_plugin_bundle,
+    normalize_manifest_overlay,
+    normalize_plugin_registry,
+    normalize_plugin_validation_report,
+    plugin_registry_metrics,
+    plugin_validation_report_metrics,
+    validate_generated_plugin_bundle,
+    write_generated_plugin_json,
 )
 from .topology import FULL_FUZZ_TOPOLOGY, PipelineTopology
 
@@ -99,6 +119,185 @@ class ReplayPipelineOrchestrator:
     def set_target_config(self, config: TargetConfig) -> None:
         self.context.metadata["target"] = config.name
         self.context.artifacts["target_manifest"] = config.path
+        self.context.values["target_manifest"] = config
+
+    def set_generated_artifact_bundle(
+        self,
+        bundle: GeneratedPluginBundle | dict[str, Any],
+        *,
+        path: Path | str | None = None,
+    ) -> GeneratedPluginBundle:
+        normalized = normalize_generated_plugin_bundle(bundle)
+        self.context.values["generated_artifact_bundle"] = normalized
+        self.context.metadata["target"] = normalized.target
+        if path is not None:
+            self.context.artifacts["generated_artifact_bundle"] = Path(path)
+        return normalized
+
+    def publish_generated_plugin_bundle(
+        self,
+        bundle: GeneratedPluginBundle | dict[str, Any],
+        handler: Callable[[], Any] | None = None,
+        *,
+        bundle_path: Path | str | None = None,
+    ) -> GeneratedPluginBundle:
+        initial = self.set_generated_artifact_bundle(bundle, path=bundle_path)
+        result = self.orchestrator.run_step(
+            StepSpec(
+                name="generated_artifact_bundle",
+                connector="generation_context_to_artifact_bundle",
+                handler=lambda _context: handler() if handler is not None else initial,
+                metrics=generated_plugin_bundle_metrics,
+                metadata={"target": initial.target},
+            ),
+            self.context,
+        )
+        normalized = self.set_generated_artifact_bundle(result, path=bundle_path)
+        if bundle_path is not None:
+            write_generated_plugin_json(bundle_path, normalized)
+        return normalized
+
+    def validate_generated_plugins(
+        self,
+        bundle: GeneratedPluginBundle | dict[str, Any] | None = None,
+        *,
+        config: TargetConfig | None = None,
+        import_plugins: bool = True,
+        handler: Callable[[], Any] | None = None,
+        report_path: Path | str | None = None,
+    ) -> GeneratedPluginValidationReport:
+        if bundle is None:
+            bundle = self.context.values["generated_artifact_bundle"]
+        normalized_bundle = normalize_generated_plugin_bundle(bundle)
+        if config is not None:
+            self.set_target_config(config)
+        result = self.orchestrator.run_step(
+            StepSpec(
+                name="plugin_validation_report",
+                connector="artifact_bundle_to_contract_validation",
+                handler=lambda _context: (
+                    handler()
+                    if handler is not None
+                    else validate_generated_plugin_bundle(
+                        normalized_bundle,
+                        config=config,
+                        import_plugins=import_plugins,
+                    )
+                ),
+                metrics=plugin_validation_report_metrics,
+                metadata={
+                    "target": normalized_bundle.target,
+                    "import_plugins": import_plugins,
+                },
+            ),
+            self.context,
+        )
+        report = normalize_plugin_validation_report(result)
+        self.context.values["plugin_validation_report"] = report
+        if report_path is not None:
+            self.context.artifacts["plugin_validation_report"] = Path(report_path)
+            write_generated_plugin_json(report_path, report)
+        return report
+
+    def register_generated_plugins(
+        self,
+        report: GeneratedPluginValidationReport | dict[str, Any] | None = None,
+        handler: Callable[[], Any] | None = None,
+        *,
+        registry_path: Path | str | None = None,
+    ) -> GeneratedPluginRegistry:
+        if report is None:
+            report = self.context.values["plugin_validation_report"]
+        validation_report = normalize_plugin_validation_report(report)
+        result = self.orchestrator.run_step(
+            StepSpec(
+                name="plugin_registry",
+                connector="contract_validation_to_plugin_registry",
+                handler=lambda _context: (
+                    handler()
+                    if handler is not None
+                    else build_plugin_registry(validation_report)
+                ),
+                metrics=plugin_registry_metrics,
+                metadata={"target": validation_report.target},
+            ),
+            self.context,
+        )
+        registry = normalize_plugin_registry(result)
+        self.context.values["plugin_registry"] = registry
+        if registry_path is not None:
+            self.context.artifacts["plugin_registry"] = Path(registry_path)
+            write_generated_plugin_json(registry_path, registry)
+        return registry
+
+    def build_generated_manifest_overlay(
+        self,
+        registry: GeneratedPluginRegistry | dict[str, Any] | None = None,
+        handler: Callable[[], Any] | None = None,
+        *,
+        overlay_path: Path | str | None = None,
+    ) -> TargetManifestOverlay:
+        if registry is None:
+            registry = self.context.values["plugin_registry"]
+        plugin_registry = normalize_plugin_registry(registry)
+        result = self.orchestrator.run_step(
+            StepSpec(
+                name="target_manifest_overlay",
+                connector="plugin_registry_to_manifest_overlay",
+                handler=lambda _context: (
+                    handler()
+                    if handler is not None
+                    else build_manifest_overlay(plugin_registry)
+                ),
+                metrics=manifest_overlay_metrics,
+                metadata={"target": plugin_registry.target},
+            ),
+            self.context,
+        )
+        overlay = normalize_manifest_overlay(result)
+        self.context.values["target_manifest_overlay"] = overlay
+        if overlay_path is not None:
+            self.context.artifacts["target_manifest_overlay"] = Path(overlay_path)
+            write_generated_plugin_json(overlay_path, overlay)
+        return overlay
+
+    def activate_generated_manifest(
+        self,
+        config: TargetConfig,
+        overlay: TargetManifestOverlay | dict[str, Any] | None = None,
+        handler: Callable[[], Any] | None = None,
+        *,
+        active_manifest_path: Path | str | None = None,
+    ) -> TargetConfig:
+        self.set_target_config(config)
+        if overlay is None:
+            overlay = self.context.values["target_manifest_overlay"]
+        manifest_overlay = normalize_manifest_overlay(overlay)
+        result = self.orchestrator.run_step(
+            StepSpec(
+                name="target_manifest",
+                connector="manifest_overlay_to_target_manifest",
+                handler=lambda _context: (
+                    handler()
+                    if handler is not None
+                    else apply_manifest_overlay(config, manifest_overlay)
+                ),
+                metrics=lambda value: {
+                    "target": value.name,
+                    "ref_model": value.ref_model or "",
+                    "comparator": value.comparator or "",
+                    "scoreboard": value.scoreboard or "",
+                    "coverage_model": value.coverage_model or "",
+                },
+                metadata={"target": config.name},
+            ),
+            self.context,
+        )
+        active_config = result
+        if active_manifest_path is not None:
+            active_config = replace(active_config, path=Path(active_manifest_path))
+        self.set_target_config(active_config)
+        return active_config
 
     def set_corpus(self, corpus: Path | str) -> None:
         corpus_path = Path(corpus)
@@ -150,6 +349,23 @@ class ReplayPipelineOrchestrator:
             self.context,
         )
 
+    def build_comparator(self, config: TargetConfig, handler: Callable[[], Any]) -> Any:
+        self.set_target_config(config)
+        return self.orchestrator.run_step(
+            StepSpec(
+                name="comparator",
+                connector="manifest_to_comparator",
+                handler=lambda _context: handler(),
+                input_roles=("target_manifest",),
+                metrics=lambda value: {
+                    "available": value is not None,
+                    "comparator": config.comparator or "default",
+                },
+                metadata={"comparator": config.comparator or "default"},
+            ),
+            self.context,
+        )
+
     def build_replay_driver(self, config: TargetConfig, handler: Callable[[], Any]) -> Any:
         self.set_target_config(config)
         return self.orchestrator.run_step(
@@ -171,7 +387,35 @@ class ReplayPipelineOrchestrator:
                 connector="manifest_to_scoreboard",
                 handler=lambda _context: handler(),
                 input_roles=("target_manifest",),
-                metrics=lambda _value: {"scoreboard": config.scoreboard or "default"},
+                metrics=lambda _value: {
+                    "scoreboard": config.scoreboard or "default",
+                    "comparator": config.comparator or "default",
+                },
+                metadata={
+                    "scoreboard": config.scoreboard or "default",
+                    "comparator": config.comparator or "default",
+                },
+            ),
+            self.context,
+        )
+
+    def attach_comparator_to_scoreboard(
+        self,
+        handler: Callable[[], Any],
+        *,
+        comparator: str | None = None,
+        scoreboard: str | None = None,
+    ) -> Any:
+        return self.orchestrator.run_step(
+            StepSpec(
+                name="scoreboard_comparator",
+                connector="comparator_to_scoreboard",
+                handler=lambda _context: handler(),
+                metrics=lambda _value: {"attached": True},
+                metadata={
+                    "comparator": comparator or "default",
+                    "scoreboard": scoreboard or "default",
+                },
             ),
             self.context,
         )

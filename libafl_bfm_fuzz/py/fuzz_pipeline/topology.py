@@ -25,6 +25,7 @@ HARNESS_TOPOLOGY = PipelineTopology(
         ComponentNode("replay_driver", "uvm_component", "Target replay driver BFM"),
         ComponentNode("ref_model", "oracle", "Reference model prediction"),
         ComponentNode("dut", "rtl", "DUT execution under replay"),
+        ComponentNode("comparator", "checker", "Replay actual/expected comparison policy"),
         ComponentNode("scoreboard", "checker", "Replay result checker"),
         ComponentNode("functional_coverage", "coverage", "UVM functional coverage model"),
         ComponentNode("scoreboard_report", "artifact", "Replay scoreboard health summary"),
@@ -38,7 +39,14 @@ HARNESS_TOPOLOGY = PipelineTopology(
         ConnectorEdge("corpus_to_replay_context", "corpus", "replay_context", input_roles=("corpus",), output_roles=("corpus",)),
         ConnectorEdge("manifest_to_replay_driver", "target_manifest", "replay_driver", input_roles=("target_manifest",)),
         ConnectorEdge("manifest_to_ref_model", "target_manifest", "ref_model", input_roles=("target_manifest",)),
+        ConnectorEdge("manifest_to_comparator", "target_manifest", "comparator", input_roles=("target_manifest",)),
         ConnectorEdge("manifest_to_scoreboard", "target_manifest", "scoreboard", input_roles=("target_manifest",)),
+        ConnectorEdge(
+            "comparator_to_scoreboard",
+            "comparator",
+            "scoreboard",
+            "Scoreboard consumes the configured comparator when present.",
+        ),
         ConnectorEdge("manifest_to_functional_coverage", "target_manifest", "functional_coverage", input_roles=("target_manifest",)),
         ConnectorEdge("replay_context_to_sequence", "replay_context", "sequencer", input_roles=("corpus",)),
         ConnectorEdge("case_to_replay_driver", "sequencer", "replay_driver"),
@@ -53,6 +61,82 @@ HARNESS_TOPOLOGY = PipelineTopology(
             "functional_coverage",
             "functional_coverage_summary",
             output_roles=("functional_coverage",),
+        ),
+    ),
+)
+
+
+GENERATED_PLUGIN_TOPOLOGY = PipelineTopology(
+    name="generated_plugin_integration",
+    components=(
+        ComponentNode("generation_context", "prompt_context", "Inputs and constraints for generated replay plugins"),
+        ComponentNode("llm_response", "llm_output", "Optional LLM response payload"),
+        ComponentNode("generated_artifact_bundle", "artifact", "Generated plugin source and manifest references"),
+        ComponentNode("plugin_contract_validator", "validator", "Generated plugin interface contract validator"),
+        ComponentNode("plugin_validation_report", "artifact", "Generated plugin validation result"),
+        ComponentNode("plugin_registry", "registry", "Validated generated plugin references"),
+        ComponentNode("target_manifest_overlay", "config_overlay", "Manifest updates for generated plugins"),
+    ),
+    connectors=(
+        ConnectorEdge(
+            "generation_context_to_artifact_bundle",
+            "generation_context",
+            "generated_artifact_bundle",
+            "LLM/codegen consumes generation context and emits a generated plugin bundle.",
+            metadata={
+                "value_outputs": ("generated_artifact_bundle",),
+            },
+        ),
+        ConnectorEdge(
+            "llm_response_to_artifact_bundle",
+            "llm_response",
+            "generated_artifact_bundle",
+            "Normalize raw LLM output into a generated plugin bundle.",
+            required=False,
+            metadata={
+                "value_inputs": ("llm_response",),
+                "value_outputs": ("generated_artifact_bundle",),
+            },
+        ),
+        ConnectorEdge(
+            "artifact_bundle_to_contract_validation",
+            "generated_artifact_bundle",
+            "plugin_contract_validator",
+            "Validate generated plugin roles and public contract conformance.",
+            metadata={
+                "value_inputs": ("generated_artifact_bundle",),
+                "value_outputs": ("plugin_validation_report",),
+            },
+        ),
+        ConnectorEdge(
+            "contract_validation_to_plugin_registry",
+            "plugin_contract_validator",
+            "plugin_registry",
+            "Promote a valid contract report into a generated plugin registry.",
+            metadata={
+                "value_inputs": ("plugin_validation_report",),
+                "value_outputs": ("plugin_registry",),
+            },
+        ),
+        ConnectorEdge(
+            "plugin_registry_to_manifest_overlay",
+            "plugin_registry",
+            "target_manifest_overlay",
+            "Convert validated plugin refs into manifest field updates.",
+            metadata={
+                "value_inputs": ("plugin_registry",),
+                "value_outputs": ("target_manifest_overlay",),
+            },
+        ),
+        ConnectorEdge(
+            "manifest_overlay_to_target_manifest",
+            "target_manifest_overlay",
+            "target_manifest",
+            "Apply generated plugin overlay to the effective replay manifest.",
+            metadata={
+                "value_inputs": ("target_manifest", "target_manifest_overlay"),
+                "value_outputs": ("target_manifest",),
+            },
         ),
     ),
 )
@@ -297,6 +381,7 @@ RUN_ORCHESTRATION_TOPOLOGY = PipelineTopology(
 FULL_FUZZ_TOPOLOGY = merge_topologies(
     "libafl_bfm_fuzz",
     HARNESS_TOPOLOGY,
+    GENERATED_PLUGIN_TOPOLOGY,
     COVERAGE_FEEDBACK_TOPOLOGY,
     RUN_ORCHESTRATION_TOPOLOGY,
 )
@@ -307,6 +392,7 @@ __all__ = [
     "ConnectorEdge",
     "COVERAGE_FEEDBACK_TOPOLOGY",
     "FULL_FUZZ_TOPOLOGY",
+    "GENERATED_PLUGIN_TOPOLOGY",
     "HARNESS_TOPOLOGY",
     "PipelineTopology",
     "RUN_ORCHESTRATION_TOPOLOGY",
