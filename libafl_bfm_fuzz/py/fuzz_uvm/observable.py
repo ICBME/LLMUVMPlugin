@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+import inspect
 import json
 from pathlib import Path
 from typing import Any
@@ -16,8 +17,11 @@ from fuzz_pipeline.harness_runtime_actions import (
 from fuzz_uvm.contracts import ExpectedResult, normalize_expected
 from fuzz_uvm.functional_coverage import build_coverage_model
 from fuzz_uvm.ref_models import build_ref_model
-from fuzz_uvm.scoreboards import build_scoreboard
+from fuzz_uvm.scoreboards import build_comparator, build_scoreboard
 from fuzz_uvm.transactions import ReplayRecord
+
+
+_COMPARATOR_NOT_PROVIDED = object()
 
 
 @dataclass(frozen=True)
@@ -32,8 +36,13 @@ class ReplayPluginBundle:
     def build_ref_model(self) -> Any:
         return build_ref_model(self.config)
 
-    def build_scoreboard(self) -> Any:
-        return build_scoreboard(self.config)
+    def build_comparator(self) -> Any:
+        return build_comparator(self.config)
+
+    def build_scoreboard(self, comparator: Any = _COMPARATOR_NOT_PROVIDED) -> Any:
+        if comparator is _COMPARATOR_NOT_PROVIDED:
+            return build_scoreboard(self.config)
+        return build_scoreboard(self.config, comparator=comparator)
 
     def build_coverage_model(self) -> Any:
         return build_coverage_model(self.config.name, config=self.config)
@@ -65,9 +74,17 @@ class ReplayStageAdapter:
         )
 
     def build_scoreboard(self) -> Any:
+        comparator = self.orchestrator.build_comparator(
+            self.config,
+            self.plugins.build_comparator,
+        )
         return self.orchestrator.build_scoreboard(
             self.config,
-            self.plugins.build_scoreboard,
+            lambda: self.orchestrator.attach_comparator_to_scoreboard(
+                lambda: self._build_scoreboard_with_comparator(comparator),
+                comparator=self.config.comparator,
+                scoreboard=self.config.scoreboard,
+            ),
         )
 
     def build_coverage_model(self) -> Any:
@@ -75,6 +92,20 @@ class ReplayStageAdapter:
             self.config,
             self.plugins.build_coverage_model,
         )
+
+    def _build_scoreboard_with_comparator(self, comparator: Any) -> Any:
+        builder = self.plugins.build_scoreboard
+        try:
+            parameters = inspect.signature(builder).parameters
+        except (TypeError, ValueError):
+            return builder(comparator=comparator)
+        accepts_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        if accepts_kwargs or "comparator" in parameters:
+            return builder(comparator=comparator)
+        return builder()
 
     def functional_coverage_output(self) -> Path:
         return self.orchestrator.functional_coverage_output(self.config)

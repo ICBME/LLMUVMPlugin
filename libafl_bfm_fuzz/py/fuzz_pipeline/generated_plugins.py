@@ -81,7 +81,7 @@ class GeneratedPluginValidationReport:
     def __post_init__(self) -> None:
         object.__setattr__(self, "target", str(self.target))
         object.__setattr__(self, "plugins", _string_mapping(self.plugins, spec="plugins"))
-        object.__setattr__(self, "valid", bool(self.valid))
+        object.__setattr__(self, "valid", _bool_value(self.valid, spec="valid"))
         object.__setattr__(
             self,
             "validated_roles",
@@ -189,7 +189,7 @@ def normalize_plugin_validation_report(value: Any) -> GeneratedPluginValidationR
     return GeneratedPluginValidationReport(
         target=str(value.get("target", "")),
         plugins=value.get("plugins", {}),
-        valid=bool(value.get("valid", False)),
+        valid=_bool_value(value.get("valid", False), spec="valid"),
         validated_roles=tuple(value.get("validated_roles", ())),
         issues=tuple(value.get("issues", ())),
         metadata=value.get("metadata", {}),
@@ -396,6 +396,30 @@ def write_generated_plugin_json(path: Path | str, value: Any) -> Path:
     return output_path
 
 
+def read_generated_plugin_json(path: Path | str) -> dict[str, Any]:
+    input_path = Path(path)
+    payload = json.loads(input_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise PluginContractError(f"{input_path}: generated plugin artifact must be a JSON object")
+    return payload
+
+
+def load_generated_plugin_bundle(path: Path | str) -> GeneratedPluginBundle:
+    return normalize_generated_plugin_bundle(read_generated_plugin_json(path))
+
+
+def load_plugin_validation_report(path: Path | str) -> GeneratedPluginValidationReport:
+    return normalize_plugin_validation_report(read_generated_plugin_json(path))
+
+
+def load_plugin_registry(path: Path | str) -> GeneratedPluginRegistry:
+    return normalize_plugin_registry(read_generated_plugin_json(path))
+
+
+def load_manifest_overlay(path: Path | str) -> TargetManifestOverlay:
+    return normalize_manifest_overlay(read_generated_plugin_json(path))
+
+
 def _build_generated_plugin(
     role: str,
     spec: str,
@@ -440,6 +464,12 @@ def _json_mapping(value: Any, *, spec: str) -> dict[str, Any]:
     return result
 
 
+def _bool_value(value: Any, *, spec: str) -> bool:
+    if not isinstance(value, bool):
+        raise PluginContractError(f"{spec} must be a bool")
+    return value
+
+
 def _normalize_issue(value: Any) -> PluginValidationIssue:
     if isinstance(value, PluginValidationIssue):
         return value
@@ -463,6 +493,10 @@ __all__ = [
     "build_manifest_overlay",
     "build_plugin_registry",
     "generated_plugin_bundle_metrics",
+    "load_generated_plugin_bundle",
+    "load_manifest_overlay",
+    "load_plugin_registry",
+    "load_plugin_validation_report",
     "manifest_overlay_metrics",
     "normalize_generated_plugin_bundle",
     "normalize_manifest_overlay",
@@ -470,6 +504,7 @@ __all__ = [
     "normalize_plugin_validation_report",
     "plugin_registry_metrics",
     "plugin_validation_report_metrics",
+    "read_generated_plugin_json",
     "validate_generated_plugin_bundle",
     "write_generated_plugin_json",
 ]

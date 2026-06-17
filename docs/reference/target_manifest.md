@@ -90,6 +90,13 @@ comparator = "generated.my_dut_comparator:MyComparator"
 这些字段与手写 plugin 使用同一加载路径。未生成有效
 `GeneratedPluginValidationReport` 的 candidate artifact 不应被 manifest 或 overlay 引用。
 
+跨进程或 campaign 流程应持久化并传递这些 JSON artifact，而不是直接传递 Python 对象：
+
+- `generated_artifact_bundle.json`
+- `plugin_validation_report.json`
+- `plugin_registry.json`
+- `target_manifest_overlay.json`
+
 ## Field Schema
 
 `int`

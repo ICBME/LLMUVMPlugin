@@ -13,14 +13,22 @@ from connector_observe import JsonlObserver, ObservationContext  # noqa: E402
 from fuzz_bfm.target_config import TargetConfig  # noqa: E402
 from fuzz_pipeline.generated_plugins import (  # noqa: E402
     GeneratedPluginBundle,
+    PluginContractError,
     apply_manifest_overlay,
     build_manifest_overlay,
     build_plugin_registry,
+    load_generated_plugin_bundle,
+    load_manifest_overlay,
+    load_plugin_registry,
+    load_plugin_validation_report,
     validate_generated_plugin_bundle,
+    write_generated_plugin_json,
 )
 from fuzz_pipeline.orchestrator import PipelineContext  # noqa: E402
 from fuzz_pipeline.replay_orchestrator import ReplayPipelineOrchestrator  # noqa: E402
 from fuzz_pipeline.topology import FULL_FUZZ_TOPOLOGY, GENERATED_PLUGIN_TOPOLOGY  # noqa: E402
+from fuzz_uvm.observable import ObservableScoreboardAdapter, ReplayStageAdapter  # noqa: E402
+from fuzz_uvm.scoreboards import ResultScoreboard  # noqa: E402
 
 
 def test_generated_plugin_topology_exposes_contract_pipeline() -> None:
@@ -72,6 +80,56 @@ def test_generated_plugin_bundle_validates_and_overlays_manifest() -> None:
             sys.path.remove(str(tmp_path))
 
 
+def test_generated_plugin_artifacts_round_trip_json() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        bundle = GeneratedPluginBundle(
+            target="demo",
+            plugins={"ref_model": "generated_demo:RefModel"},
+        )
+        report = validate_generated_plugin_bundle(bundle, import_plugins=False)
+        registry = build_plugin_registry(report)
+        overlay = build_manifest_overlay(registry)
+
+        bundle_path = tmp_path / "bundle.json"
+        report_path = tmp_path / "report.json"
+        registry_path = tmp_path / "registry.json"
+        overlay_path = tmp_path / "overlay.json"
+        write_generated_plugin_json(bundle_path, bundle)
+        write_generated_plugin_json(report_path, report)
+        write_generated_plugin_json(registry_path, registry)
+        write_generated_plugin_json(overlay_path, overlay)
+
+        assert load_generated_plugin_bundle(bundle_path).plugins == bundle.plugins
+        assert load_plugin_validation_report(report_path).valid is True
+        assert load_plugin_registry(registry_path).plugins == registry.plugins
+        assert load_manifest_overlay(overlay_path).updates == overlay.updates
+
+
+def test_plugin_validation_report_requires_json_bool_valid() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        report_path = Path(tmp) / "report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "target": "demo",
+                    "plugins": {},
+                    "valid": "false",
+                    "validated_roles": [],
+                    "issues": [],
+                    "metadata": {},
+                }
+            )
+        )
+
+        try:
+            load_plugin_validation_report(report_path)
+        except PluginContractError as exc:
+            assert "valid" in str(exc)
+        else:
+            raise AssertionError("expected PluginContractError")
+
+
 def test_generated_plugin_bundle_rejects_empty_plugin_set() -> None:
     report = validate_generated_plugin_bundle(
         {"target": "demo", "plugins": {}},
@@ -80,6 +138,37 @@ def test_generated_plugin_bundle_rejects_empty_plugin_set() -> None:
 
     assert report.valid is False
     assert report.issues[0].role == "plugins"
+
+
+def test_observable_scoreboard_default_path_records_comparator_connectors() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manifest = root / "demo.toml"
+        manifest.write_text('name = "demo"\ndriver = "demo_driver:Driver"\n')
+        events_out = root / "events.jsonl"
+        observer = JsonlObserver(events_out)
+        config = TargetConfig(name="demo", driver="demo_driver:Driver", path=manifest)
+        pipeline = ReplayPipelineOrchestrator(
+            observation_context=ObservationContext(run_id="scoreboard-run", observer=observer),
+            pipeline_context=PipelineContext(metadata={"target": "demo"}),
+        )
+        plugins = InProcessScoreboardPlugins(config)
+        stage = ReplayStageAdapter(config, pipeline, plugins=plugins)
+
+        adapter = ObservableScoreboardAdapter(config, stage_adapter=stage)
+        observer.close()
+        events = [json.loads(line) for line in events_out.read_text().splitlines()]
+
+    finished = {
+        event["connector"]
+        for event in events
+        if event["event_type"] == "connector.finished"
+    }
+    assert adapter.checker is plugins.scoreboard
+    assert plugins.scoreboard.comparator is plugins.comparator
+    assert "manifest_to_comparator" in finished
+    assert "comparator_to_scoreboard" in finished
+    assert "manifest_to_scoreboard" in finished
 
 
 def test_replay_orchestrator_runs_generated_plugin_connector_flow() -> None:
@@ -174,3 +263,26 @@ def _write_demo_plugins(path: Path) -> None:
             ]
         )
     )
+
+
+class PassingComparator:
+    def compare(self, actual, expected, record):
+        return {"passed": actual == expected}
+
+
+class InProcessScoreboardPlugins:
+    def __init__(self, config: TargetConfig):
+        self.config = config
+        self.comparator = PassingComparator()
+        self.scoreboard = None
+
+    def build_comparator(self):
+        return self.comparator
+
+    def build_scoreboard(self, comparator=None):
+        self.scoreboard = ResultScoreboard(
+            self.config.name,
+            config=self.config,
+            comparator=comparator,
+        )
+        return self.scoreboard

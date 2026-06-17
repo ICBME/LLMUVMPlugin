@@ -886,6 +886,7 @@ target_manifest_overlay -> target_manifest
 
 这条链路把 LLM/codegen 输出限制在 `GeneratedPluginBundle`、契约校验报告、plugin registry
 和 manifest overlay 这些结构化产物中；replay runtime 仍只消费有效 `target_manifest`。
+多进程/campaign 场景应将这些结构化产物持久化为 JSON artifact，再由下一阶段读取恢复。
 
 ## 已接入的 feedback 连接
 

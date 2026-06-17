@@ -125,6 +125,17 @@ comparator -> scoreboard
 默认会 import 并实例化 plugin，然后调用对应契约 validator；如只做静态检查，可传入
 `import_plugins=False`。
 
+生成物链路推荐持久化以下 JSON artifact，均可由 `fuzz_pipeline.generated_plugins` 读取：
+
+- `generated_artifact_bundle.json`
+- `plugin_validation_report.json`
+- `plugin_registry.json`
+- `target_manifest_overlay.json`
+
+`ReplayStageAdapter` 默认会先通过 `manifest_to_comparator` 构建 comparator，再通过
+`comparator_to_scoreboard` 将其注入 scoreboard 构建；没有配置自定义 comparator 时，该
+步骤仍会产生可观测事件，但 scoreboard 会回退到默认 equality comparator。
+
 ## Reference Model Plugin
 
 ```python

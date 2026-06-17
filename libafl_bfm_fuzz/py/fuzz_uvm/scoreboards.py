@@ -17,6 +17,9 @@ if TYPE_CHECKING:
     from fuzz_uvm.transactions import ReplayRecord
 
 
+_COMPARATOR_NOT_PROVIDED = object()
+
+
 @dataclass(frozen=True)
 class ScoreboardFailure:
     index: int
@@ -96,8 +99,12 @@ class ResultScoreboard:
         )
 
 
-def build_scoreboard(config: TargetConfig) -> ScoreboardPlugin:
-    comparator = build_comparator(config)
+def build_scoreboard(
+    config: TargetConfig,
+    comparator: ComparatorPlugin | None | object = _COMPARATOR_NOT_PROVIDED,
+) -> ScoreboardPlugin:
+    if comparator is _COMPARATOR_NOT_PROVIDED:
+        comparator = build_comparator(config)
     if config.scoreboard is None:
         return ResultScoreboard(config.name, config=config, comparator=comparator)
 

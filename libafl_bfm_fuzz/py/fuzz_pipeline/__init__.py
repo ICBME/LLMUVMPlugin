@@ -63,6 +63,10 @@ from .generated_plugins import (
     apply_manifest_overlay,
     build_manifest_overlay,
     build_plugin_registry,
+    load_generated_plugin_bundle,
+    load_manifest_overlay,
+    load_plugin_registry,
+    load_plugin_validation_report,
     validate_generated_plugin_bundle,
 )
 from .harness_optimization import (
@@ -274,6 +278,10 @@ __all__ = [
     "build_plugin_registry",
     "default_harness_plugin_registry",
     "apply_manifest_overlay",
+    "load_generated_plugin_bundle",
+    "load_manifest_overlay",
+    "load_plugin_registry",
+    "load_plugin_validation_report",
     "build_action_pruning_summary",
     "build_candidate_action_effect_report",
     "build_candidate_gap_actionability_report",
