@@ -1,32 +1,45 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from connector_observe import ObservationContext
-
-from .harness_evidence.collection import observation_context_from_env
+from harness_optimization.campaign_optimization import CampaignOptimizationStageChain
+from harness_optimization.observation import (
+    ObservationContext,
+    observation_context_from_env,
+)
+from harness_optimization.orchestrator import (
+    PipelineContext,
+    PipelineOrchestrator,
+    StepSpec,
+)
 from .harness_evidence.optimization import (
     HarnessOptimizationAdapter,
-    HarnessOptimizationPaths,
     NoopHarnessCandidateEvaluationBackend,
     NoopHarnessOptimizerBackend,
     harness_optimization_paths,
 )
-from .orchestrator import PipelineContext, PipelineOrchestrator, StepSpec
+from harness_optimization.paths import manifest_path_from_value, path_from_cwd, run_cwd
+from harness_optimization.planning import (
+    RunPlan,
+    RunPlanExecutor,
+    RunResults,
+    RunStage,
+    apply_stage_policies,
+    RunPlanProfile,
+    RunStageFactory,
+    RunStageRegistry,
+)
 from .run_adapters import RunBackends
 from .run_evaluation import CampaignEvaluationAdapter, EvaluationBackends
 from .run_orchestrator import FuzzRunConfig, FuzzRunOrchestrator
-from .run_plan import RunPlan, RunPlanExecutor, RunResults, RunStage
 from .run_profiles import (
     DEFAULT_CAMPAIGN_PLAN_PROFILES,
     DEFAULT_RUN_PLAN_PROFILES,
-    RunPlanProfile,
 )
-from .run_stage_registry import RunStageFactory, RunStageRegistry
 from .topology import FULL_FUZZ_TOPOLOGY, PipelineTopology
 
 
@@ -407,14 +420,7 @@ class CampaignRoundScheduler:
         )
 
     def _round_context(self, round_id: str) -> ObservationContext:
-        return ObservationContext(
-            run_id=self.observation_context.run_id,
-            round_id=round_id,
-            stage_id=self.observation_context.stage_id,
-            parent_event_id=self.observation_context.parent_event_id,
-            observer=self.observation_context.observer,
-            strict=self.observation_context.strict,
-        )
+        return self.observation_context.with_overrides(round_id=round_id)
 
     def _round_manifest(
         self,
@@ -457,13 +463,14 @@ class CampaignRoundScheduler:
         manifest: dict[str, Any],
         value: str,
     ) -> Path:
-        path = Path(value)
-        if path.is_absolute():
-            return path
-        cwd = manifest.get("cwd")
-        if isinstance(cwd, str) and cwd:
-            return Path(cwd) / path
-        return manifest_path.parent / path
+        resolved = manifest_path_from_value(
+            value,
+            manifest_path=manifest_path,
+            cwd=manifest.get("cwd"),
+        )
+        if resolved is None:
+            raise ValueError(f"{manifest_path}: missing manifest path value")
+        return resolved
 
     def _optional_state_path(
         self,
@@ -535,6 +542,32 @@ class CampaignOrchestrator:
             self.observation_context,
             topology_out=config.topology_out,
         )
+        self.optimization_stage_chain = CampaignOptimizationStageChain(
+            target=self.config.target,
+            modes=self.config.modes,
+            rounds=self.config.rounds,
+            context_artifacts=self.context.artifacts,
+            step_runner=lambda step: self.orchestrator.run_step(step, self.context),
+            paths_factory=lambda: harness_optimization_paths(
+                self._campaign_evaluation_out()
+            ),
+            adapter_factory=lambda paths: HarnessOptimizationAdapter(
+                target=self.config.target,
+                paths=paths,
+                campaign_evaluation_path=self._campaign_evaluation_out(),
+                campaign_manifest_path=self._campaign_manifest_out(),
+                cwd=self._run_cwd(),
+                optimizer_backend=(
+                    self.evaluation_backends.harness_optimizer
+                    or NoopHarnessOptimizerBackend()
+                ),
+                candidate_evaluation_backend=(
+                    self.evaluation_backends.harness_candidate_evaluation
+                    or NoopHarnessCandidateEvaluationBackend()
+                ),
+                plugin_registry=self.evaluation_backends.harness_plugin_registry,
+            ),
+        )
         self.campaign_stage_registry = self._default_campaign_stage_registry()
         self.round_scheduler = CampaignRoundScheduler(
             config,
@@ -572,9 +605,11 @@ class CampaignOrchestrator:
     def _campaign_plan(self) -> RunPlan:
         profile_name = self._selected_campaign_plan_profile()
         profile = self._campaign_profile(profile_name)
-        stages = self._apply_campaign_profile_policies(
-            profile,
+        stages = apply_stage_policies(
             self.campaign_stage_registry.build_many(profile.stage_names),
+            profile.stage_policies,
+            profile_name=profile.name,
+            plan_label="campaign",
         )
         plan = RunPlan(
             name=profile_name,
@@ -585,28 +620,6 @@ class CampaignOrchestrator:
         )
         plan.validate()
         return plan
-
-    def _apply_campaign_profile_policies(
-        self,
-        profile: RunPlanProfile,
-        stages: tuple[RunStage, ...],
-    ) -> tuple[RunStage, ...]:
-        if not profile.stage_policies:
-            return stages
-        names = {stage.name for stage in stages}
-        unknown = sorted(set(profile.stage_policies) - names)
-        if unknown:
-            raise ValueError(
-                f"campaign plan profile {profile.name!r} declares policy for "
-                f"unknown stage(s): {unknown}"
-            )
-        return tuple(
-            replace(
-                stage,
-                policy=profile.stage_policies.get(stage.name, stage.policy),
-            )
-            for stage in stages
-        )
 
     def _selected_campaign_plan_profile(self) -> str:
         if self.config.campaign_plan_profile is not None:
@@ -656,140 +669,7 @@ class CampaignOrchestrator:
                     input_roles=("campaign_manifest",),
                     output_roles=("evaluation_report",),
                 ),
-                "harness_optimization_task": lambda: RunStage(
-                    name="harness_optimization_task",
-                    handler=lambda results: self._write_harness_optimization_task(
-                        results,
-                    ),
-                    requires_results=("campaign_manifest", "campaign_evaluation"),
-                    produces_results=("harness_optimization_task",),
-                    input_roles=("evaluation_report",),
-                    output_roles=("harness_optimization_task",),
-                ),
-                "harness_optimization_proposal": lambda: RunStage(
-                    name="harness_optimization_proposal",
-                    handler=lambda results: self._write_harness_optimization_proposal(
-                        results,
-                    ),
-                    requires_results=("harness_optimization_task",),
-                    produces_results=("harness_optimization_proposal",),
-                    input_roles=("harness_optimization_task",),
-                    output_roles=("harness_optimization_proposal",),
-                ),
-                "harness_optimization_decision": lambda: RunStage(
-                    name="harness_optimization_decision",
-                    handler=lambda results: self._write_harness_optimization_decision(
-                        results,
-                    ),
-                    requires_results=(
-                        "harness_optimization_task",
-                        "harness_optimization_proposal",
-                    ),
-                    produces_results=("harness_optimization_decision",),
-                    input_roles=(
-                        "harness_optimization_task",
-                        "harness_optimization_proposal",
-                    ),
-                    output_roles=("harness_optimization_decision",),
-                ),
-                "harness_optimization_advice_report": lambda: RunStage(
-                    name="harness_optimization_advice_report",
-                    handler=lambda results: (
-                        self._write_harness_optimization_advice_report(results)
-                    ),
-                    requires_results=(
-                        "harness_optimization_task",
-                        "harness_optimization_proposal",
-                        "harness_optimization_decision",
-                    ),
-                    produces_results=("harness_optimization_advice_report",),
-                    input_roles=(
-                        "harness_optimization_task",
-                        "harness_optimization_proposal",
-                        "harness_optimization_decision",
-                    ),
-                    output_roles=("harness_optimization_advice_report",),
-                ),
-                "harness_optimization_apply": lambda: RunStage(
-                    name="harness_optimization_apply",
-                    handler=lambda results: self._write_harness_optimization_apply(
-                        results,
-                    ),
-                    merge_mapping=True,
-                    requires_results=(
-                        "harness_optimization_task",
-                        "harness_optimization_proposal",
-                        "harness_optimization_decision",
-                    ),
-                    produces_results=(
-                        "harness_optimization_patch",
-                        "harness_optimization_candidate_manifest",
-                    ),
-                    input_roles=(
-                        "harness_optimization_task",
-                        "harness_optimization_proposal",
-                        "harness_optimization_decision",
-                    ),
-                    output_roles=(
-                        "harness_optimization_patch",
-                        "harness_optimization_candidate_manifest",
-                    ),
-                ),
-                "harness_optimization_candidate_evaluation": lambda: RunStage(
-                    name="harness_optimization_candidate_evaluation",
-                    handler=lambda results: (
-                        self._write_harness_optimization_candidate_evaluation(
-                            results,
-                        )
-                    ),
-                    requires_results=(
-                        "harness_optimization_task",
-                        "harness_optimization_proposal",
-                        "harness_optimization_patch",
-                        "harness_optimization_candidate_manifest",
-                    ),
-                    produces_results=("harness_optimization_candidate_evaluation",),
-                    input_roles=(
-                        "harness_optimization_patch",
-                        "harness_optimization_candidate_manifest",
-                    ),
-                    output_roles=("harness_optimization_candidate_evaluation",),
-                ),
-                "harness_optimization_metric_delta": lambda: RunStage(
-                    name="harness_optimization_metric_delta",
-                    handler=lambda results: (
-                        self._write_harness_optimization_metric_delta(results)
-                    ),
-                    requires_results=(
-                        "harness_optimization_task",
-                        "harness_optimization_candidate_evaluation",
-                    ),
-                    produces_results=("harness_optimization_metric_delta",),
-                    input_roles=("harness_optimization_candidate_evaluation",),
-                    output_roles=("harness_optimization_metric_delta",),
-                ),
-                "harness_optimization_final_decision": lambda: RunStage(
-                    name="harness_optimization_final_decision",
-                    handler=lambda results: (
-                        self._write_harness_optimization_final_decision(results)
-                    ),
-                    requires_results=(
-                        "harness_optimization_task",
-                        "harness_optimization_proposal",
-                        "harness_optimization_decision",
-                        "harness_optimization_patch",
-                        "harness_optimization_candidate_evaluation",
-                        "harness_optimization_metric_delta",
-                    ),
-                    produces_results=("harness_optimization_final_decision",),
-                    input_roles=(
-                        "harness_optimization_decision",
-                        "harness_optimization_patch",
-                        "harness_optimization_candidate_evaluation",
-                        "harness_optimization_metric_delta",
-                    ),
-                    output_roles=("harness_optimization_final_decision",),
-                ),
+                **self.optimization_stage_chain.stage_factories(),
             }
         )
 
@@ -875,444 +755,6 @@ class CampaignOrchestrator:
             cwd=self._run_cwd(),
         )
 
-    def _write_harness_optimization_task(
-        self,
-        stage_results: RunResults,
-    ) -> dict[str, Any]:
-        paths = self._campaign_optimization_paths()
-        self.context.artifacts["harness_optimization_task"] = paths.task
-        manifest = self._required_mapping(
-            stage_results,
-            "campaign_manifest",
-            "harness_optimization_task",
-        )
-        evaluation = self._required_mapping(
-            stage_results,
-            "campaign_evaluation",
-            "harness_optimization_task",
-        )
-        step = StepSpec(
-            name="harness_optimization_task",
-            connector="evaluation_to_harness_optimization_task",
-            handler=lambda _context: self._harness_optimization_adapter(paths).run_task(
-                campaign_evaluation=evaluation,
-                campaign_manifest=manifest,
-            ),
-            input_roles=("evaluation_report",),
-            output_roles=("harness_optimization_task",),
-            metrics=lambda value: {
-                "llm_sample_count": value.get("summary", {}).get(
-                    "llm_sample_count",
-                    0,
-                ),
-                "allowed_action_type_count": len(
-                    value.get("constraints", {}).get("allowed_action_types", [])
-                ),
-            },
-            metadata={
-                "target": self.config.target,
-                "modes": ",".join(self.config.modes),
-                "rounds": self.config.rounds,
-            },
-        )
-        return self.orchestrator.run_step(step, self.context)
-
-    def _write_harness_optimization_proposal(
-        self,
-        stage_results: RunResults,
-    ) -> dict[str, Any]:
-        paths = self._campaign_optimization_paths()
-        self.context.artifacts["harness_optimization_proposal"] = paths.proposal
-        task = self._required_mapping(
-            stage_results,
-            "harness_optimization_task",
-            "harness_optimization_proposal",
-        )
-        step = StepSpec(
-            name="harness_optimization_proposal",
-            connector="harness_optimization_task_to_proposal",
-            handler=lambda _context: self._harness_optimization_adapter(
-                paths
-            ).run_proposal(task),
-            input_roles=("harness_optimization_task",),
-            output_roles=("harness_optimization_proposal",),
-            metrics=lambda value: {
-                "action_count": len(value.get("actions", [])),
-                "proposal_status": value.get("status"),
-            },
-            metadata={
-                "target": self.config.target,
-                "modes": ",".join(self.config.modes),
-                "rounds": self.config.rounds,
-            },
-        )
-        return self.orchestrator.run_step(step, self.context)
-
-    def _write_harness_optimization_decision(
-        self,
-        stage_results: RunResults,
-    ) -> dict[str, Any]:
-        paths = self._campaign_optimization_paths()
-        self.context.artifacts["harness_optimization_decision"] = paths.decision
-        task = self._required_mapping(
-            stage_results,
-            "harness_optimization_task",
-            "harness_optimization_decision",
-        )
-        proposal = self._required_mapping(
-            stage_results,
-            "harness_optimization_proposal",
-            "harness_optimization_decision",
-        )
-        step = StepSpec(
-            name="harness_optimization_decision",
-            connector="harness_optimization_proposal_to_decision",
-            handler=lambda _context: self._harness_optimization_adapter(
-                paths
-            ).run_decision(task, proposal),
-            input_roles=(
-                "harness_optimization_task",
-                "harness_optimization_proposal",
-            ),
-            output_roles=("harness_optimization_decision",),
-            metrics=lambda value: {
-                "decision": value.get("decision"),
-                "validation_error_count": value.get("validation", {}).get(
-                    "error_count",
-                    0,
-                ),
-            },
-            metadata={
-                "target": self.config.target,
-                "modes": ",".join(self.config.modes),
-                "rounds": self.config.rounds,
-            },
-        )
-        return self.orchestrator.run_step(step, self.context)
-
-    def _write_harness_optimization_advice_report(
-        self,
-        stage_results: RunResults,
-    ) -> dict[str, Any]:
-        paths = self._campaign_optimization_paths()
-        self.context.artifacts[
-            "harness_optimization_advice_report"
-        ] = paths.advice_report
-        task = self._required_mapping(
-            stage_results,
-            "harness_optimization_task",
-            "harness_optimization_advice_report",
-        )
-        proposal = self._required_mapping(
-            stage_results,
-            "harness_optimization_proposal",
-            "harness_optimization_advice_report",
-        )
-        decision = self._required_mapping(
-            stage_results,
-            "harness_optimization_decision",
-            "harness_optimization_advice_report",
-        )
-        step = StepSpec(
-            name="harness_optimization_advice_report",
-            connector="harness_optimization_decision_to_advice_report",
-            handler=lambda _context: self._harness_optimization_adapter(
-                paths
-            ).run_advice_report(task, proposal, decision),
-            input_roles=(
-                "harness_optimization_task",
-                "harness_optimization_proposal",
-                "harness_optimization_decision",
-            ),
-            output_roles=("harness_optimization_advice_report",),
-            metrics=lambda value: {
-                "advice_status": value.get("status"),
-                "recommended_action_count": value.get("summary", {}).get(
-                    "recommended_action_count",
-                    0,
-                ),
-                "candidate_regression_triggered": value.get(
-                    "advice_only_guard",
-                    {},
-                ).get("candidate_regression_triggered"),
-            },
-            metadata={
-                "target": self.config.target,
-                "modes": ",".join(self.config.modes),
-                "rounds": self.config.rounds,
-            },
-        )
-        return self.orchestrator.run_step(step, self.context)
-
-    def _write_harness_optimization_apply(
-        self,
-        stage_results: RunResults,
-    ) -> dict[str, dict[str, Any]]:
-        paths = self._campaign_optimization_paths()
-        self.context.artifacts["harness_optimization_patch"] = paths.patch
-        self.context.artifacts[
-            "harness_optimization_candidate_manifest"
-        ] = paths.candidate_manifest
-        task = self._required_mapping(
-            stage_results,
-            "harness_optimization_task",
-            "harness_optimization_apply",
-        )
-        proposal = self._required_mapping(
-            stage_results,
-            "harness_optimization_proposal",
-            "harness_optimization_apply",
-        )
-        decision = self._required_mapping(
-            stage_results,
-            "harness_optimization_decision",
-            "harness_optimization_apply",
-        )
-        step = StepSpec(
-            name="harness_optimization_apply",
-            connector="harness_optimization_decision_to_candidate_manifest",
-            handler=lambda _context: self._harness_optimization_adapter(
-                paths
-            ).run_apply(task, proposal, decision),
-            input_roles=(
-                "harness_optimization_task",
-                "harness_optimization_proposal",
-                "harness_optimization_decision",
-            ),
-            output_roles=(
-                "harness_optimization_patch",
-                "harness_optimization_candidate_manifest",
-            ),
-            metrics=lambda value: {
-                "applied_action_count": value.get(
-                    "harness_optimization_patch",
-                    {},
-                )
-                .get("summary", {})
-                .get("applied_action_count", 0),
-                "skipped_action_count": value.get(
-                    "harness_optimization_patch",
-                    {},
-                )
-                .get("summary", {})
-                .get("skipped_action_count", 0),
-            },
-            metadata={
-                "target": self.config.target,
-                "modes": ",".join(self.config.modes),
-                "rounds": self.config.rounds,
-            },
-        )
-        return self.orchestrator.run_step(step, self.context)
-
-    def _write_harness_optimization_candidate_evaluation(
-        self,
-        stage_results: RunResults,
-    ) -> dict[str, Any]:
-        paths = self._campaign_optimization_paths()
-        self.context.artifacts[
-            "harness_optimization_candidate_evaluation"
-        ] = paths.candidate_evaluation
-        task = self._required_mapping(
-            stage_results,
-            "harness_optimization_task",
-            "harness_optimization_candidate_evaluation",
-        )
-        proposal = self._required_mapping(
-            stage_results,
-            "harness_optimization_proposal",
-            "harness_optimization_candidate_evaluation",
-        )
-        patch = self._required_mapping(
-            stage_results,
-            "harness_optimization_patch",
-            "harness_optimization_candidate_evaluation",
-        )
-        candidate_manifest = self._required_mapping(
-            stage_results,
-            "harness_optimization_candidate_manifest",
-            "harness_optimization_candidate_evaluation",
-        )
-        step = StepSpec(
-            name="harness_optimization_candidate_evaluation",
-            connector="harness_candidate_manifest_to_evaluation",
-            handler=lambda _context: self._harness_optimization_adapter(
-                paths
-            ).run_candidate_evaluation(
-                task,
-                proposal,
-                patch,
-                candidate_manifest,
-            ),
-            input_roles=(
-                "harness_optimization_patch",
-                "harness_optimization_candidate_manifest",
-            ),
-            output_roles=("harness_optimization_candidate_evaluation",),
-            metrics=lambda value: {
-                "candidate_status": value.get("status"),
-                "candidate_metric_count": len(value.get("candidate_metrics", {})),
-            },
-            metadata={
-                "target": self.config.target,
-                "modes": ",".join(self.config.modes),
-                "rounds": self.config.rounds,
-            },
-        )
-        return self.orchestrator.run_step(step, self.context)
-
-    def _write_harness_optimization_metric_delta(
-        self,
-        stage_results: RunResults,
-    ) -> dict[str, Any]:
-        paths = self._campaign_optimization_paths()
-        self.context.artifacts[
-            "harness_optimization_metric_delta"
-        ] = paths.metric_delta
-        task = self._required_mapping(
-            stage_results,
-            "harness_optimization_task",
-            "harness_optimization_metric_delta",
-        )
-        candidate_evaluation = self._required_mapping(
-            stage_results,
-            "harness_optimization_candidate_evaluation",
-            "harness_optimization_metric_delta",
-        )
-        step = StepSpec(
-            name="harness_optimization_metric_delta",
-            connector="harness_candidate_evaluation_to_metric_delta",
-            handler=lambda _context: self._harness_optimization_adapter(
-                paths
-            ).run_metric_delta(task, candidate_evaluation),
-            input_roles=("harness_optimization_candidate_evaluation",),
-            output_roles=("harness_optimization_metric_delta",),
-            metrics=lambda value: {
-                "improved_metric_count": value.get("summary", {}).get(
-                    "improved_metric_count",
-                    0,
-                ),
-                "regressed_metric_count": value.get("summary", {}).get(
-                    "regressed_metric_count",
-                    0,
-                ),
-            },
-            metadata={
-                "target": self.config.target,
-                "modes": ",".join(self.config.modes),
-                "rounds": self.config.rounds,
-            },
-        )
-        return self.orchestrator.run_step(step, self.context)
-
-    def _write_harness_optimization_final_decision(
-        self,
-        stage_results: RunResults,
-    ) -> dict[str, Any]:
-        paths = self._campaign_optimization_paths()
-        self.context.artifacts[
-            "harness_optimization_final_decision"
-        ] = paths.final_decision
-        task = self._required_mapping(
-            stage_results,
-            "harness_optimization_task",
-            "harness_optimization_final_decision",
-        )
-        proposal = self._required_mapping(
-            stage_results,
-            "harness_optimization_proposal",
-            "harness_optimization_final_decision",
-        )
-        schema_decision = self._required_mapping(
-            stage_results,
-            "harness_optimization_decision",
-            "harness_optimization_final_decision",
-        )
-        patch = self._required_mapping(
-            stage_results,
-            "harness_optimization_patch",
-            "harness_optimization_final_decision",
-        )
-        candidate_evaluation = self._required_mapping(
-            stage_results,
-            "harness_optimization_candidate_evaluation",
-            "harness_optimization_final_decision",
-        )
-        metric_delta = self._required_mapping(
-            stage_results,
-            "harness_optimization_metric_delta",
-            "harness_optimization_final_decision",
-        )
-        step = StepSpec(
-            name="harness_optimization_final_decision",
-            connector="harness_metric_delta_to_final_decision",
-            handler=lambda _context: self._harness_optimization_adapter(
-                paths
-            ).run_final_decision(
-                task,
-                proposal,
-                schema_decision,
-                patch,
-                candidate_evaluation,
-                metric_delta,
-            ),
-            input_roles=(
-                "harness_optimization_decision",
-                "harness_optimization_patch",
-                "harness_optimization_candidate_evaluation",
-                "harness_optimization_metric_delta",
-            ),
-            output_roles=("harness_optimization_final_decision",),
-            metrics=lambda value: {
-                "final_decision": value.get("decision"),
-                "regressed_metric_count": value.get("summary", {}).get(
-                    "regressed_metric_count",
-                    0,
-                ),
-            },
-            metadata={
-                "target": self.config.target,
-                "modes": ",".join(self.config.modes),
-                "rounds": self.config.rounds,
-            },
-        )
-        return self.orchestrator.run_step(step, self.context)
-
-    def _required_mapping(
-        self,
-        stage_results: RunResults,
-        key: str,
-        stage: str,
-    ) -> dict[str, Any]:
-        value = stage_results.get(key)
-        if not isinstance(value, dict):
-            raise ValueError(f"{stage} requires {key} result")
-        return value
-
-    def _harness_optimization_adapter(
-        self,
-        paths: HarnessOptimizationPaths,
-    ) -> HarnessOptimizationAdapter:
-        return HarnessOptimizationAdapter(
-            target=self.config.target,
-            paths=paths,
-            campaign_evaluation_path=self._campaign_evaluation_out(),
-            campaign_manifest_path=self._campaign_manifest_out(),
-            cwd=self._run_cwd(),
-            optimizer_backend=(
-                self.evaluation_backends.harness_optimizer
-                or NoopHarnessOptimizerBackend()
-            ),
-            candidate_evaluation_backend=(
-                self.evaluation_backends.harness_candidate_evaluation
-                or NoopHarnessCandidateEvaluationBackend()
-            ),
-            plugin_registry=self.evaluation_backends.harness_plugin_registry,
-        )
-
-    def _campaign_optimization_paths(self) -> HarnessOptimizationPaths:
-        return harness_optimization_paths(self._campaign_evaluation_out())
-
     def _campaign_manifest_payload(
         self,
         mode_runs: list[dict[str, Any]],
@@ -1367,29 +809,11 @@ class CampaignOrchestrator:
         return {"evaluation_report": str(path)} if path is not None else {}
 
     def _campaign_optimization_manifest_artifacts(self) -> dict[str, str]:
-        if not self._campaign_plan_includes("harness_optimization_task"):
-            return {}
-        paths = self._campaign_optimization_paths()
-        artifacts = paths.to_json()
-        artifacts.update(
-            {
-                role: path
-                for role, path in paths.optimizer_io_json().items()
-                if Path(path).exists()
-            }
-        )
-        if self._campaign_plan_includes("harness_optimization_advice_report"):
-            artifacts.update(paths.advice_json())
-        if self._campaign_plan_includes("harness_optimization_apply"):
-            artifacts.update(paths.validation_json())
-        return artifacts
-
-    def _campaign_plan_includes(self, stage_name: str) -> bool:
         try:
             profile = self._campaign_profile(self._selected_campaign_plan_profile())
         except ValueError:
-            return False
-        return stage_name in profile.stage_names
+            return {}
+        return self.optimization_stage_chain.manifest_artifacts(profile.stage_names)
 
     def _optional_artifacts(self) -> dict[str, str]:
         paths = {
@@ -1429,20 +853,10 @@ class CampaignOrchestrator:
         return resolved
 
     def _path_from_cwd(self, path: Path | None) -> Path | None:
-        if path is None:
-            return None
-        path = Path(path)
-        if path.is_absolute() or self.config.cwd is None:
-            return path
-        cwd = self.config.cwd
-        base = cwd if cwd.is_absolute() else Path.cwd() / cwd
-        return base / path
+        return path_from_cwd(path, self.config.cwd)
 
     def _run_cwd(self) -> Path:
-        if self.config.cwd is None:
-            return Path.cwd()
-        cwd = Path(self.config.cwd)
-        return cwd if cwd.is_absolute() else Path.cwd() / cwd
+        return run_cwd(self.config.cwd)
 
     def _validate(self) -> None:
         if self.config.rounds < 1:

@@ -54,13 +54,18 @@
 
 `py/fuzz_pipeline/`
 
-- `topology.py`：harness、coverage feedback 和 full fuzz topology。
-- `orchestrator.py`：`StepSpec` / `PipelineContext` / `PipelineOrchestrator`，负责把
-  纯逻辑 handler、外部命令和 artifact role contract 编排成可观测步骤。
+- `topology.py`：`libafl_bfm_fuzz` 业务 topology 声明；graph component / connector 类型与
+  merge/write helper 通过 `harness_optimization.topology` 共享 facade 暴露。
+- `orchestrator.py`：兼容层保留默认 `FULL_FUZZ_TOPOLOGY` 绑定；共享
+  `StepSpec` / `PipelineContext` / `PipelineOrchestrator` 内核已下沉到
+  `harness_optimization.orchestrator`，负责把纯逻辑 handler、外部命令和 artifact role
+  contract 编排成可观测步骤。
 - `replay_orchestrator.py`：`ReplayPipelineOrchestrator`，负责 pyUVM replay 各组件边界的
   StepSpec 编排。
-- `run_plan.py`：`RunStage` / `RunPlan` / `RunPlanExecutor`，负责 run/campaign stage
-  contract、静态依赖校验、runtime result readiness 和 stage policy 执行。
+- `run_plan.py`：兼容层保留 `RunStage` / `RunPlan` / `RunPlanExecutor` import surface；
+  共享 planning 内核已下沉到 `harness_optimization.planning`，负责 run/campaign stage
+  contract、静态依赖校验、runtime result readiness、stage policy 执行，以及常用
+  stage wrapper / profile policy helper。
 - `run_profiles.py`：默认 run/campaign profile，使用 stage name 列表描述
   `feedback_fuzz`、`no_feedback`、round evaluation、campaign evaluation 和
   harness optimization phase-one、validation 与 real validation DAG；candidate regression
@@ -69,17 +74,24 @@
   自定义 stage 注册入口。
 - `run_adapters.py`：corpus generator、UVM replay 和 coverage report 的可替换 backend
   adapter。
-- `run_evaluation.py`：默认 round/campaign evaluation report adapter，以及可替换的
+- `run_evaluation.py`：`libafl_bfm_fuzz` 的 round/campaign evaluation 业务 wrapper，
+  默认把 `harness_optimization.evaluation` 共享内核接到
+  `HarnessTraceBuilder` / campaign rollup builder，并暴露可替换的
   `EvaluationBackends`。
 - `harness_evidence/`：集中保存 harness 采集、评测、LLM dataset、optimization proposal、
   plugin/runtime action 和 candidate regression 逻辑；旧的 `harness*.py` 模块保留为
   compatibility wrapper，便于已有 import 平滑迁移。
+- `harness_plugins.py` / `harness_runtime_actions.py`：`libafl_bfm_fuzz` 业务 facade。
+  前者保留 plugin registry / provenance / validation 的业务 artifact kind，后者保留
+  `FUZZ_TARGET`、`LIBAFL_CORPUS`、`HARNESS_*` runtime env contract。若只需要通用 helper，
+  应直接引用 `harness_optimization.plugins` / `harness_optimization.runtime`。
 - `harness_evidence/optimization.py`：从 campaign evaluation、harness evaluation、LLM
   dataset、campaign rollup 和 action effect report 生成 optimization
   task/proposal/schema decision/advice report；可显式注入真实 LLM optimizer backend 写出
   prompt/response provenance，或使用 prompt-only backend 只生成 prompt；同时支持显式
   validation profile 下的 sandbox apply、candidate evaluation、metric delta 和 final
-  decision artifacts。
+  decision artifacts。通用 task/prompt/advice builder 与 optimizer
+  transport/proposal backend/runtime 已下沉到 `harness_optimization.optimization`。
 - `harness_evidence/candidate_regression.py`：真实 candidate validation backend，将安全 proposal
   action 子集物化成 sandbox run config；candidate action adapter 会把 `replay_probe`、
   `scoreboard_check`、`coverage_feedback_tuning` 等 safe action 转换为 sandbox overlay、
@@ -89,23 +101,50 @@
   同配置空动作 rerun 的 metrics 作为候选 metric delta 的 baseline；默认真实 CLI 还会
   执行 paired repeated validation，按相同 seed 偏移成对重跑 matched no-op 和 candidate，
   将 repeat mean/worst/variance/flaky 写入 `candidate_paired_validation`，并用均值
-  metrics 与 flaky threshold 做最终证据判断。
+  metrics 与 flaky threshold 做最终证据判断。共享的 candidate regression settings、
+  adapter result、overlay/config payload、action loading / adapter dispatch 与
+  `JsonConfigActionAdapter` 已下沉到 `harness_optimization.candidate_execution`；
+  metric snapshot、candidate evaluation not-run/error report builder、action effect
+  attribution、gap actionability/minimal candidate 提炼，以及 repeat/variant/promotion
+  等候选验证公共计算已下沉到
+  `harness_optimization.candidate_validation`；proposal schema、payload DSL、metric gate
+  与 final decision 规则已下沉到 `harness_optimization.rules`。本模块主要保留
+  `libafl_bfm_fuzz` 的业务策略、plugin 约束和 orchestrator 装配。
+- `harness_evidence/trace.py` / `rollup.py`：保留 UVM-fuzz 默认 projector/analyzer/dataset
+  builder 和 business artifact kind；通用 execution record / harness evaluation /
+  trace build-write / campaign rollup 内核已分别下沉到
+  `harness_optimization.records` / `harness_optimization.analysis` /
+  `harness_optimization.trace` / `harness_optimization.rollup`。
 - `harness_evidence/runtime_actions.py`：safe action runtime consumer，负责加载 sandbox config，
   在 replay driver、scoreboard 和 coverage feedback 业务层消费 `replay_probe`、
   `scoreboard_check`、`coverage_feedback_tuning`，并把执行指标写入
-  `harness_runtime_metrics`。
+  `harness_runtime_metrics`。其中通用的 runtime action config/entry loader、plugin spec
+  runtime 装配和 lifecycle hook manager 已下沉到 `harness_optimization.runtime`；本模块主要
+  保留 `libafl_bfm_fuzz` 内建 runtime 实现与 action-specific payload 校验。
 - `run_orchestrator.py`：`FuzzRunOrchestrator`，负责顶层 corpus generation /
   validation、coverage replay、Verilator coverage report、coverage feedback、feedback
   replay、round manifest 和 round evaluation 的 profile 编排。
 - `campaign_orchestrator.py`：`CampaignOrchestrator` 和 `CampaignRoundScheduler`，负责
   多 mode/round 展开、上一轮 manifest state 接线、campaign manifest 和 campaign
-  evaluation。
-- `observation.py`：`ObservationRuntime`，统一 CLI observer/context 创建。
+  evaluation，以及把 `libafl_bfm_fuzz` 业务 backend 装配到
+  `harness_optimization.campaign_optimization` 共享阶段链。
+- `observation.py`：`libafl_bfm_fuzz` observation 兼容 wrapper；默认复用
+  `harness_optimization.observation` 共享 facade 来统一 CLI observer/context 创建。
 - `harness.py`：Makefile 命令包装和 pyUVM replay 共用的 observation helper。
 - `coverage_feedback.py`：带 connector 的 coverage feedback pipeline。
 - `observable.py` 位于 `py/fuzz_uvm/`，集中封装 pyUVM replay driver/ref-model、
   scoreboard 和 functional coverage adapter；adapter 委托 `ReplayPipelineOrchestrator`
   执行 connector step。
+
+推荐 import 规则：
+
+- 需要通用 connector 编排时，优先引用 `ConnectGraph`。
+- 需要共享 planning/path/runtime/optimization protocol，或通用 runtime action manager /
+  config loader 时，优先引用
+  `harness_optimization`。
+- 需要 fuzz harness 业务层语义时，优先引用 `fuzz_pipeline.harness_evidence.*` 或
+  `fuzz_pipeline.harness_plugins` / `fuzz_pipeline.harness_runtime_actions`。
+- `fuzz_pipeline` 根包继续提供兼容导出，但更适合作为用户入口，不应成为新内部模块的默认依赖面。
 
 ## Corpus Generation Flow
 

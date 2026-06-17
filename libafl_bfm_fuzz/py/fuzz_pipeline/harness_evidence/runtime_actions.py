@@ -1,39 +1,24 @@
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass
-import inspect
-import json
-import os
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
+
+from harness_optimization.runtime import (
+    HarnessRuntimeActionManager as _SharedHarnessRuntimeActionManager,
+    MMIO_READBACK_CONFIG_ENV,
+    REPLAY_PROBE_CONFIG_ENV,
+    RuntimeActionConfig,
+    RuntimeActionEntry,
+    SCOREBOARD_CHECK_CONFIG_ENV,
+    load_runtime_action_config as _load_runtime_action_config,
+    load_runtime_action_config_from_env as _load_runtime_action_config_from_env,
+    merge_runtime_metrics,
+    runtime_action_plugins_from_specs as _runtime_action_plugins_from_specs,
+    runtime_action_plugin_specs_from_env,
+    runtime_metrics_path_from_env,
+)
 
 from .plugins import build_harness_plugin
-
-
-REPLAY_PROBE_CONFIG_ENV = "HARNESS_REPLAY_PROBE_CONFIG"
-SCOREBOARD_CHECK_CONFIG_ENV = "HARNESS_SCOREBOARD_CHECK_CONFIG"
-COVERAGE_FEEDBACK_TUNING_CONFIG_ENV = "HARNESS_COVERAGE_FEEDBACK_TUNING_CONFIG"
-MMIO_READBACK_CONFIG_ENV = "HARNESS_MMIO_READBACK_CONFIG"
-RUNTIME_METRICS_OUT_ENV = "HARNESS_RUNTIME_METRICS_OUT"
-RUNTIME_ACTION_PLUGINS_ENV = "HARNESS_RUNTIME_ACTION_PLUGINS"
-
-
-@dataclass(frozen=True)
-class RuntimeActionEntry:
-    action_id: str
-    action_type: str
-    payload: dict[str, Any]
-    evidence_refs: tuple[dict[str, Any], ...] = ()
-    artifact_path: str | None = None
-    rationale: Any = None
-
-
-@dataclass(frozen=True)
-class RuntimeActionConfig:
-    action_type: str
-    path: Path
-    entries: tuple[RuntimeActionEntry, ...]
 
 
 def load_runtime_action_config_from_env(
@@ -41,10 +26,11 @@ def load_runtime_action_config_from_env(
     *,
     action_type: str,
 ) -> RuntimeActionConfig | None:
-    value = os.getenv(env_var)
-    if value is None or not value.strip():
-        return None
-    return load_runtime_action_config(Path(value), action_type=action_type)
+    return _load_runtime_action_config_from_env(
+        env_var,
+        action_type=action_type,
+        validator=_validate_payload,
+    )
 
 
 def load_runtime_action_config(
@@ -52,91 +38,14 @@ def load_runtime_action_config(
     *,
     action_type: str,
 ) -> RuntimeActionConfig:
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
-        raise ValueError(f"{path}: runtime action config must be a JSON object")
-    raw_entries = raw.get("entries")
-    if not isinstance(raw_entries, list):
-        raise ValueError(f"{path}: runtime action config requires an entries array")
-    entries = tuple(
-        _entry_from_json(item, action_type=action_type, path=path, index=index)
-        for index, item in enumerate(raw_entries)
+    return _load_runtime_action_config(
+        path,
+        action_type=action_type,
+        validator=_validate_payload,
     )
-    return RuntimeActionConfig(action_type=action_type, path=path, entries=entries)
 
 
-def runtime_metrics_path_from_env() -> Path | None:
-    value = os.getenv(RUNTIME_METRICS_OUT_ENV)
-    return Path(value) if value is not None and value.strip() else None
-
-
-def extra_make_var_value(values: Iterable[str], name: str) -> str | None:
-    prefix = f"{name}="
-    for item in values:
-        text = str(item)
-        if text.startswith(prefix):
-            value = text[len(prefix) :]
-            return value if value else None
-    return None
-
-
-def merge_runtime_metrics(
-    path: Path | None,
-    section: str,
-    metrics: Mapping[str, Any],
-    *,
-    config_path: Path | None = None,
-) -> dict[str, Any]:
-    if path is None:
-        return {"sections": {section: dict(metrics)}, "summary": dict(metrics)}
-    payload = read_runtime_metrics(path)
-    sections = payload.setdefault("sections", {})
-    if not isinstance(sections, dict):
-        sections = {}
-        payload["sections"] = sections
-    value = dict(metrics)
-    if config_path is not None:
-        value["config"] = str(config_path)
-    sections[section] = value
-    payload["summary"] = runtime_metrics_summary(payload)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return payload
-
-
-def read_runtime_metrics(path: Path | None) -> dict[str, Any]:
-    if path is None or not path.exists():
-        return {
-            "schema_version": 1,
-            "kind": "libafl_bfm_fuzz.harness_runtime_action_metrics",
-            "sections": {},
-            "summary": {},
-        }
-    value = json.loads(path.read_text(encoding="utf-8"))
-    return value if isinstance(value, dict) else {}
-
-
-def runtime_metrics_summary(payload: Mapping[str, Any]) -> dict[str, int | float]:
-    summary: dict[str, int | float] = {}
-    sections = payload.get("sections")
-    if not isinstance(sections, dict):
-        return summary
-    for section, metrics in sections.items():
-        if not isinstance(metrics, dict):
-            continue
-        for key, value in metrics.items():
-            if key == "config":
-                continue
-            number = _number(value)
-            if number is not None:
-                summary[f"{section}_{key}"] = number
-    return summary
-
-
-@dataclass(frozen=True)
-class HarnessRuntimeActionManager:
-    runtimes: tuple[Any, ...]
-
+class HarnessRuntimeActionManager(_SharedHarnessRuntimeActionManager):
     @classmethod
     def from_env(cls) -> "HarnessRuntimeActionManager":
         runtimes: list[Any] = [
@@ -152,191 +61,12 @@ class HarnessRuntimeActionManager:
         runtimes.extend(runtime_action_plugins_from_env())
         return cls(tuple(runtimes))
 
-    @classmethod
-    def from_runtime_list(cls, runtimes: Iterable[Any]) -> "HarnessRuntimeActionManager":
-        return cls(tuple(runtimes))
-
-    def runtime_of_type(self, runtime_type: type[Any]) -> Any | None:
-        for runtime in self.runtimes:
-            if isinstance(runtime, runtime_type):
-                return runtime
-        return None
-
-    def hook_capabilities(self) -> dict[str, list[str]]:
-        hooks: dict[str, list[str]] = {}
-        for runtime in self.runtimes:
-            available = [
-                name
-                for name in (
-                    "before_reset",
-                    "after_reset",
-                    "before_case",
-                    "after_execute",
-                    "sample_after_execute",
-                    "after_ref_model",
-                    "after_scoreboard_record",
-                    "finalize",
-                )
-                if callable(getattr(runtime, name, None))
-            ]
-            hooks[type(runtime).__name__] = available
-        return hooks
-
-    async def invoke_hook(self, *hook_names: str, **kwargs: Any) -> None:
-        for runtime in self.runtimes:
-            for hook_name in hook_names:
-                hook = getattr(runtime, hook_name, None)
-                if not callable(hook):
-                    continue
-                value = hook(**_hook_kwargs(hook, kwargs))
-                if inspect.isawaitable(value):
-                    await value
-
-    def invoke_hook_sync(self, *hook_names: str, **kwargs: Any) -> None:
-        for runtime in self.runtimes:
-            for hook_name in hook_names:
-                hook = getattr(runtime, hook_name, None)
-                if not callable(hook):
-                    continue
-                value = hook(**_hook_kwargs(hook, kwargs))
-                if inspect.isawaitable(value):
-                    _drive_awaitable_from_sync(value)
-
-    async def before_reset(self, *, driver: Any | None = None) -> None:
-        await self.invoke_hook("before_reset", driver=driver)
-
-    async def after_reset(self, *, driver: Any | None = None) -> None:
-        await self.invoke_hook("after_reset", driver=driver)
-
-    async def before_case(
-        self,
-        *,
-        index: int,
-        case: Any,
-        driver: Any,
-    ) -> None:
-        await self.invoke_hook("before_case", index=index, case=case, driver=driver)
-
-    async def after_ref_model(
-        self,
-        *,
-        index: int,
-        case: Any,
-        expected: Any,
-        driver: Any,
-    ) -> None:
-        await self.invoke_hook(
-            "after_ref_model",
-            index=index,
-            case=case,
-            expected=expected,
-            driver=driver,
-        )
-
-    def after_scoreboard_record_sync(
-        self,
-        *,
-        index: int,
-        case: Any,
-        result: Any,
-        record: Any,
-        driver: Any | None = None,
-    ) -> None:
-        self.invoke_hook_sync(
-            "after_scoreboard_record",
-            index=index,
-            case=case,
-            result=result,
-            record=record,
-            driver=driver,
-        )
-
-    async def after_scoreboard_record(
-        self,
-        *,
-        index: int,
-        case: Any,
-        result: Any,
-        record: Any,
-        driver: Any,
-    ) -> None:
-        await self.invoke_hook(
-            "after_scoreboard_record",
-            index=index,
-            case=case,
-            result=result,
-            record=record,
-            driver=driver,
-        )
-
-    def finalize_sync(self, *, driver: Any | None = None) -> None:
-        self.invoke_hook_sync("finalize", driver=driver)
-
-    async def finalize(self, *, driver: Any | None = None) -> None:
-        await self.invoke_hook("finalize", driver=driver)
-
-    async def sample_after_execute(
-        self,
-        *,
-        index: int,
-        case: Any,
-        result: Any,
-        driver: Any,
-    ) -> None:
-        await self.invoke_hook(
-            "after_execute",
-            "sample_after_execute",
-            index=index,
-            case=case,
-            result=result,
-            driver=driver,
-        )
-
 
 def runtime_action_plugins_from_env() -> list[Any]:
-    runtimes: list[Any] = []
-    for spec in runtime_action_plugin_specs_from_env():
-        runtimes.append(
-            build_harness_plugin(
-                spec,
-                metrics_out=runtime_metrics_path_from_env(),
-            )
-        )
-    return runtimes
-
-
-def _drive_awaitable_from_sync(value: Any) -> None:
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        asyncio.run(value)
-        return
-    loop.create_task(value)
-
-
-def _hook_kwargs(hook: Any, kwargs: Mapping[str, Any]) -> dict[str, Any]:
-    try:
-        signature = inspect.signature(hook)
-    except (TypeError, ValueError):
-        return dict(kwargs)
-    parameters = signature.parameters
-    if any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    ):
-        return dict(kwargs)
-    return {name: value for name, value in kwargs.items() if name in parameters}
-
-
-def runtime_action_plugin_specs_from_env() -> tuple[str, ...]:
-    value = os.getenv(RUNTIME_ACTION_PLUGINS_ENV)
-    if value is None or not value.strip():
-        return ()
-    return tuple(
-        item.strip()
-        for chunk in value.splitlines()
-        for item in chunk.split(",")
-        if item.strip()
+    return _runtime_action_plugins_from_specs(
+        runtime_action_plugin_specs_from_env(),
+        plugin_builder=build_harness_plugin,
+        metrics_out=runtime_metrics_path_from_env(),
     )
 
 
@@ -926,38 +656,6 @@ def _sorted_action_metrics(
         (dict(metrics) for metrics in action_metrics.values()),
         key=lambda item: (str(item.get("action_type")), str(item.get("action_id"))),
     )
-
-
-def _entry_from_json(
-    item: Any,
-    *,
-    action_type: str,
-    path: Path,
-    index: int,
-) -> RuntimeActionEntry:
-    if not isinstance(item, dict):
-        raise ValueError(f"{path}: entries[{index}] must be a JSON object")
-    entry_type = item.get("action_type")
-    if entry_type != action_type:
-        raise ValueError(
-            f"{path}: entries[{index}].action_type must be {action_type!r}, "
-            f"got {entry_type!r}"
-        )
-    payload = item.get("payload")
-    if not isinstance(payload, dict):
-        raise ValueError(f"{path}: entries[{index}].payload must be a JSON object")
-    entry = RuntimeActionEntry(
-        action_id=str(item.get("action_id") or f"{action_type}_{index}"),
-        action_type=action_type,
-        payload=payload,
-        evidence_refs=tuple(
-            ref for ref in item.get("evidence_refs", []) if isinstance(ref, dict)
-        ),
-        artifact_path=str(item["artifact_path"]) if item.get("artifact_path") else None,
-        rationale=item.get("rationale"),
-    )
-    _validate_payload(entry, path=path, index=index)
-    return entry
 
 
 def _validate_payload(entry: RuntimeActionEntry, *, path: Path, index: int) -> None:

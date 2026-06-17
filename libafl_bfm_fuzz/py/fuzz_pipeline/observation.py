@@ -1,45 +1,23 @@
-from __future__ import annotations
+"""Compatibility facade for observation helpers.
 
-from dataclasses import dataclass
-from pathlib import Path
+New code should prefer ``harness_optimization.observation`` directly unless it
+needs the fuzz_pipeline import path for backward compatibility.
+"""
 
-from connector_observe import ObservationContext, observer_from_env
-from connector_observe.observers import Observer
+from harness_optimization.observation import (  # noqa: F401
+    ObservationRuntime,
+    close_observation,
+    flush_observer,
+    connector_from_env,
+    observation_make_vars,
+    observation_context_from_env,
+)
 
-
-@dataclass
-class ObservationRuntime:
-    context: ObservationContext
-    observer: Observer
-    topology_out: Path | None = None
-
-    @classmethod
-    def from_env(
-        cls,
-        *,
-        observation_out: Path | None = None,
-        monitoring_out: Path | None = None,
-        topology_out: Path | None = None,
-        run_id: str | None = None,
-        round_id: str | None = None,
-        stage_id: str | None = None,
-        parent_event_id: str | None = None,
-    ) -> "ObservationRuntime":
-        observer = observer_from_env(
-            observation_out,
-            monitoring_path=monitoring_out,
-        )
-        context = ObservationContext.from_env(observer=observer)
-        if run_id or round_id or stage_id or parent_event_id:
-            context = ObservationContext(
-                run_id=run_id or context.run_id,
-                round_id=round_id or context.round_id,
-                stage_id=stage_id or context.stage_id,
-                parent_event_id=parent_event_id or context.parent_event_id,
-                observer=context.observer,
-                strict=context.strict,
-            )
-        return cls(context=context, observer=observer, topology_out=topology_out)
-
-    def close(self) -> None:
-        self.observer.close()
+__all__ = [
+    "ObservationRuntime",
+    "close_observation",
+    "flush_observer",
+    "connector_from_env",
+    "observation_make_vars",
+    "observation_context_from_env",
+]

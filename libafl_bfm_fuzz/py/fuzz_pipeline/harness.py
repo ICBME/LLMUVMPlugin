@@ -1,3 +1,8 @@
+"""Compatibility facade for legacy harness collection imports.
+
+New code should prefer ``fuzz_pipeline.harness_evidence.collection``.
+"""
+
 from .harness_evidence.collection import *  # noqa: F401,F403
 from .harness_evidence.collection import _reset_observation_context_for_tests
 

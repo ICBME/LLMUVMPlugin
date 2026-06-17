@@ -1,24 +1,61 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any, Callable
 
-from connector_observe import ObservationContext
-from connector_observe.observers import NullObserver
 from fuzz_bfm.target_config import TargetConfig
+from harness_optimization.io import path_sha256
+from harness_optimization.observation import (
+    NullObserver,
+    ObservationContext,
+    observation_context_from_env,
+    topology_out_from_env,
+)
+from harness_optimization.orchestrator import (
+    PipelineContext,
+    PipelineOrchestrator,
+    StepSpec,
+)
+from harness_optimization.runtime import (
+    FUNCTIONAL_COVERAGE_OUT_ENV as LEGACY_FUNCTIONAL_COVERAGE_OUT_ENV,
+    REPLAY_CORPUS_ENV as LEGACY_REPLAY_CORPUS_ENV,
+    REPLAY_TARGET_CONFIG_ENV as LEGACY_REPLAY_TARGET_CONFIG_ENV,
+    REPLAY_TARGET_ENV as LEGACY_REPLAY_TARGET_ENV,
+    functional_coverage_output_from_target as _shared_functional_coverage_output_from_target,
+    replay_corpus_from_env as _shared_replay_corpus_from_env,
+    replay_target_from_env as _shared_replay_target_from_env,
+)
 
 from .harness_evidence.collection import (
     functional_coverage_metrics,
-    observation_context_from_env,
-    path_sha256,
     replay_case_metadata,
     replay_context_metrics,
     replay_result_metrics,
     scoreboard_metrics,
 )
-from .orchestrator import PipelineContext, PipelineOrchestrator, StepSpec
 from .topology import FULL_FUZZ_TOPOLOGY, PipelineTopology
+
+
+def replay_target_from_env() -> str:
+    return _shared_replay_target_from_env(
+        target_env=LEGACY_REPLAY_TARGET_ENV,
+        target_config_env=LEGACY_REPLAY_TARGET_CONFIG_ENV,
+    )
+
+
+def replay_corpus_from_env(target: str | None = None) -> Path:
+    return _shared_replay_corpus_from_env(
+        target,
+        target_env=LEGACY_REPLAY_TARGET_ENV,
+        corpus_env=LEGACY_REPLAY_CORPUS_ENV,
+    )
+
+
+def functional_coverage_output_from_target(target_name: str) -> Path:
+    return _shared_functional_coverage_output_from_target(
+        target_name,
+        env_var=LEGACY_FUNCTIONAL_COVERAGE_OUT_ENV,
+    )
 
 
 class ReplayPipelineOrchestrator:
@@ -159,7 +196,7 @@ class ReplayPipelineOrchestrator:
         )
 
     def functional_coverage_output(self, config: TargetConfig) -> Path:
-        output_path = functional_coverage_output_from_env(config)
+        output_path = functional_coverage_output_from_target(config.name)
         self.context.artifacts["functional_coverage"] = output_path
         return output_path
 
@@ -312,25 +349,3 @@ class ReplayPipelineOrchestrator:
             ),
             self.context,
         )
-
-
-def replay_target_from_env() -> str:
-    target = os.getenv("FUZZ_TARGET")
-    if target is None and os.getenv("FUZZ_TARGET_CONFIG") is None:
-        raise RuntimeError("FUZZ_TARGET or FUZZ_TARGET_CONFIG must be set")
-    return target or "dut"
-
-
-def replay_corpus_from_env(target: str | None = None) -> Path:
-    target_name = target or os.getenv("FUZZ_TARGET", "dut")
-    return Path(os.getenv("LIBAFL_CORPUS", f"coverage/{target_name}_corpus.jsonl"))
-
-
-def functional_coverage_output_from_env(config: TargetConfig) -> Path:
-    default_path = Path("coverage") / f"{config.name}_uvm_functional_coverage.json"
-    return Path(os.getenv("UVM_FUNCTIONAL_COVERAGE_OUT", str(default_path)))
-
-
-def topology_out_from_env() -> Path | None:
-    path = os.getenv("CONNECTOR_TOPOLOGY_OUT")
-    return Path(path) if path and path.strip() else None

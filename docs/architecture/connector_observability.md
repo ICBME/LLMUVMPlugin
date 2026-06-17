@@ -44,7 +44,8 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 
 `py/fuzz_pipeline/topology.py`
 
-- 定义 `PipelineTopology`、`ComponentNode`、`ConnectorEdge`。
+- 通过 `harness_optimization.topology` 共享 facade 使用
+  `PipelineTopology`、`ComponentNode`、`ConnectorEdge`。
 - `HARNESS_TOPOLOGY` 描述 corpus/replay/scoreboard/coverage 组件。
 - `COVERAGE_FEEDBACK_TOPOLOGY` 描述 coverage feedback 与三层反馈组件。
 - `FULL_FUZZ_TOPOLOGY` 合并为完整 `libafl_bfm_fuzz` 拓扑。
@@ -56,7 +57,10 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 
 `py/fuzz_pipeline/orchestrator.py`
 
-- 定义 `StepSpec`、`StepPolicy`、`PipelineContext` 和 `PipelineOrchestrator`。
+- 兼容层保留默认 `FULL_FUZZ_TOPOLOGY` 绑定；共享 orchestrator 内核已下沉到
+  `harness_optimization.orchestrator`。
+- `libafl_bfm_fuzz` 内部业务模块现在直接依赖共享 orchestrator 内核；本模块主要保留
+  对外 import 路径和默认 topology 绑定。
 - 负责按 topology 创建 connector、校验 connector 名称和 role contract、执行 handler、
   存储 step result、汇总 metadata/metrics/artifact refs，并导出 topology JSON。
 - 支持同步 `run()` / `run_step()` 和异步 `run_async()` / `run_step_async()`。
@@ -111,17 +115,38 @@ validation、pyUVM replay、scoreboard、functional coverage 和 coverage feedba
 
 `py/fuzz_pipeline/run_evaluation.py`
 
-- 定义 `RunEvaluationAdapter`、`CampaignEvaluationAdapter` 和 `EvaluationBackends`。
+- 定义 `EvaluationBackends` 以及 `libafl_bfm_fuzz` 业务 wrapper
+  `RunEvaluationAdapter` / `CampaignEvaluationAdapter`。
+- round/campaign evaluation payload、trace attachment 和 campaign rollup attachment
+  的共享编排内核已下沉到 `harness_optimization.evaluation`；本模块主要保留业务 artifact
+  kind 和默认 trace/rollup builder 装配。
 - round/campaign evaluation 都是可替换 backend，并通过 registry stage 接入主 DAG。
 
 Harness evidence 相关实现现在集中在 `py/fuzz_pipeline/harness_evidence/`。旧的
 `py/fuzz_pipeline/harness*.py` 文件保留为兼容 re-export wrapper，方便已有脚本和测试继续
 使用原 import 路径；新代码应优先引用 `harness_evidence` 下的模块。
 
+推荐 import 规则：
+
+- 需要通用 connector / observer / topology / trace quality 时，优先直接引用
+  `ConnectGraph.*`。
+- 需要通用 step orchestration、run planning、path resolver、optimization helper
+  protocol 时，优先直接引用 `harness_optimization.*`。
+- `ConnectGraph.orchestrator` 仅作为历史兼容入口保留；`ConnectGraph` package root 与
+  `connector_observe` package root 都不再默认导出 orchestration primitive。
+- 需要 `libafl_bfm_fuzz` 业务语义，例如 harness evidence、candidate regression、
+  runtime action env contract、plugin artifact kind 时，优先引用
+  `fuzz_pipeline.harness_evidence.*` 或 `fuzz_pipeline.harness_runtime_actions` /
+  `fuzz_pipeline.harness_plugins` 这些业务 facade。
+- `fuzz_pipeline.harness*.py`、`fuzz_pipeline.run_plan`、`fuzz_pipeline.run_stage_registry`
+  继续保留给历史脚本和测试；除非需要兼容旧 import 路径，新代码不要再把它们当作首选入口。
+
 `py/fuzz_pipeline/harness_evidence/records.py`
 
-- 把通用 connector final event 投影为 harness execution record。
-- 负责提取 run/round/stage、artifact evidence 等 harness 级字段，但不做评测判断。
+- 业务 facade 保留 `libafl_bfm_fuzz.harness_execution_record` kind 和默认 metadata
+  extractor。
+- 通用 connector final event 投影内核已下沉到 `harness_optimization.records`；本模块只
+  负责 `libafl_bfm_fuzz` 的默认归因配置。
 
 `py/fuzz_pipeline/harness_evidence/metadata.py`
 
@@ -131,9 +156,10 @@ Harness evidence 相关实现现在集中在 `py/fuzz_pipeline/harness_evidence/
 
 `py/fuzz_pipeline/harness_evidence/analysis.py`
 
-- 定义可注入的 `HarnessAnalyzer` protocol。
-- 默认 `UvmFuzzHarnessAnalyzer` 负责 UVM-fuzz 业务评测，包括 connector/module、
-  failure cluster、case/directive、coverage/feedback 和 optimization hints 聚合。
+- 定义兼容 `HarnessAnalyzer` protocol facade。
+- 通用 harness evaluation 聚合内核已下沉到 `harness_optimization.analysis`；默认
+  `UvmFuzzHarnessAnalyzer` 仅保留 `libafl_bfm_fuzz.harness_evaluation` kind 和 UVM-fuzz
+  默认评测入口。
 
 `py/fuzz_pipeline/harness_evidence/llm_tasks.py`
 
@@ -149,6 +175,19 @@ Harness evidence 相关实现现在集中在 `py/fuzz_pipeline/harness_evidence/
 - `HarnessOptimizationAdapter` 从 campaign evaluation、harness evaluation、LLM dataset
   和 campaign rollup 构造 task；optimizer backend 只返回 proposal，不直接修改源码或
   harness artifact。
+- 通用 task/prompt/advice builder、optimizer transport、LLM/no-op/prompt-only proposal
+  backend 以及 proposal / candidate-evaluation runtime adapter 已下沉到
+  `harness_optimization.optimization`；本模块主要保留 `libafl_bfm_fuzz` 的 kind 与
+  patch/apply 业务语义。
+- builtin action DSL schema、payload validator 和 builtin plugin factory 单一来源已下沉到
+  `harness_optimization.action_dsl`；`rules` 只保留 schema/decision/metric gate 内核，
+  业务默认 plugin registry 复用同一套 shared factory。
+- proposal schema、payload DSL、metric gate 和 final decision 的共享规则内核已下沉到
+  `harness_optimization.rules`；本模块主要保留 `libafl_bfm_fuzz` 的 artifact kind、
+  task 组装和业务 facade。
+- campaign 级 harness optimization stage chain、manifest artifact helper 和 adapter
+  注入边界已下沉到 `harness_optimization.campaign_optimization`；`campaign_orchestrator`
+  只保留 campaign plan、manifest/evaluation 以及 `libafl_bfm_fuzz` backend 装配。
 - 默认 `NoopHarnessOptimizerBackend` 生成 schema-valid no-op proposal；
   decision stage 只做 schema-level accept/reject，并将 `application_status` 标为
   `not_applied`。
@@ -192,6 +231,13 @@ Harness evidence 相关实现现在集中在 `py/fuzz_pipeline/harness_evidence/
   metrics、paired delta、mean/worst/variance 和 flaky metric 标记；主
   `baseline_metrics` / `candidate_metrics` 使用 repeat 均值，final decision 会用
   `max_flaky_metric_count` 拦截不稳定候选。
+- candidate execution 的共享模型仍在 `harness_optimization.candidate_execution`；
+  action loading、adapter dispatch 与 `JsonConfigActionAdapter` 也已进入共享层；
+  candidate evaluation 的 metric snapshot、not-run/error report builder、action effect
+  attribution、gap actionability/minimal candidate 提炼，以及 repeat/variant/promotion
+  等候选验证公共计算已下沉到
+  `harness_optimization.candidate_validation`，本模块主要保留 sandbox campaign 装配、
+  runtime artifact 读取和 `libafl_bfm_fuzz` 业务策略。
 - candidate evaluation report 会带上 baseline/candidate metrics、candidate campaign
   artifacts、matched baseline artifacts、paired validation artifacts、adapter metrics、
   variant evaluations、action effect report、variant ranking、promotion package 和
@@ -224,12 +270,15 @@ Harness evidence 相关实现现在集中在 `py/fuzz_pipeline/harness_evidence/
 
 `py/fuzz_pipeline/harness_evidence/runtime_actions.py`
 
-- 定义 safe action runtime config schema、loader、metrics writer 和
-  `HarnessRuntimeActionManager`。pyUVM replay adapter 只调用 runtime manager 的
-  after-execute 采样入口，不再直接硬连每个 runtime action；默认 manager 仍加载
-  `replay_probe` 与 `mmio_readback`，并可通过 `HARNESS_RUNTIME_ACTION_PLUGINS` 附加受控
-  runtime plugin。manager 还提供并已接入 replay/ref-model/scoreboard 路径的
-  `before_reset`、`after_reset`、`before_case`、`after_execute`、`after_ref_model`、
+- safe action runtime 的 business consumer。共享的 runtime action config/entry loader、
+  plugin spec runtime 装配、metrics writer 和 `HarnessRuntimeActionManager` 已下沉到
+  `harness_optimization.runtime`；本模块主要保留 `replay_probe`、`scoreboard_check`、
+  `coverage_feedback_tuning`、`mmio_readback` 的内建 runtime 实现与 payload 校验。
+  pyUVM replay adapter 只调用 runtime manager 的 after-execute 采样入口，不再直接硬连
+  每个 runtime action；默认 business manager 仍加载 `replay_probe` 与
+  `mmio_readback`，并可通过 `HARNESS_RUNTIME_ACTION_PLUGINS` 附加受控 runtime plugin。
+  manager 还提供并已接入 replay/ref-model/scoreboard 路径的 `before_reset`、
+  `after_reset`、`before_case`、`after_execute`、`after_ref_model`、
   `after_scoreboard_record` 和 `finalize` 等通用 lifecycle hook；旧的
   `sample_after_execute` 路径保持兼容。
 - `replay_probe` 由 pyUVM replay driver adapter 消费，记录 case/result 字段采样和
@@ -250,20 +299,23 @@ Harness evidence 相关实现现在集中在 `py/fuzz_pipeline/harness_evidence/
 
 `py/fuzz_pipeline/harness_evidence/rollup.py`
 
-- 负责把 campaign manifest、harness execution records 和 harness evaluation 聚合为
-  campaign-level trace rollup。
+- 兼容层保留 `libafl_bfm_fuzz` 的 campaign rollup kind；共享聚合内核已下沉到
+  `harness_optimization.rollup`。
 - 输出跨 round 的 coverage trend、failure trend、case effectiveness 和 directive
   effectiveness，供后续 LLM 自动优化 harness 使用。
 
 `py/fuzz_pipeline/harness_evidence/trace.py`
 
 - 保留 `HarnessTraceBuilder`、`HarnessTraceOutputs` 和 `HarnessTraceResult` 兼容入口。
-- 作为 facade 串联 trace core、record projector、业务 analyzer 和 LLM dataset builder；
-  projector、analyzer 和 dataset builder 都通过 protocol 支持注入替换。
+- 通用 trace build/write 内核已下沉到 `harness_optimization.trace`；本模块作为 facade
+  串联 UVM-fuzz 的 record projector、业务 analyzer 和 LLM dataset builder。
+- projector、analyzer 和 dataset builder 都通过 protocol 支持注入替换。
 
 `py/fuzz_pipeline/observation.py`
 
-- 定义 `ObservationRuntime`，统一 CLI 入口的 observer/context/topology_out 创建与关闭。
+- 作为 `libafl_bfm_fuzz` observation 兼容 wrapper，默认转发到
+  `harness_optimization.observation` 共享 facade。
+- observer/context/topology_out 创建与关闭逻辑由共享层统一承接。
 
 `py/fuzz_pipeline/harness.py`
 
@@ -395,13 +447,16 @@ agent、oracle、monitor、coverage advisor、trace collector、fault injector �
 建议固定以下边界：
 
 - `connector_observe/`：只定义事件、artifact reference、observer 和 connector wrapper。
-- `fuzz_pipeline/orchestrator.py`：通用编排内核，负责 `StepSpec`、`PipelineContext`、
-  role contract 校验、timeout、失败策略和 topology 导出。
+- `harness_optimization/orchestrator.py`：通用编排内核，负责 `StepSpec`、
+  `PipelineContext`、role contract 校验、timeout、失败策略和 topology 导出。
+- `fuzz_pipeline/orchestrator.py`：业务兼容 facade，保留默认
+  `FULL_FUZZ_TOPOLOGY` 绑定，便于 `libafl_bfm_fuzz` 业务代码平滑迁移。
 - `fuzz_pipeline/stages/`：新增目录，放可复用 stage handler，例如 corpus generation、
   validation、UVM replay process、coverage report、coverage summary 和 feedback planning。
 - `fuzz_pipeline/run_orchestrator.py`：顶层 run 编排，只组合 step，不直接写业务逻辑。
 - `fuzz_pipeline/campaign_orchestrator.py`：campaign plan、manifest 和 connector 包装；
-  mode/round 状态流转由 `CampaignRoundScheduler` 承接。
+  mode/round 状态流转由 `CampaignRoundScheduler` 承接，campaign 级 harness optimization
+  stage chain 则复用 `harness_optimization/campaign_optimization.py`。
 - `fuzz_pipeline/replay_orchestrator.py`：pyUVM replay 内部边界编排，只暴露 context、
   sequence、driver、ref model、scoreboard 和 coverage 的 step facade。
 - `fuzz_bfm/`、`fuzz_uvm/`、`fuzz_feedback/`：保留业务实现，不直接创建 observer，
@@ -680,12 +735,17 @@ optimization dataset，并把这些产物路径与摘要挂到 `harness_trace` �
 ## Harness Trace 聚合
 
 Harness Trace 聚合被拆成多层：`connector_observe.trace` 负责通用 event/quality；
-`harness_evidence/records.py` 负责 execution record 投影；
+`harness_optimization.records` 负责 execution record 投影内核；
+`harness_evidence/records.py` 负责 `libafl_bfm_fuzz` 的默认 metadata extractor /
+artifact kind facade；
 `harness_evidence/metadata.py` 负责可替换的 case/directive/corpus 归因；
-`harness_evidence/analysis.py` 负责 UVM-fuzz 业务评测；
+`harness_optimization.analysis` 负责 harness evaluation 聚合内核；
+`harness_evidence/analysis.py` 负责 UVM-fuzz 业务评测 facade；
 `harness_evidence/llm_tasks.py` 负责面向 LLM 的数据视图；
-`harness_evidence/rollup.py` 负责 campaign 跨轮聚合。`HarnessTraceBuilder` 仍作为兼容
-facade，把 connector event stream 与 round/campaign manifest 聚合为以下派生产物：
+`harness_evidence/trace.py` 与 `harness_evidence/rollup.py` 仅保留业务 facade；
+trace core 与 campaign rollup 内核已分别下沉到 `harness_optimization.trace` /
+`harness_optimization.rollup`。`HarnessTraceBuilder` 兼容 facade 把 connector event stream
+与 round/campaign manifest 聚合为以下派生产物：
 
 - `<evaluation>_harness_records.jsonl`：逐 connector 终态执行记录，每条记录包含
   run/round/stage/case、`span_id`、`case_id`、`directive_id`、`corpus_sha256`、

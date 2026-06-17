@@ -1,5 +1,13 @@
-from .connector import Connector, ObservationContext
-from .observers import (
+from ConnectGraph.connector import Connector, ObservationContext
+from ConnectGraph.observation import (
+    ObservationRuntime,
+    close_observation,
+    connector_from_env,
+    flush_observer,
+    observation_context_from_env,
+    observation_make_vars,
+)
+from ConnectGraph.observers import (
     AsyncObserver,
     CompositeObserver,
     JsonlObserver,
@@ -7,8 +15,18 @@ from .observers import (
     NullObserver,
     observer_from_env,
 )
-from .schema import ArtifactRef, ConnectorEvent, SCHEMA_VERSION
-from .trace import (
+from ConnectGraph.schema import ArtifactRef, ConnectorEvent, SCHEMA_VERSION
+from ConnectGraph.topology import (
+    ComponentNode,
+    ConnectorEdge,
+    PipelineTopology,
+    merge_topologies,
+    topology_out_from_env,
+    validate_connector_endpoint,
+    write_topology,
+    write_topology_from_env,
+)
+from ConnectGraph.trace import (
     FINAL_EVENT_TYPES,
     STARTED_EVENT_TYPE,
     event_span_id,
@@ -19,22 +37,36 @@ from .trace import (
 )
 
 __all__ = [
-    "AsyncObserver",
     "ArtifactRef",
+    "AsyncObserver",
+    "close_observation",
+    "ComponentNode",
     "CompositeObserver",
     "Connector",
+    "ConnectorEdge",
     "ConnectorEvent",
+    "connector_from_env",
+    "event_span_id",
+    "event_status",
     "FINAL_EVENT_TYPES",
+    "flush_observer",
     "JsonlObserver",
+    "merge_topologies",
     "MonitoringObserver",
     "NullObserver",
     "ObservationContext",
-    "SCHEMA_VERSION",
-    "STARTED_EVENT_TYPE",
-    "event_span_id",
-    "event_status",
+    "ObservationRuntime",
+    "observation_context_from_env",
+    "observation_make_vars",
     "observer_from_env",
+    "PipelineTopology",
     "read_json_object",
     "read_jsonl_events",
+    "SCHEMA_VERSION",
+    "STARTED_EVENT_TYPE",
+    "topology_out_from_env",
     "trace_quality",
+    "validate_connector_endpoint",
+    "write_topology",
+    "write_topology_from_env",
 ]

@@ -1,89 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Any
-
-
-@dataclass(frozen=True)
-class ComponentNode:
-    name: str
-    kind: str
-    description: str = ""
-    metadata: dict[str, Any] | None = None
-
-    def to_json(self) -> dict[str, Any]:
-        value = asdict(self)
-        if value["metadata"] is None:
-            value.pop("metadata")
-        return value
-
-
-@dataclass(frozen=True)
-class ConnectorEdge:
-    name: str
-    from_layer: str
-    to_layer: str
-    description: str = ""
-    input_roles: tuple[str, ...] = ()
-    output_roles: tuple[str, ...] = ()
-    required: bool = True
-    metadata: dict[str, Any] | None = None
-
-    def to_json(self) -> dict[str, Any]:
-        value = asdict(self)
-        if value["metadata"] is None:
-            value.pop("metadata")
-        if not value["input_roles"]:
-            value.pop("input_roles")
-        if not value["output_roles"]:
-            value.pop("output_roles")
-        if value["required"]:
-            value.pop("required")
-        return value
-
-
-@dataclass(frozen=True)
-class PipelineTopology:
-    name: str
-    components: tuple[ComponentNode, ...]
-    connectors: tuple[ConnectorEdge, ...]
-    schema_version: int = 1
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "schema_version": self.schema_version,
-            "name": self.name,
-            "components": [component.to_json() for component in self.components],
-            "connectors": [connector.to_json() for connector in self.connectors],
-        }
-
-
-def merge_topologies(name: str, *topologies: PipelineTopology) -> PipelineTopology:
-    components: dict[str, ComponentNode] = {}
-    connectors: dict[str, ConnectorEdge] = {}
-    schema_version = 1
-    for topology in topologies:
-        schema_version = max(schema_version, topology.schema_version)
-        for component in topology.components:
-            components.setdefault(component.name, component)
-        for connector in topology.connectors:
-            existing = connectors.get(connector.name)
-            if existing is not None and (
-                existing.from_layer != connector.from_layer
-                or existing.to_layer != connector.to_layer
-            ):
-                raise ValueError(
-                    f"connector {connector.name!r} has inconsistent topology edges: "
-                    f"{existing.from_layer}->{existing.to_layer} vs "
-                    f"{connector.from_layer}->{connector.to_layer}"
-                )
-            connectors.setdefault(connector.name, connector)
-    return PipelineTopology(
-        name=name,
-        components=tuple(components.values()),
-        connectors=tuple(connectors.values()),
-        schema_version=schema_version,
-    )
+from harness_optimization.topology import (
+    ComponentNode,
+    ConnectorEdge,
+    PipelineTopology,
+    merge_topologies,
+    topology_out_from_env,
+    validate_connector_endpoint,
+    write_topology,
+    write_topology_from_env,
+)
 
 
 HARNESS_TOPOLOGY = PipelineTopology(
@@ -374,3 +300,19 @@ FULL_FUZZ_TOPOLOGY = merge_topologies(
     COVERAGE_FEEDBACK_TOPOLOGY,
     RUN_ORCHESTRATION_TOPOLOGY,
 )
+
+
+__all__ = [
+    "ComponentNode",
+    "ConnectorEdge",
+    "COVERAGE_FEEDBACK_TOPOLOGY",
+    "FULL_FUZZ_TOPOLOGY",
+    "HARNESS_TOPOLOGY",
+    "PipelineTopology",
+    "RUN_ORCHESTRATION_TOPOLOGY",
+    "merge_topologies",
+    "topology_out_from_env",
+    "validate_connector_endpoint",
+    "write_topology",
+    "write_topology_from_env",
+]
