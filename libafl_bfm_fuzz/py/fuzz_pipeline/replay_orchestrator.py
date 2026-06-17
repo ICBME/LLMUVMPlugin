@@ -3,15 +3,27 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from ConnectGraph import ObservationContext, observation_context_from_env
-from ConnectGraph.observers import NullObserver
-from ConnectGraph.topology import topology_out_from_env
 from fuzz_bfm.target_config import TargetConfig
 from harness_optimization.io import path_sha256
-from .harness_runtime_actions import (
-    functional_coverage_output_from_target,
-    replay_corpus_from_env,  # noqa: F401
-    replay_target_from_env,  # noqa: F401
+from harness_optimization.observation import (
+    NullObserver,
+    ObservationContext,
+    observation_context_from_env,
+    topology_out_from_env,
+)
+from harness_optimization.orchestrator import (
+    PipelineContext,
+    PipelineOrchestrator,
+    StepSpec,
+)
+from harness_optimization.runtime import (
+    FUNCTIONAL_COVERAGE_OUT_ENV as LEGACY_FUNCTIONAL_COVERAGE_OUT_ENV,
+    REPLAY_CORPUS_ENV as LEGACY_REPLAY_CORPUS_ENV,
+    REPLAY_TARGET_CONFIG_ENV as LEGACY_REPLAY_TARGET_CONFIG_ENV,
+    REPLAY_TARGET_ENV as LEGACY_REPLAY_TARGET_ENV,
+    functional_coverage_output_from_target as _shared_functional_coverage_output_from_target,
+    replay_corpus_from_env as _shared_replay_corpus_from_env,
+    replay_target_from_env as _shared_replay_target_from_env,
 )
 
 from .harness_evidence.collection import (
@@ -21,8 +33,29 @@ from .harness_evidence.collection import (
     replay_result_metrics,
     scoreboard_metrics,
 )
-from .orchestrator import PipelineContext, PipelineOrchestrator, StepSpec
 from .topology import FULL_FUZZ_TOPOLOGY, PipelineTopology
+
+
+def replay_target_from_env() -> str:
+    return _shared_replay_target_from_env(
+        target_env=LEGACY_REPLAY_TARGET_ENV,
+        target_config_env=LEGACY_REPLAY_TARGET_CONFIG_ENV,
+    )
+
+
+def replay_corpus_from_env(target: str | None = None) -> Path:
+    return _shared_replay_corpus_from_env(
+        target,
+        target_env=LEGACY_REPLAY_TARGET_ENV,
+        corpus_env=LEGACY_REPLAY_CORPUS_ENV,
+    )
+
+
+def functional_coverage_output_from_target(target_name: str) -> Path:
+    return _shared_functional_coverage_output_from_target(
+        target_name,
+        env_var=LEGACY_FUNCTIONAL_COVERAGE_OUT_ENV,
+    )
 
 
 class ReplayPipelineOrchestrator:

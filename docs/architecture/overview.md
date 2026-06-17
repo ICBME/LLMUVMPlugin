@@ -94,13 +94,41 @@ connector 事件、monitor 汇总和 topology JSON 的格式见
 
 实现分层建议：
 
-- `ConnectGraph`：通用 connector event、observer、topology 和 step orchestration。
+- `ConnectGraph`：通用 connector event、observer、topology、trace quality 和拓扑查询。
+  package root 只暴露这些图事实/观测/拓扑能力；历史 orchestration import 仅通过
+  `ConnectGraph.orchestrator` 兼容 facade 保留。
 - `harness_optimization`：通用 run planning、path helper、optimization protocol、
-  plugin/runtime helper 内核，以及 candidate regression 共用的 execution model、
-  candidate validation kernel 和 protocol/rules kernel。
-  其中 `candidate_execution.py` 负责候选执行模型与 adapter 结果，
-  `candidate_validation.py` 负责 repeat/variant/promotion 等候选验证公共计算，
-  `rules.py` 负责 proposal schema、payload DSL、metric gate 和 final decision 规则。
+  plugin/runtime helper 内核，以及通用 orchestration / planning、candidate regression
+  共用的 execution model、candidate validation kernel、protocol/rules kernel、trace core
+  和 campaign rollup kernel。
+  其中 `candidate_execution.py` 负责候选执行模型、action loading / adapter dispatch、
+  JSON config adapter 与 adapter 结果，
+  `candidate_validation.py` 负责 metric snapshot、not-run/error report、action effect
+  attribution、gap actionability/minimal candidate 提炼，以及 repeat/variant/promotion
+  等候选验证公共计算，
+  `runtime.py` 负责共享 env/path/runtime metrics helper，以及 runtime action config/entry
+  loader、runtime plugin spec 装配和 lifecycle hook manager，
+  `action_dsl.py` 负责共享 builtin action DSL schema、payload validator 和 builtin
+  plugin factory 单一来源，
+  `rules.py` 负责 proposal schema、payload DSL、metric gate 和 final decision 规则，
+  `optimization.py` 负责共享 task/prompt/advice builder、optimizer transport、
+  proposal backend 和 runtime adapter，
+  `planning.py` 负责共享 `RunPlan` / `RunStage` / `RunPlanExecutor`、stage registry /
+  profile 以及 stage wrapper、profile policy 应用 helper，
+  `topology.py` 负责共享 topology facade，稳定暴露 graph component / connector 类型、
+  merge/write helper 和 topology env helper，
+  `orchestrator.py` 负责共享 `StepSpec` / `PipelineContext` / `PipelineOrchestrator`，
+  `libafl_bfm_fuzz` 内部业务模块直接复用该共享编排内核，
+  `observation.py` 负责共享 observation/runtime facade，收敛
+  `ObservationContext`、observer lifecycle、make vars 和 topology env helper，
+  `campaign_optimization.py` 负责 campaign 级 harness optimization stage chain、
+  manifest artifact helper 和业务 adapter 注入边界，
+  `evaluation.py` 负责 round/campaign evaluation payload、trace attachment 和 campaign
+  rollup attachment 的共享编排内核，
+  `records.py` 负责通用 harness execution record 投影内核，
+  `analysis.py` 负责通用 harness evaluation 聚合内核，
+  `trace.py` 负责通用 harness trace build/write 协议，
+  `rollup.py` 负责 campaign 跨轮聚合内核。
 - `fuzz_pipeline`：`libafl_bfm_fuzz` 业务编排和 facade；新业务代码优先依赖
   `harness_evidence.*`、`harness_plugins`、`harness_runtime_actions`，而不是兼容 wrapper。
 

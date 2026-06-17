@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, replace
 
-from ConnectGraph import StepPolicy
+from .orchestrator import StepPolicy
 
 
 RunResults = dict[str, object]
 RunStageHandler = Callable[[RunResults], object]
+ZeroArgStageHandler = Callable[[], object]
 
 
 @dataclass(frozen=True)
@@ -268,7 +268,93 @@ def profile_stage_names(
         raise ValueError(f"unknown run plan profile: {name}") from exc
 
 
+def apply_stage_policies(
+    stages: tuple[RunStage, ...],
+    stage_policies: Mapping[str, StepPolicy],
+    *,
+    profile_name: str,
+    plan_label: str = "run",
+) -> tuple[RunStage, ...]:
+    if not stage_policies:
+        return stages
+    names = {stage.name for stage in stages}
+    unknown = sorted(set(stage_policies) - names)
+    if unknown:
+        raise ValueError(
+            f"{plan_label} plan profile {profile_name!r} declares policy for "
+            f"unknown stage(s): {unknown}"
+        )
+    return tuple(
+        replace(
+            stage,
+            policy=stage_policies.get(stage.name, stage.policy),
+        )
+        for stage in stages
+    )
+
+
+def result_stage(
+    name: str,
+    handler: RunStageHandler,
+    *,
+    result_key: str | None = None,
+    merge_mapping: bool = False,
+    store_none: bool = False,
+    requires_results: tuple[str, ...] = (),
+    produces_results: tuple[str, ...] | None = None,
+    input_roles: tuple[str, ...] = (),
+    output_roles: tuple[str, ...] = (),
+    policy: StepPolicy = StepPolicy(),
+) -> RunStage:
+    return RunStage(
+        name=name,
+        handler=handler,
+        result_key=result_key,
+        merge_mapping=merge_mapping,
+        store_none=store_none,
+        requires_results=requires_results,
+        produces_results=(
+            produces_results
+            if produces_results is not None
+            else (() if merge_mapping else (result_key or name,))
+        ),
+        input_roles=input_roles,
+        output_roles=output_roles,
+        policy=policy,
+    )
+
+
+def zero_arg_stage(
+    name: str,
+    handler: ZeroArgStageHandler,
+    *,
+    result_key: str | None = None,
+    merge_mapping: bool = False,
+    store_none: bool = False,
+    requires_results: tuple[str, ...] = (),
+    produces_results: tuple[str, ...] | None = None,
+    input_roles: tuple[str, ...] = (),
+    output_roles: tuple[str, ...] = (),
+    policy: StepPolicy = StepPolicy(),
+) -> RunStage:
+    return result_stage(
+        name,
+        lambda _results: handler(),
+        result_key=result_key,
+        merge_mapping=merge_mapping,
+        store_none=store_none,
+        requires_results=requires_results,
+        produces_results=produces_results,
+        input_roles=input_roles,
+        output_roles=output_roles,
+        policy=policy,
+    )
+
+
 __all__ = [
+    "ZeroArgStageHandler",
+    "apply_stage_policies",
+    "result_stage",
     "RegisteredRunStage",
     "RunPlan",
     "RunPlanExecutor",
@@ -278,5 +364,6 @@ __all__ = [
     "RunStageFactory",
     "RunStageHandler",
     "RunStageRegistry",
+    "zero_arg_stage",
     "profile_stage_names",
 ]

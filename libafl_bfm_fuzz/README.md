@@ -26,12 +26,17 @@ constraints are documented in
   `coverage_feedback.py`.
 - `py/connector_observe/` and `py/fuzz_pipeline/` provide connector-based
   observation for corpus generation, validation, pyUVM replay, scoreboard,
-  functional coverage, and coverage feedback. `py/fuzz_pipeline/orchestrator.py`
-  is the orchestration layer: components expose handlers/adapters, while
-  `StepSpec` wiring decides connector names, artifact roles, metrics, and
-  failure policy. `py/fuzz_pipeline/replay_orchestrator.py` applies the same
-  pattern to pyUVM replay, and `py/fuzz_pipeline/run_orchestrator.py` starts to
-  move top-level fuzz stages out of Makefile recipes.
+  functional coverage, and coverage feedback.
+  `harness_optimization/orchestrator.py` is the shared orchestration layer:
+  components expose handlers/adapters, while `StepSpec` wiring decides
+  connector names, artifact roles, metrics, and failure policy.
+  `py/fuzz_pipeline/orchestrator.py` remains a compatibility facade that binds
+  the default `FULL_FUZZ_TOPOLOGY` for `libafl_bfm_fuzz`; internal business
+  modules now depend on the shared `harness_optimization.orchestrator`
+  directly.
+  `py/fuzz_pipeline/replay_orchestrator.py` applies the same pattern to pyUVM
+  replay, and `py/fuzz_pipeline/run_orchestrator.py` starts to move top-level
+  fuzz stages out of Makefile recipes.
 
 Reusable framework code does not depend on DUT-specific BFMs, reference models,
 vectors, or hardcoded RTL paths. The repository does include `py/fuzz_examples`
@@ -184,7 +189,8 @@ make -C libafl_bfm_fuzz check
 
 `check` runs Rust unit tests and Python syntax checks. Corpus and UVM replay
 checks require a target manifest and, for simulation, the RTL source list. The
-syntax check includes the shared `py/fuzz_pipeline/` orchestration modules.
+syntax check includes the shared `harness_optimization/` orchestration modules
+and the `py/fuzz_pipeline/` compatibility facades.
 
 ## Coverage-Guided Feedback
 

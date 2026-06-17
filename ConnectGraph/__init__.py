@@ -1,3 +1,11 @@
+"""Connector observation and topology primitives.
+
+Package-root exports are intentionally limited to graph facts, connector
+observation, topology helpers, and trace-quality utilities. Historical
+orchestration imports remain available from ``ConnectGraph.orchestrator`` as a
+compatibility facade over ``harness_optimization.orchestrator``.
+"""
+
 from .connector import Connector, ObservationContext
 from .observation import (
     ObservationRuntime,
@@ -14,13 +22,6 @@ from .observers import (
     MonitoringObserver,
     NullObserver,
     observer_from_env,
-)
-from .orchestrator import (
-    PipelineContext,
-    PipelineOrchestrator,
-    StepPolicy,
-    StepSpec,
-    external_command_step,
 )
 from .schema import ArtifactRef, ConnectorEvent, SCHEMA_VERSION
 from .topology import (
@@ -58,16 +59,11 @@ __all__ = [
     "NullObserver",
     "ObservationContext",
     "ObservationRuntime",
-    "PipelineContext",
-    "PipelineOrchestrator",
-    "PipelineTopology",
     "SCHEMA_VERSION",
     "STARTED_EVENT_TYPE",
-    "StepPolicy",
-    "StepSpec",
+    "PipelineTopology",
     "event_span_id",
     "event_status",
-    "external_command_step",
     "flush_observer",
     "merge_topologies",
     "connector_from_env",

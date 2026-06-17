@@ -6,7 +6,12 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "libafl_bfm_fuzz" / "py"))
 
-from fuzz_pipeline import RunPlan, RunPlanExecutor, RunStage, StepPolicy
+from fuzz_pipeline import RunPlan, RunPlanExecutor, RunStage, StepPolicy  # noqa: E402
+from harness_optimization.planning import (  # noqa: E402
+    apply_stage_policies,
+    result_stage,
+    zero_arg_stage,
+)
 
 
 def test_run_plan_records_ordered_results_and_merged_mappings() -> None:
@@ -43,6 +48,64 @@ def test_run_plan_records_ordered_results_and_merged_mappings() -> None:
 
     assert calls == ["topology", "first"]
     assert results == {"first": 1, "second": 2, "kept_none": None}
+
+
+def test_shared_planning_stage_helpers_build_run_stages() -> None:
+    plan = RunPlan(
+        name="helpers",
+        stages=(
+            zero_arg_stage("first", lambda: 1),
+            zero_arg_stage(
+                "merged",
+                lambda: {"second": 2},
+                merge_mapping=True,
+                produces_results=("second",),
+            ),
+            result_stage(
+                "sum",
+                lambda results: results["first"] + results["second"],
+                result_key="total",
+            ),
+        ),
+        write_topology=False,
+    )
+
+    results = RunPlanExecutor().run(plan)
+
+    assert results == {"first": 1, "second": 2, "total": 3}
+
+
+def test_shared_planning_apply_stage_policies_updates_known_stages_only() -> None:
+    stages = (
+        zero_arg_stage("first", lambda: 1),
+        zero_arg_stage("second", lambda: 2),
+    )
+
+    updated = apply_stage_policies(
+        stages,
+        {"second": StepPolicy(fail_main_on_step_error=False, timeout_s=3.0)},
+        profile_name="demo",
+    )
+
+    assert updated[0].policy == stages[0].policy
+    assert updated[1].policy.fail_main_on_step_error is False
+    assert updated[1].policy.timeout_s == 3.0
+
+
+def test_shared_planning_apply_stage_policies_rejects_unknown_stage_names() -> None:
+    try:
+        apply_stage_policies(
+            (zero_arg_stage("first", lambda: 1),),
+            {"missing": StepPolicy(fail_main_on_step_error=False)},
+            profile_name="demo",
+            plan_label="campaign",
+        )
+    except ValueError as exc:
+        assert "campaign plan profile 'demo' declares policy for unknown stage" in str(
+            exc
+        )
+    else:
+        raise AssertionError("unknown stage policy should fail")
 
 
 def test_run_plan_can_skip_topology_write() -> None:

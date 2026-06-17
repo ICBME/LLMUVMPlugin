@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ConnectGraph import ObservationContext
 from fuzz_feedback.advisors import (
     build_llm_prompt,
     maybe_call_llm,
@@ -15,9 +14,14 @@ from fuzz_feedback.coverage import build_summary
 from fuzz_feedback.feedback_loop import build_gap_feedback, build_mutation_feedback
 from fuzz_feedback.mutation_planner import plan_mutations_from_rtl_gaps
 from harness_optimization.io import read_optional_json, write_json
+from harness_optimization.observation import ObservationContext
+from harness_optimization.orchestrator import (
+    PipelineContext,
+    PipelineOrchestrator,
+    StepSpec,
+)
 
 from .harness_evidence.runtime_actions import CoverageFeedbackTuningRuntime
-from .orchestrator import PipelineContext, PipelineOrchestrator, StepSpec
 from .topology import FULL_FUZZ_TOPOLOGY, PipelineTopology
 
 
@@ -147,7 +151,7 @@ class CoverageFeedbackPipeline:
                 pipeline_context,
             )
 
-        layer1_plan = self.orchestrator.run_step(
+        self.orchestrator.run_step(
             StepSpec(
                 name="layer1_plan",
                 connector="layer2_layer3_feedback_to_layer1_plan",

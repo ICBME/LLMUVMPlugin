@@ -5,11 +5,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
+from .io import path_or_none, read_json_object, write_json
+from .plugins import HarnessPluginRegistry
 from .records import list_value, mapping
 
 
 CANDIDATE_REGRESSION_CONFIG_KIND = "harness_optimization.candidate_regression_config"
 CANDIDATE_ACTION_OVERLAY_KIND = "harness_optimization.candidate_action_overlay"
+DEFAULT_JSON_CONFIG_KIND_PREFIX = "harness_optimization.harness_candidate_"
+DEFAULT_JSON_CONFIG_ARTIFACT_ROLE_PREFIX = "candidate_"
+DEFAULT_JSON_CONFIG_MAKE_VAR_PREFIX = "HARNESS_"
 
 
 @dataclass(frozen=True)
@@ -303,6 +308,49 @@ def action_variant(
     }
 
 
+@dataclass(frozen=True)
+class JsonConfigActionAdapter:
+    action_type: str
+    artifact_kind: str
+    artifact_role: str
+    make_var: str | None = None
+
+    def adapt(
+        self,
+        actions: tuple[dict[str, Any], ...],
+        context: CandidateActionAdapterContext,
+    ) -> CandidateActionAdapterResult:
+        entries = tuple(action_entry_for(action) for action in actions)
+        artifact = {
+            "schema_version": 1,
+            "kind": self.artifact_kind,
+            "created_at": _utc_timestamp(),
+            "candidate_id": context.candidate_id,
+            "action_type": self.action_type,
+            "entries": list(entries),
+        }
+        artifact_path = context.regression_dir / f"{self.artifact_role}.json"
+        write_json(artifact_path, artifact)
+        directives = tuple(
+            directive
+            for entry in entries
+            for directive in directives_from_action_entry(entry)
+        )
+        return CandidateActionAdapterResult(
+            action_type=self.action_type,
+            artifact_role=self.artifact_role,
+            artifact_path=artifact_path,
+            make_var=self.make_var,
+            entries=entries,
+            directives=directives,
+            variants=tuple(
+                action_variant(entry, artifact_path=artifact_path)
+                for entry in entries
+            ),
+            metric_counts={f"{self.action_type}_count": len(entries)},
+        )
+
+
 def build_candidate_variants(
     adapter_results: tuple[CandidateActionAdapterResult, ...],
 ) -> list[dict[str, Any]]:
@@ -406,6 +454,135 @@ def adapter_metric_snapshot(
     return metrics
 
 
+def json_config_adapter_config_for(
+    action_type: str,
+    *,
+    plugin_registry: HarnessPluginRegistry | None = None,
+    kind_prefix: str = DEFAULT_JSON_CONFIG_KIND_PREFIX,
+    artifact_role_prefix: str = DEFAULT_JSON_CONFIG_ARTIFACT_ROLE_PREFIX,
+    make_var_prefix: str = DEFAULT_JSON_CONFIG_MAKE_VAR_PREFIX,
+) -> tuple[str, str, str]:
+    plugin_config = (
+        plugin_registry.adapter_config_for(action_type)
+        if plugin_registry is not None
+        else None
+    )
+    if plugin_config is not None:
+        return plugin_config
+    slug = _safe_slug(action_type)
+    make_slug = slug.upper().replace("-", "_").replace(".", "_")
+    return (
+        f"{kind_prefix}{slug}_config",
+        f"{artifact_role_prefix}{slug}_config",
+        f"{make_var_prefix}{make_slug}_CONFIG",
+    )
+
+
+def json_config_action_adapter(
+    action_type: str,
+    *,
+    plugin_registry: HarnessPluginRegistry | None = None,
+    kind_prefix: str = DEFAULT_JSON_CONFIG_KIND_PREFIX,
+    artifact_role_prefix: str = DEFAULT_JSON_CONFIG_ARTIFACT_ROLE_PREFIX,
+    make_var_prefix: str = DEFAULT_JSON_CONFIG_MAKE_VAR_PREFIX,
+) -> JsonConfigActionAdapter:
+    kind, artifact_role, make_var = json_config_adapter_config_for(
+        action_type,
+        plugin_registry=plugin_registry,
+        kind_prefix=kind_prefix,
+        artifact_role_prefix=artifact_role_prefix,
+        make_var_prefix=make_var_prefix,
+    )
+    return JsonConfigActionAdapter(
+        action_type=action_type,
+        artifact_kind=kind,
+        artifact_role=artifact_role,
+        make_var=make_var,
+    )
+
+
+def default_candidate_action_adapters(
+    plugin_registry: HarnessPluginRegistry | None = None,
+    *,
+    kind_prefix: str = DEFAULT_JSON_CONFIG_KIND_PREFIX,
+    artifact_role_prefix: str = DEFAULT_JSON_CONFIG_ARTIFACT_ROLE_PREFIX,
+    make_var_prefix: str = DEFAULT_JSON_CONFIG_MAKE_VAR_PREFIX,
+) -> dict[str, CandidateActionAdapter]:
+    if plugin_registry is None:
+        return {}
+    return {
+        action_type: json_config_action_adapter(
+            action_type,
+            plugin_registry=plugin_registry,
+            kind_prefix=kind_prefix,
+            artifact_role_prefix=artifact_role_prefix,
+            make_var_prefix=make_var_prefix,
+        )
+        for action_type in plugin_registry.allowed_action_types()
+        if plugin_registry.adapter_config_for(action_type) is not None
+    }
+
+
+def load_candidate_actions(
+    candidate_manifest: Mapping[str, Any],
+) -> tuple[dict[str, Any], ...]:
+    actions = []
+    for item in list_value(candidate_manifest.get("candidate_artifacts")):
+        if not isinstance(item, dict):
+            continue
+        artifact_path = path_or_none(item.get("artifact_path"))
+        action_payload = read_json_object(artifact_path) if artifact_path else {}
+        actions.append(
+            {
+                "action_id": item.get("action_id"),
+                "action_type": item.get("action_type"),
+                "artifact_path": str(artifact_path) if artifact_path else None,
+                "evidence_refs": list_value(item.get("evidence_refs")),
+                "action": mapping(action_payload.get("action")),
+            }
+        )
+    return tuple(actions)
+
+
+def adapt_candidate_actions(
+    actions: tuple[dict[str, Any], ...],
+    context: CandidateActionAdapterContext,
+    *,
+    adapters: Mapping[str, CandidateActionAdapter] | None,
+    plugin_registry: HarnessPluginRegistry | None = None,
+    kind_prefix: str = DEFAULT_JSON_CONFIG_KIND_PREFIX,
+    artifact_role_prefix: str = DEFAULT_JSON_CONFIG_ARTIFACT_ROLE_PREFIX,
+    make_var_prefix: str = DEFAULT_JSON_CONFIG_MAKE_VAR_PREFIX,
+) -> tuple[CandidateActionAdapterResult, ...]:
+    adapter_map = default_candidate_action_adapters(
+        plugin_registry,
+        kind_prefix=kind_prefix,
+        artifact_role_prefix=artifact_role_prefix,
+        make_var_prefix=make_var_prefix,
+    )
+    if adapters is not None:
+        adapter_map.update(adapters)
+    by_type: dict[str, list[dict[str, Any]]] = {}
+    for action in actions:
+        action_type = _optional_str(action.get("action_type"))
+        if action_type is None:
+            continue
+        by_type.setdefault(action_type, []).append(action)
+    results = []
+    for action_type, grouped_actions in sorted(by_type.items()):
+        adapter = adapter_map.get(action_type)
+        if adapter is None:
+            adapter = json_config_action_adapter(
+                action_type,
+                plugin_registry=plugin_registry,
+                kind_prefix=kind_prefix,
+                artifact_role_prefix=artifact_role_prefix,
+                make_var_prefix=make_var_prefix,
+            )
+        results.append(adapter.adapt(tuple(grouped_actions), context))
+    return tuple(results)
+
+
 def _settings_json(
     settings: CandidateRegressionSettings | Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -429,3 +606,7 @@ def _safe_slug(value: str) -> str:
             chars.append("_")
     slug = "".join(chars).strip("._")
     return slug or "item"
+
+
+def _optional_str(value: Any) -> str | None:
+    return str(value) if value is not None and str(value) else None

@@ -18,6 +18,16 @@ def read_optional_json(path: Path | None) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+def read_json_object(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -110,6 +120,7 @@ __all__ = [
     "optional_existing_artifact",
     "path_or_none",
     "path_sha256",
+    "read_json_object",
     "read_optional_json",
     "required_path",
     "write_json",

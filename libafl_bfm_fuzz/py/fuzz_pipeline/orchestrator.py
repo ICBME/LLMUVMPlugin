@@ -1,14 +1,14 @@
-"""Compatibility facade over the shared ConnectGraph orchestrator.
+"""Compatibility facade over the shared harness_optimization orchestrator.
 
-New code should prefer ``ConnectGraph.orchestrator`` when it does not need the
-default ``FULL_FUZZ_TOPOLOGY`` binding supplied here.
+New code should prefer ``harness_optimization.orchestrator`` when it does not
+need the default ``FULL_FUZZ_TOPOLOGY`` binding supplied here.
 """
 
 from __future__ import annotations
 
-from ConnectGraph.orchestrator import (
+from harness_optimization.orchestrator import (
     PipelineContext,
-    PipelineOrchestrator as _ConnectGraphPipelineOrchestrator,
+    PipelineOrchestrator as _SharedPipelineOrchestrator,
     StepPolicy,
     StepSpec,
     external_command_step,
@@ -18,7 +18,7 @@ from ConnectGraph.orchestrator import (
 from .topology import FULL_FUZZ_TOPOLOGY, PipelineTopology
 
 
-class PipelineOrchestrator(_ConnectGraphPipelineOrchestrator):
+class PipelineOrchestrator(_SharedPipelineOrchestrator):
     def __init__(
         self,
         topology: PipelineTopology = FULL_FUZZ_TOPOLOGY,

@@ -51,9 +51,12 @@
 
 ## Import Guidance
 
-- 通用 connector / observer / topology / orchestration：优先使用 `ConnectGraph.*`。
-- 通用 planning / path / optimization protocol：优先使用 `harness_optimization.*`。
+- 通用 connector / observer / topology / trace quality：优先使用 `ConnectGraph.*`。
+- 通用 orchestration / planning / path / optimization protocol：优先使用
+  `harness_optimization.*`。
 - `libafl_bfm_fuzz` 业务逻辑：优先使用 `fuzz_pipeline.harness_evidence.*` 以及
   `fuzz_pipeline.harness_plugins`、`fuzz_pipeline.harness_runtime_actions`。
 - `fuzz_pipeline.harness*.py`、`fuzz_pipeline.run_plan`、`fuzz_pipeline.run_stage_registry`
   是兼容入口；新代码除非需要保留旧 import 路径，否则不应新增对这些模块的依赖。
+- `ConnectGraph.orchestrator` 保留给历史 import 路径；新代码不应再从 `ConnectGraph`
+  package root 获取 orchestration primitive。

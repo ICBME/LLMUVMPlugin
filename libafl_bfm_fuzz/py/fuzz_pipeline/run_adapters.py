@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 import shutil
 import subprocess
 from typing import Callable, Protocol
 
-from ConnectGraph import ObservationContext, observation_make_vars
+from harness_optimization.observation import (
+    ObservationContext,
+    observation_make_vars,
+)
 from harness_optimization.paths import FuzzRunConfigView, RunPathResolver, split_tool_command
 
 

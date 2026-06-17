@@ -1,3 +1,9 @@
+"""Shared observation facade over ConnectGraph primitives.
+
+New code outside ConnectGraph should prefer this module for observation/runtime
+helpers instead of importing from ConnectGraph package roots directly.
+"""
+
 from ConnectGraph.connector import Connector, ObservationContext
 from ConnectGraph.observation import (
     ObservationRuntime,
@@ -13,60 +19,34 @@ from ConnectGraph.observers import (
     JsonlObserver,
     MonitoringObserver,
     NullObserver,
+    Observer,
     observer_from_env,
 )
-from ConnectGraph.schema import ArtifactRef, ConnectorEvent, SCHEMA_VERSION
-from ConnectGraph.topology import (
-    ComponentNode,
-    ConnectorEdge,
+from .topology import (
     PipelineTopology,
-    merge_topologies,
     topology_out_from_env,
     validate_connector_endpoint,
-    write_topology,
     write_topology_from_env,
-)
-from ConnectGraph.trace import (
-    FINAL_EVENT_TYPES,
-    STARTED_EVENT_TYPE,
-    event_span_id,
-    event_status,
-    read_json_object,
-    read_jsonl_events,
-    trace_quality,
 )
 
 __all__ = [
-    "ArtifactRef",
     "AsyncObserver",
     "close_observation",
-    "ComponentNode",
     "CompositeObserver",
     "Connector",
-    "ConnectorEdge",
-    "ConnectorEvent",
     "connector_from_env",
-    "event_span_id",
-    "event_status",
-    "FINAL_EVENT_TYPES",
     "flush_observer",
     "JsonlObserver",
-    "merge_topologies",
     "MonitoringObserver",
     "NullObserver",
     "ObservationContext",
     "ObservationRuntime",
+    "Observer",
+    "observer_from_env",
     "observation_context_from_env",
     "observation_make_vars",
-    "observer_from_env",
     "PipelineTopology",
-    "read_json_object",
-    "read_jsonl_events",
-    "SCHEMA_VERSION",
-    "STARTED_EVENT_TYPE",
     "topology_out_from_env",
-    "trace_quality",
     "validate_connector_endpoint",
-    "write_topology",
     "write_topology_from_env",
 ]

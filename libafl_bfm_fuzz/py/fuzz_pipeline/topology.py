@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ConnectGraph.topology import (
+from harness_optimization.topology import (
     ComponentNode,
     ConnectorEdge,
     PipelineTopology,

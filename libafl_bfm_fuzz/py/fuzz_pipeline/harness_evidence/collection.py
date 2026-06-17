@@ -6,16 +6,23 @@ from pathlib import Path
 import subprocess
 from typing import Any, Sequence
 
-from ConnectGraph import close_observation, observation_context_from_env
-from ConnectGraph.topology import (
+from harness_optimization.topology import (
     topology_out_from_env,
     validate_connector_endpoint,
     write_topology_from_env,
 )
 from harness_optimization.io import artifact_mapping as _artifact_mapping
 from harness_optimization.io import path_sha256  # noqa: F401
+from harness_optimization.observation import (
+    close_observation,
+    observation_context_from_env,
+)
+from harness_optimization.orchestrator import (
+    PipelineContext,
+    PipelineOrchestrator,
+    external_command_step,
+)
 
-from ..orchestrator import PipelineContext, PipelineOrchestrator, external_command_step
 from ..topology import FULL_FUZZ_TOPOLOGY
 
 

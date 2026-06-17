@@ -1,40 +1,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 from pathlib import Path
-import subprocess
-from typing import Any, Callable, Protocol
+from typing import Any, Callable
 
-from ConnectGraph import ObservationContext, flush_observer
-from harness_optimization.optimization import utc_timestamp
-from harness_optimization.paths import RunPathResolver, resolved_artifact_path
-from harness_optimization.records import mapping
-
-from .coverage_feedback import CoverageFeedbackResult
-from .harness_evidence.optimization import (
+from harness_optimization.evaluation import (
+    CampaignEvaluationAdapter as SharedCampaignEvaluationAdapter,
+    CampaignEvaluationBackend,
+    CampaignRollupAttachment,
+    EvaluationConfigView,
+    RoundEvaluationBackend,
+    RunEvaluationAdapter as SharedRunEvaluationAdapter,
+)
+from harness_optimization.observation import ObservationContext
+from harness_optimization.optimization import (
     HarnessCandidateEvaluationBackend,
     HarnessOptimizerBackend,
 )
-from .harness_evidence.plugins import HarnessPluginRegistry
-from .harness_evidence.trace import HarnessTraceBuilder, HarnessTraceOutputs
+from harness_optimization.paths import RunPathResolver
+from harness_optimization.plugins import HarnessPluginRegistry
+
+from .coverage_feedback import CoverageFeedbackResult
+from .harness_evidence.trace import HarnessTraceBuilder
 from .harness_evidence.rollup import CampaignTraceRollupBuilder, campaign_trace_rollup_path
-
-
-class RoundEvaluationBackend(Protocol):
-    def run_round(
-        self,
-        stage_results: dict[str, object],
-    ) -> dict[str, Any]:
-        ...
-
-
-class CampaignEvaluationBackend(Protocol):
-    def run(
-        self,
-        campaign_manifest: dict[str, Any],
-    ) -> dict[str, Any]:
-        ...
 
 
 @dataclass(frozen=True)
@@ -46,14 +34,6 @@ class EvaluationBackends:
     harness_plugin_registry: HarnessPluginRegistry | None = None
 
 
-class EvaluationConfigView(Protocol):
-    target: str
-    mode: str | None
-    round_id: str | None
-    evaluation_out: Path | None
-    observation_out: Path | None
-    monitoring_out: Path | None
-    cwd: Path | None
 @dataclass(frozen=True)
 class RunEvaluationAdapter:
     config: EvaluationConfigView
@@ -65,118 +45,21 @@ class RunEvaluationAdapter:
         self,
         stage_results: dict[str, object],
     ) -> dict[str, Any]:
-        path = self.paths.path_from_cwd(self.config.evaluation_out)
-        if path is None:
-            raise ValueError("missing evaluation_out for round evaluation stage")
-        payload = self.round_payload(stage_results)
-        self._attach_harness_trace(payload, path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        return payload
+        return self._shared().run_round(stage_results)
 
     def round_payload(self, stage_results: dict[str, object]) -> dict[str, Any]:
-        manifest = mapping(stage_results.get("round_manifest"))
-        feedback = stage_results.get("coverage_feedback")
-        return {
-            "schema_version": 1,
-            "kind": "libafl_bfm_fuzz.round_evaluation",
-            "created_at": utc_timestamp(),
-            "target": self.config.target,
-            "mode": self.config.mode or "feedback_fuzz",
-            "round_id": self.round_id(),
-            "run_id": self.observation_context.run_id,
-            "artifacts": {
-                "round_manifest": self.paths.manifest_path(self._round_manifest_path()),
-                "evaluation_report": self.paths.manifest_path(self.config.evaluation_out),
-            },
-            "stage_names": [
-                name for name in stage_results if name != "round_evaluation"
-            ],
-            "stage_returncodes": self._stage_returncodes(stage_results),
-            "case_counts": self._case_counts(stage_results),
-            "coverage": manifest.get("coverage", {}),
-            "feedback": manifest.get("feedback", self._feedback_snapshot(feedback)),
-            "manifest_artifacts": manifest.get("artifacts", {}),
-        }
+        return self._shared().round_payload(stage_results)
 
-    def _attach_harness_trace(
-        self,
-        payload: dict[str, Any],
-        evaluation_path: Path,
-    ) -> None:
-        artifacts = mapping(payload.get("manifest_artifacts"))
-        observation_events = resolved_artifact_path(
-            artifacts.get("observation_events"),
-        ) or self.paths.path_from_cwd(self.config.observation_out)
-        flush_observer(self.observation_context.observer)
-        if observation_events is None or not observation_events.exists():
-            return
-        outputs = HarnessTraceOutputs.from_evaluation_path(evaluation_path)
-        try:
-            result = HarnessTraceBuilder(
-                observation_events=observation_events,
-                monitoring=(
-                    resolved_artifact_path(artifacts.get("monitoring"))
-                    or self.paths.path_from_cwd(self.config.monitoring_out)
-                ),
-                round_manifest=self._round_manifest_path(),
-                ignored_hanging_connectors=("round_artifacts_to_evaluation",),
-            ).write(outputs)
-        except Exception as exc:  # noqa: BLE001 - evaluation trace is additive
-            payload["harness_trace"] = {
-                "status": "failed",
-                "error": {"type": type(exc).__name__, "message": str(exc)},
-            }
-            return
-        payload["harness_trace"] = {
-            "status": "ok",
-            "artifacts": outputs.to_json(),
-            "summary": result.evaluation.get("summary", {}),
-            "optimization_hints": result.evaluation.get("optimization_hints", {}),
-        }
-
-    def _round_manifest_path(self) -> Path | None:
-        return self.paths.optional_artifact("round_manifest")
-
-    def _stage_returncodes(
-        self,
-        stage_results: dict[str, object],
-    ) -> dict[str, int]:
-        values: dict[str, int] = {}
-        for name, result in stage_results.items():
-            if isinstance(result, subprocess.CompletedProcess):
-                values[name] = int(result.returncode)
-        for name in ("annotate", "write_info"):
-            result = stage_results.get(name)
-            if isinstance(result, subprocess.CompletedProcess):
-                values[name] = int(result.returncode)
-        return values
-
-    def _case_counts(self, stage_results: dict[str, object]) -> dict[str, int]:
-        values: dict[str, int] = {}
-        for name in ("corpus_validation", "feedback_corpus_validation"):
-            result = stage_results.get(name)
-            if result is None:
-                continue
-            try:
-                values[name] = len(result)  # type: ignore[arg-type]
-            except TypeError:
-                continue
-        return values
-
-    def _feedback_snapshot(self, result: object) -> dict[str, Any]:
-        if not isinstance(result, CoverageFeedbackResult):
-            return {}
-        directives = result.final_directives.get("directives", [])
-        return {
-            "directive_count": len(directives),
-            "directive_source": result.final_directives.get("source"),
-            "has_gap_feedback": result.gap_feedback is not None,
-            "has_mutation_feedback": result.mutation_feedback is not None,
-        }
+    def _shared(self) -> SharedRunEvaluationAdapter:
+        return SharedRunEvaluationAdapter(
+            config=self.config,
+            paths=self.paths,
+            observation_context=self.observation_context,
+            round_id=self.round_id,
+            trace_builder_factory=_build_round_trace_builder,
+            feedback_snapshot_builder=_feedback_snapshot,
+            kind="libafl_bfm_fuzz.round_evaluation",
+        )
 
 
 @dataclass(frozen=True)
@@ -190,107 +73,74 @@ class CampaignEvaluationAdapter:
         self,
         campaign_manifest: dict[str, Any],
     ) -> dict[str, Any]:
-        payload = self.payload(campaign_manifest)
-        self._attach_harness_trace(payload, campaign_manifest)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        return payload
+        return self._shared().run(campaign_manifest)
 
     def payload(self, campaign_manifest: dict[str, Any]) -> dict[str, Any]:
-        artifacts = campaign_manifest.get("artifacts", {})
-        artifact_map = artifacts if isinstance(artifacts, dict) else {}
-        modes = campaign_manifest.get("modes", [])
-        mode_items = modes if isinstance(modes, list) else []
-        rounds = [
-            round_item
-            for mode_item in mode_items
-            if isinstance(mode_item, dict)
-            for round_item in mode_item.get("rounds", [])
-            if isinstance(round_item, dict)
-        ]
-        return {
-            "schema_version": 1,
-            "kind": "libafl_bfm_fuzz.campaign_evaluation",
-            "created_at": utc_timestamp(),
-            "target": self.target,
-            "run_id": self.observation_context.run_id,
-            "cwd": str(self.cwd),
-            "artifacts": {
-                "campaign_manifest": artifact_map.get("campaign_manifest"),
-                "evaluation_report": str(self.path),
-            },
-            "summary": {
-                "mode_count": len(mode_items),
-                "round_count": len(rounds),
-                "modes": [
-                    str(mode_item.get("mode"))
-                    for mode_item in mode_items
-                    if isinstance(mode_item, dict)
-                ],
-            },
-            "rounds": [
-                {
-                    "round_id": item.get("round_id"),
-                    "round_manifest": item.get("round_manifest"),
-                    "coverage": item.get("coverage", {}),
-                    "feedback": item.get("feedback", {}),
-                }
-                for item in rounds
-            ],
-        }
+        return self._shared().payload(campaign_manifest)
 
-    def _attach_harness_trace(
-        self,
-        payload: dict[str, Any],
-        campaign_manifest: dict[str, Any],
-    ) -> None:
-        artifacts = mapping(campaign_manifest.get("artifacts"))
-        observation_events = resolved_artifact_path(
-            artifacts.get("observation_events"),
+    def _shared(self) -> SharedCampaignEvaluationAdapter:
+        return SharedCampaignEvaluationAdapter(
+            target=self.target,
+            path=self.path,
+            observation_context=self.observation_context,
             cwd=self.cwd,
+            trace_builder_factory=_build_campaign_trace_builder,
+            rollup_writer=_write_campaign_rollup,
+            kind="libafl_bfm_fuzz.campaign_evaluation",
         )
-        flush_observer(self.observation_context.observer)
-        if observation_events is None or not observation_events.exists():
-            return
-        outputs = HarnessTraceOutputs.from_evaluation_path(self.path)
-        artifacts_payload = outputs.to_json()
-        campaign_rollup: dict[str, Any] | None = None
-        try:
-            result = HarnessTraceBuilder(
-                observation_events=observation_events,
-                monitoring=resolved_artifact_path(
-                    artifacts.get("monitoring"),
-                    cwd=self.cwd,
-                ),
-                campaign_manifest=resolved_artifact_path(
-                    artifacts.get("campaign_manifest"),
-                    cwd=self.cwd,
-                ),
-                ignored_hanging_connectors=("campaign_to_evaluation_report",),
-            ).write(outputs)
-            rollup_path = campaign_trace_rollup_path(self.path)
-            campaign_rollup = CampaignTraceRollupBuilder(
-                records=result.records,
-                evaluation=result.evaluation,
-                campaign_manifest=campaign_manifest,
-            ).write(rollup_path)
-            artifacts_payload["campaign_trace_rollup"] = str(rollup_path)
-        except Exception as exc:  # noqa: BLE001 - evaluation trace is additive
-            payload["harness_trace"] = {
-                "status": "failed",
-                "error": {"type": type(exc).__name__, "message": str(exc)},
-            }
-            return
-        payload["harness_trace"] = {
-            "status": "ok",
-            "artifacts": artifacts_payload,
-            "summary": result.evaluation.get("summary", {}),
-            "optimization_hints": result.evaluation.get("optimization_hints", {}),
-        }
-        if campaign_rollup is not None:
-            payload["harness_trace"]["campaign_rollup"] = {
-                "summary": campaign_rollup.get("summary", {}),
-            }
+
+
+def _build_round_trace_builder(
+    *,
+    observation_events: Path,
+    monitoring: Path | None,
+    round_manifest: Path | None,
+    ignored_hanging_connectors: tuple[str, ...],
+) -> HarnessTraceBuilder:
+    return HarnessTraceBuilder(
+        observation_events=observation_events,
+        monitoring=monitoring,
+        round_manifest=round_manifest,
+        ignored_hanging_connectors=ignored_hanging_connectors,
+    )
+
+
+def _build_campaign_trace_builder(
+    *,
+    observation_events: Path,
+    monitoring: Path | None,
+    campaign_manifest: Path | None,
+    ignored_hanging_connectors: tuple[str, ...],
+) -> HarnessTraceBuilder:
+    return HarnessTraceBuilder(
+        observation_events=observation_events,
+        monitoring=monitoring,
+        campaign_manifest=campaign_manifest,
+        ignored_hanging_connectors=ignored_hanging_connectors,
+    )
+
+
+def _feedback_snapshot(result: object) -> dict[str, Any]:
+    if not isinstance(result, CoverageFeedbackResult):
+        return {}
+    directives = result.final_directives.get("directives", [])
+    return {
+        "directive_count": len(directives),
+        "directive_source": result.final_directives.get("source"),
+        "has_gap_feedback": result.gap_feedback is not None,
+        "has_mutation_feedback": result.mutation_feedback is not None,
+    }
+
+
+def _write_campaign_rollup(
+    result,
+    campaign_manifest: dict[str, Any],
+    evaluation_path: Path,
+) -> CampaignRollupAttachment:
+    rollup_path = campaign_trace_rollup_path(evaluation_path)
+    payload = CampaignTraceRollupBuilder(
+        records=result.records,
+        evaluation=result.evaluation,
+        campaign_manifest=campaign_manifest,
+    ).write(rollup_path)
+    return CampaignRollupAttachment(path=rollup_path, payload=payload)
