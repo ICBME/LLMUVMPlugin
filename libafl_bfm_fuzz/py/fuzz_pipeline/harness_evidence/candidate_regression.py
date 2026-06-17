@@ -3,10 +3,31 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Mapping
 
 from ConnectGraph import ObservationContext
 from ConnectGraph.trace import read_json_object
+from harness_optimization.candidate_execution import (
+    CandidateAcceptanceThresholds,
+    CandidateActionAdapter,
+    CandidateActionAdapterContext,
+    CandidateActionAdapterResult,
+    CandidateRegressionSettings,
+    CandidateRepeatRun,
+    MatchedBaselineRun,
+    build_candidate_action_overlay as _build_candidate_action_overlay,
+    candidate_regression_config_payload as _candidate_regression_config_payload,
+    action_entry_for,
+    action_variant,
+    adapter_artifacts,
+    adapter_make_vars,
+    adapter_metric_snapshot,
+    build_candidate_directives,
+    build_candidate_variants,
+    directives_from_action_entry,
+    filter_candidate_actions_for_variant,
+    select_candidate_variants,
+)
 
 from ..campaign_orchestrator import CampaignConfig, CampaignOrchestrator
 from .optimization import (
@@ -54,6 +75,49 @@ from ..topology import FULL_FUZZ_TOPOLOGY, PipelineTopology
 
 CampaignOrchestratorFactory = Callable[..., CampaignOrchestrator]
 
+CANDIDATE_ACTION_OVERLAY_KIND = (
+    "libafl_bfm_fuzz.harness_optimization_candidate_action_overlay"
+)
+CANDIDATE_REGRESSION_CONFIG_KIND = (
+    "libafl_bfm_fuzz.harness_candidate_regression_config"
+)
+
+
+def build_candidate_action_overlay(
+    candidate_manifest: Mapping[str, Any],
+    adapter_results: tuple[CandidateActionAdapterResult, ...],
+    *,
+    kind: str = CANDIDATE_ACTION_OVERLAY_KIND,
+) -> dict[str, Any]:
+    return _build_candidate_action_overlay(
+        candidate_manifest,
+        adapter_results,
+        kind=kind,
+    )
+
+
+def candidate_regression_config_payload(
+    config: CampaignConfig,
+    *,
+    action_overlay: Path,
+    adapter_results: tuple[CandidateActionAdapterResult, ...],
+    initial_directives: Path | None,
+    runtime_metrics: Path,
+    run_role: str = "candidate",
+    settings: CandidateRegressionSettings | None = None,
+    kind: str = CANDIDATE_REGRESSION_CONFIG_KIND,
+) -> dict[str, Any]:
+    return _candidate_regression_config_payload(
+        config,
+        action_overlay=action_overlay,
+        adapter_results=adapter_results,
+        initial_directives=initial_directives,
+        runtime_metrics=runtime_metrics,
+        run_role=run_role,
+        settings=settings,
+        kind=kind,
+    )
+
 
 ADAPTER_CONFIG_KINDS = {
     "mutation_directive_update": (
@@ -99,130 +163,6 @@ RUNTIME_ACTION_TYPES = {
     "coverage_feedback_tuning",
     "mmio_readback",
 }
-
-
-@dataclass(frozen=True)
-class CandidateAcceptanceThresholds:
-    max_regressed_metric_count: int = 0
-    min_improved_metric_count: int = 1
-    max_flaky_metric_count: int = 0
-    accepted_candidate_statuses: tuple[str, ...] = ("passed", "ok")
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "max_regressed_metric_count": self.max_regressed_metric_count,
-            "min_improved_metric_count": self.min_improved_metric_count,
-            "max_flaky_metric_count": self.max_flaky_metric_count,
-            "accepted_candidate_statuses": list(self.accepted_candidate_statuses),
-        }
-
-
-@dataclass(frozen=True)
-class CandidateRegressionSettings:
-    modes: tuple[str, ...] | None = None
-    rounds: int = 1
-    iters: int | None = None
-    max_seeds: int | None = None
-    seed: int | None = None
-    max_variant_regressions: int = 1
-    run_plan_profile: str | None = None
-    round_evaluation: bool = True
-    campaign_plan_profile: str = "campaign_with_evaluation"
-    matched_baseline: bool = False
-    paired_repeats: int = 1
-    repeat_seed_stride: int = 1
-    attribution_top_k: int | None = None
-    attribution_mode: str = "top_k"
-    strict_plugin_validation: bool = False
-    thresholds: CandidateAcceptanceThresholds = CandidateAcceptanceThresholds()
-
-    def __post_init__(self) -> None:
-        if self.max_variant_regressions < 1:
-            raise ValueError("max_variant_regressions must be >= 1")
-        if self.paired_repeats < 1:
-            raise ValueError("paired_repeats must be >= 1")
-        if self.repeat_seed_stride < 1:
-            raise ValueError("repeat_seed_stride must be >= 1")
-        if self.attribution_top_k is not None and self.attribution_top_k < 1:
-            raise ValueError("attribution_top_k must be >= 1")
-        if self.attribution_mode not in {"top_k", "all_actions"}:
-            raise ValueError("attribution_mode must be one of: top_k, all_actions")
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "modes": list(self.modes) if self.modes is not None else None,
-            "rounds": self.rounds,
-            "iters": self.iters,
-            "max_seeds": self.max_seeds,
-            "seed": self.seed,
-            "max_variant_regressions": self.max_variant_regressions,
-            "run_plan_profile": self.run_plan_profile,
-            "round_evaluation": self.round_evaluation,
-            "campaign_plan_profile": self.campaign_plan_profile,
-            "matched_baseline": self.matched_baseline,
-            "paired_repeats": self.paired_repeats,
-            "repeat_seed_stride": self.repeat_seed_stride,
-            "attribution_top_k": self.attribution_top_k,
-            "attribution_mode": self.attribution_mode,
-            "strict_plugin_validation": self.strict_plugin_validation,
-            "thresholds": self.thresholds.to_json(),
-        }
-
-
-@dataclass(frozen=True)
-class CandidateActionAdapterContext:
-    candidate_id: str
-    regression_dir: Path
-
-
-@dataclass(frozen=True)
-class MatchedBaselineRun:
-    metrics: dict[str, float | int]
-    artifacts: dict[str, str]
-    summary: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class CandidateRepeatRun:
-    metrics: dict[str, float | int]
-    artifacts: dict[str, str]
-    evaluation: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class CandidateActionAdapterResult:
-    action_type: str
-    artifact_role: str
-    artifact_path: Path | None
-    make_var: str | None
-    entries: tuple[dict[str, Any], ...]
-    directives: tuple[dict[str, Any], ...] = ()
-    variants: tuple[dict[str, Any], ...] = ()
-    metric_counts: Mapping[str, int] | None = None
-
-    def artifact_json(self) -> dict[str, str]:
-        if self.artifact_path is None:
-            return {}
-        return {self.artifact_role: str(self.artifact_path)}
-
-    def make_var_assignment(self) -> str | None:
-        if self.make_var is None or self.artifact_path is None:
-            return None
-        return f"{self.make_var}={self.artifact_path}"
-
-    def metric_json(self) -> dict[str, int]:
-        return dict(self.metric_counts or {})
-
-
-class CandidateActionAdapter(Protocol):
-    action_type: str
-
-    def adapt(
-        self,
-        actions: tuple[dict[str, Any], ...],
-        context: CandidateActionAdapterContext,
-    ) -> CandidateActionAdapterResult:
-        ...
 
 
 @dataclass(frozen=True)
@@ -334,7 +274,11 @@ class HarnessCandidateRegressionBackend:
             adapters=self.action_adapters,
             plugin_registry=plugin_registry,
         )
-        overlay = build_candidate_action_overlay(candidate_manifest, adapter_results)
+        overlay = build_candidate_action_overlay(
+            candidate_manifest,
+            adapter_results,
+            kind=CANDIDATE_ACTION_OVERLAY_KIND,
+        )
         overlay_path = regression_dir / "candidate_action_overlay.json"
         _write_json(overlay_path, overlay)
         candidate_directives = build_candidate_directives(adapter_results)
@@ -366,6 +310,7 @@ class HarnessCandidateRegressionBackend:
                 initial_directives=candidate_directives_path,
                 runtime_metrics=runtime_metrics_path,
                 settings=self.settings,
+                kind=CANDIDATE_REGRESSION_CONFIG_KIND,
             ),
         )
         if int(mapping(patch.get("summary")).get("applied_action_count", 0)) <= 0:
@@ -749,6 +694,7 @@ class HarnessCandidateRegressionBackend:
         overlay = build_candidate_action_overlay(
             {**candidate_manifest, "candidate_id": matched_candidate_id},
             (),
+            kind=CANDIDATE_ACTION_OVERLAY_KIND,
         )
         overlay["baseline_role"] = "matched_noop_baseline"
         overlay_path = matched_dir / "matched_baseline_action_overlay.json"
@@ -773,6 +719,7 @@ class HarnessCandidateRegressionBackend:
             runtime_metrics=runtime_metrics_path,
             run_role=run_role,
             settings=self.settings,
+            kind=CANDIDATE_REGRESSION_CONFIG_KIND,
         )
         if repeat_index is not None:
             config_payload["repeat_index"] = repeat_index
@@ -983,6 +930,7 @@ class HarnessCandidateRegressionBackend:
         overlay = build_candidate_action_overlay(
             {**candidate_manifest, "candidate_id": repeat_candidate_id},
             adapter_results,
+            kind=CANDIDATE_ACTION_OVERLAY_KIND,
         )
         overlay["selected_variant_id"] = "combined"
         overlay["repeat_index"] = repeat_index
@@ -1016,6 +964,7 @@ class HarnessCandidateRegressionBackend:
             runtime_metrics=runtime_metrics_path,
             run_role="candidate_repeat",
             settings=self.settings,
+            kind=CANDIDATE_REGRESSION_CONFIG_KIND,
         )
         config_payload["repeat_index"] = repeat_index
         _write_json(run_config_path, config_payload)
@@ -1243,6 +1192,7 @@ class HarnessCandidateRegressionBackend:
         overlay = build_candidate_action_overlay(
             {**candidate_manifest, "candidate_id": variant_candidate_id},
             adapter_results,
+            kind=CANDIDATE_ACTION_OVERLAY_KIND,
         )
         overlay["selected_variant_id"] = variant_id
         overlay_path = variant_dir / "candidate_action_overlay.json"
@@ -1275,6 +1225,7 @@ class HarnessCandidateRegressionBackend:
                 initial_directives=directives_path,
                 runtime_metrics=runtime_metrics_path,
                 settings=self.settings,
+                kind=CANDIDATE_REGRESSION_CONFIG_KIND,
             ),
         )
         artifacts = {
@@ -1555,219 +1506,6 @@ def adapt_candidate_actions(
         results.append(adapter.adapt(tuple(grouped_actions), context))
     return tuple(results)
 
-
-def build_candidate_action_overlay(
-    candidate_manifest: dict[str, Any],
-    adapter_results: tuple[CandidateActionAdapterResult, ...],
-) -> dict[str, Any]:
-    variants = build_candidate_variants(adapter_results)
-    return {
-        "schema_version": 1,
-        "kind": "libafl_bfm_fuzz.harness_optimization_candidate_action_overlay",
-        "created_at": utc_timestamp(),
-        "candidate_id": candidate_manifest.get("candidate_id"),
-        "actions": [
-            entry
-            for result in adapter_results
-            for entry in result.entries
-        ],
-        "adapter_results": [
-            {
-                "action_type": result.action_type,
-                "artifact_role": result.artifact_role,
-                "artifact_path": str(result.artifact_path)
-                if result.artifact_path is not None
-                else None,
-                "make_var": result.make_var,
-                "entry_count": len(result.entries),
-                "variant_count": len(result.variants),
-            }
-            for result in adapter_results
-        ],
-        "variants": variants,
-        "selected_variant_id": "combined" if variants else None,
-    }
-
-
-def build_candidate_directives(
-    adapter_results: tuple[CandidateActionAdapterResult, ...],
-) -> dict[str, Any]:
-    directives = [
-        directive
-        for result in adapter_results
-        for directive in result.directives
-    ]
-    return {
-        "schema_version": 1,
-        "source": "harness_optimization_candidate",
-        "directives": directives,
-    }
-
-
-def action_entry_for(action: dict[str, Any]) -> dict[str, Any]:
-    payload = mapping(mapping(action.get("action")).get("payload"))
-    return {
-        "action_id": action.get("action_id"),
-        "action_type": action.get("action_type"),
-        "artifact_path": action.get("artifact_path"),
-        "evidence_refs": list_value(action.get("evidence_refs")),
-        "payload": payload,
-        "rationale": mapping(action.get("action")).get("rationale"),
-    }
-
-
-def directives_from_action_entry(entry: dict[str, Any]) -> tuple[dict[str, Any], ...]:
-    if entry.get("action_type") != "mutation_directive_update":
-        return ()
-    payload = mapping(entry.get("payload"))
-    if isinstance(payload.get("directives"), list):
-        return tuple(
-            directive
-            for directive in payload["directives"]
-            if isinstance(directive, dict)
-        )
-    if isinstance(payload.get("directive"), dict):
-        return (payload["directive"],)
-    if payload:
-        return (
-            {
-                "source": "harness_optimization_candidate",
-                "action_id": entry.get("action_id"),
-                "payload": payload,
-            },
-        )
-    return ()
-
-
-def action_variant(
-    entry: dict[str, Any],
-    *,
-    artifact_path: Path,
-) -> dict[str, Any]:
-    action_id = str(entry.get("action_id") or entry.get("action_type") or "action")
-    return {
-        "variant_id": f"action_{safe_slug(action_id)}",
-        "variant_type": "single_action",
-        "action_ids": [entry.get("action_id")],
-        "action_types": [entry.get("action_type")],
-        "artifact_paths": [str(artifact_path)],
-        "validation_status": "materialized_not_run",
-    }
-
-
-def build_candidate_variants(
-    adapter_results: tuple[CandidateActionAdapterResult, ...],
-) -> list[dict[str, Any]]:
-    single_action_variants = [
-        variant
-        for result in adapter_results
-        for variant in result.variants
-    ]
-    if not single_action_variants:
-        return []
-    combined = {
-        "variant_id": "combined",
-        "variant_type": "combined_actions",
-        "action_ids": [
-            action_id
-            for variant in single_action_variants
-            for action_id in list_value(variant.get("action_ids"))
-        ],
-        "action_types": sorted(
-            {
-                str(action_type)
-                for variant in single_action_variants
-                for action_type in list_value(variant.get("action_types"))
-                if action_type is not None
-            }
-        ),
-        "artifact_paths": sorted(
-            {
-                str(path)
-                for variant in single_action_variants
-                for path in list_value(variant.get("artifact_paths"))
-                if path is not None
-            }
-        ),
-        "validation_status": "selected_for_regression",
-    }
-    return [combined, *single_action_variants]
-
-
-def select_candidate_variants(
-    variants: Any,
-    *,
-    max_count: int,
-    attribution_mode: str = "top_k",
-) -> tuple[dict[str, Any], ...]:
-    if max_count < 1:
-        raise ValueError("max_count must be >= 1")
-    if attribution_mode not in {"top_k", "all_actions"}:
-        raise ValueError("attribution_mode must be one of: top_k, all_actions")
-    selected = [
-        variant
-        for variant in list_value(variants)
-        if isinstance(variant, dict)
-    ]
-    if attribution_mode == "all_actions":
-        return tuple(selected)
-    return tuple(selected[:max_count])
-
-
-def filter_candidate_actions_for_variant(
-    actions: tuple[dict[str, Any], ...],
-    variant: dict[str, Any],
-) -> tuple[dict[str, Any], ...]:
-    action_ids = {
-        str(action_id)
-        for action_id in list_value(variant.get("action_ids"))
-        if action_id is not None
-    }
-    if not action_ids:
-        return ()
-    return tuple(
-        action
-        for action in actions
-        if str(action.get("action_id")) in action_ids
-    )
-
-
-def adapter_make_vars(
-    adapter_results: tuple[CandidateActionAdapterResult, ...],
-) -> tuple[str, ...]:
-    values = [
-        value
-        for result in adapter_results
-        if (value := result.make_var_assignment()) is not None
-    ]
-    return tuple(values)
-
-
-def adapter_artifacts(
-    adapter_results: tuple[CandidateActionAdapterResult, ...],
-) -> dict[str, str]:
-    artifacts: dict[str, str] = {}
-    for result in adapter_results:
-        artifacts.update(result.artifact_json())
-    return artifacts
-
-
-def adapter_metric_snapshot(
-    adapter_results: tuple[CandidateActionAdapterResult, ...],
-) -> dict[str, int]:
-    metrics = {
-        "candidate_action_count": sum(len(result.entries) for result in adapter_results),
-        "candidate_overlay_count": len(adapter_results),
-        "candidate_variant_count": len(build_candidate_variants(adapter_results)),
-    }
-    for result in adapter_results:
-        metrics.update(result.metric_json())
-    metrics["candidate_directive_count"] = sum(
-        len(result.directives) for result in adapter_results
-    )
-    return metrics
-
-
 def paired_validation_run_payload(
     *,
     repeat_index: int,
@@ -1927,50 +1665,6 @@ def worst_paired_delta(metric: str, deltas: list[float | int]) -> float | int | 
     if metric_direction(metric, 1) == "regressed":
         return max(deltas)
     return max(deltas, key=lambda value: abs(value))
-
-
-def candidate_regression_config_payload(
-    config: CampaignConfig,
-    *,
-    action_overlay: Path,
-    adapter_results: tuple[CandidateActionAdapterResult, ...],
-    initial_directives: Path | None,
-    runtime_metrics: Path,
-    run_role: str = "candidate",
-    settings: CandidateRegressionSettings | None = None,
-) -> dict[str, Any]:
-    return {
-        "schema_version": 1,
-        "kind": "libafl_bfm_fuzz.harness_candidate_regression_config",
-        "created_at": utc_timestamp(),
-        "run_role": run_role,
-        "target": config.target,
-        "out_dir": str(config.out_dir),
-        "modes": list(config.modes),
-        "rounds": config.rounds,
-        "iters": config.iters,
-        "max_seeds": config.max_seeds,
-        "seed": config.seed,
-        "run_plan_profile": config.run_plan_profile,
-        "campaign_plan_profile": config.campaign_plan_profile,
-        "round_evaluation": config.round_evaluation,
-        "extra_make_vars": list(config.extra_make_vars),
-        "initial_directives": str(initial_directives)
-        if initial_directives is not None
-        else None,
-        "action_overlay": str(action_overlay),
-        "runtime_metrics": str(runtime_metrics),
-        "adapter_artifacts": adapter_artifacts(adapter_results),
-        "adapter_metrics": adapter_metric_snapshot(adapter_results),
-        "validation_settings": settings.to_json() if settings is not None else None,
-        "campaign_manifest_out": str(config.campaign_manifest_out),
-        "campaign_evaluation_out": str(config.campaign_evaluation_out),
-        "safety": {
-            "mainline_modified": False,
-            "application": "sandbox_candidate_regression",
-        },
-    }
-
 
 def build_candidate_variant_ranking(
     *,

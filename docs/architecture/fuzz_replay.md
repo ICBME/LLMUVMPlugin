@@ -93,7 +93,9 @@
   同配置空动作 rerun 的 metrics 作为候选 metric delta 的 baseline；默认真实 CLI 还会
   执行 paired repeated validation，按相同 seed 偏移成对重跑 matched no-op 和 candidate，
   将 repeat mean/worst/variance/flaky 写入 `candidate_paired_validation`，并用均值
-  metrics 与 flaky threshold 做最终证据判断。
+  metrics 与 flaky threshold 做最终证据判断。共享的 candidate regression settings、
+  adapter result、overlay/config payload 现已下沉到 `harness_optimization.candidate_execution`，
+  本模块主要保留 `libafl_bfm_fuzz` 的业务策略、plugin 约束和 orchestrator 装配。
 - `harness_evidence/runtime_actions.py`：safe action runtime consumer，负责加载 sandbox config，
   在 replay driver、scoreboard 和 coverage feedback 业务层消费 `replay_probe`、
   `scoreboard_check`、`coverage_feedback_tuning`，并把执行指标写入

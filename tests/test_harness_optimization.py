@@ -55,6 +55,14 @@ from fuzz_pipeline import (  # noqa: E402
     validate_harness_plugin_registry,
 )
 from harness_optimization.io import read_optional_json  # noqa: E402
+from harness_optimization.candidate_execution import (  # noqa: E402
+    CANDIDATE_ACTION_OVERLAY_KIND as SHARED_CANDIDATE_ACTION_OVERLAY_KIND,
+    CANDIDATE_REGRESSION_CONFIG_KIND as SHARED_CANDIDATE_REGRESSION_CONFIG_KIND,
+    CandidateActionAdapterResult as SharedCandidateActionAdapterResult,
+    CandidateRegressionSettings as SharedCandidateRegressionSettings,
+    build_candidate_action_overlay as build_shared_candidate_action_overlay,
+    candidate_regression_config_payload as build_shared_candidate_regression_config,
+)
 from harness_optimization.runtime import (  # noqa: E402
     FUNCTIONAL_COVERAGE_OUT_ENV as SHARED_LEGACY_FUNCTIONAL_COVERAGE_OUT_ENV,
     REPLAY_CORPUS_ENV as SHARED_LEGACY_REPLAY_CORPUS_ENV,
@@ -64,6 +72,8 @@ from harness_optimization.runtime import (  # noqa: E402
 )
 from fuzz_pipeline.harness_candidate_regression import (  # noqa: E402
     adapt_candidate_actions,
+    build_candidate_action_overlay as build_fuzz_candidate_action_overlay,
+    candidate_regression_config_payload as build_fuzz_candidate_regression_config,
     classify_gap_actionability,
 )
 from fuzz_pipeline.coverage_feedback import (  # noqa: E402
@@ -803,6 +813,106 @@ def test_shared_runtime_legacy_env_constants_are_preserved() -> None:
     assert SHARED_LEGACY_REPLAY_TARGET_CONFIG_ENV == "FUZZ_TARGET_CONFIG"
     assert SHARED_LEGACY_REPLAY_CORPUS_ENV == "LIBAFL_CORPUS"
     assert SHARED_LEGACY_FUNCTIONAL_COVERAGE_OUT_ENV == "UVM_FUNCTIONAL_COVERAGE_OUT"
+
+
+def test_shared_candidate_execution_defaults_use_generic_kinds() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        adapter_result = SharedCandidateActionAdapterResult(
+            action_type="scoreboard_check",
+            artifact_role="candidate_scoreboard_check_config",
+            artifact_path=root / "scoreboard.json",
+            make_var="HARNESS_SCOREBOARD_CHECK_CONFIG",
+            entries=(
+                {
+                    "action_id": "scoreboard-1",
+                    "action_type": "scoreboard_check",
+                    "payload": {"mode": "field_equals", "field": "result.actual"},
+                },
+            ),
+            variants=(
+                {
+                    "variant_id": "action_scoreboard_1",
+                    "variant_type": "single_action",
+                    "action_ids": ["scoreboard-1"],
+                    "action_types": ["scoreboard_check"],
+                    "artifact_paths": [str(root / "scoreboard.json")],
+                    "validation_status": "materialized_not_run",
+                },
+            ),
+        )
+        config = CampaignConfig(
+            target="demo",
+            out_dir=root / "campaign",
+            libafl_manifest=root / "Cargo.toml",
+            modes=("heuristic_feedback",),
+            campaign_manifest_out=root / "campaign_manifest.json",
+            campaign_evaluation_out=root / "campaign_evaluation.json",
+        )
+
+        overlay = build_shared_candidate_action_overlay(
+            {"candidate_id": "candidate-1"},
+            (adapter_result,),
+        )
+        payload = build_shared_candidate_regression_config(
+            config,
+            action_overlay=root / "overlay.json",
+            adapter_results=(adapter_result,),
+            initial_directives=None,
+            runtime_metrics=root / "runtime_metrics.json",
+            settings=SharedCandidateRegressionSettings(),
+        )
+
+    assert overlay["kind"] == SHARED_CANDIDATE_ACTION_OVERLAY_KIND
+    assert overlay["selected_variant_id"] == "combined"
+    assert payload["kind"] == SHARED_CANDIDATE_REGRESSION_CONFIG_KIND
+    assert payload["validation_settings"]["campaign_plan_profile"] == (
+        "campaign_with_evaluation"
+    )
+
+
+def test_fuzz_pipeline_candidate_helpers_keep_business_kinds() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        adapter_result = SharedCandidateActionAdapterResult(
+            action_type="scoreboard_check",
+            artifact_role="candidate_scoreboard_check_config",
+            artifact_path=root / "scoreboard.json",
+            make_var="HARNESS_SCOREBOARD_CHECK_CONFIG",
+            entries=(
+                {
+                    "action_id": "scoreboard-1",
+                    "action_type": "scoreboard_check",
+                    "payload": {"mode": "field_equals", "field": "result.actual"},
+                },
+            ),
+        )
+        config = CampaignConfig(
+            target="demo",
+            out_dir=root / "campaign",
+            libafl_manifest=root / "Cargo.toml",
+            modes=("heuristic_feedback",),
+            campaign_manifest_out=root / "campaign_manifest.json",
+            campaign_evaluation_out=root / "campaign_evaluation.json",
+        )
+
+        overlay = build_fuzz_candidate_action_overlay(
+            {"candidate_id": "candidate-1"},
+            (adapter_result,),
+        )
+        payload = build_fuzz_candidate_regression_config(
+            config,
+            action_overlay=root / "overlay.json",
+            adapter_results=(adapter_result,),
+            initial_directives=None,
+            runtime_metrics=root / "runtime_metrics.json",
+            settings=CandidateRegressionSettings(),
+        )
+
+    assert overlay["kind"] == (
+        "libafl_bfm_fuzz.harness_optimization_candidate_action_overlay"
+    )
+    assert payload["kind"] == "libafl_bfm_fuzz.harness_candidate_regression_config"
 
 
 def test_runtime_action_schema_validation() -> None:
