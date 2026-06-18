@@ -20,11 +20,6 @@ from LLMPlugin import (
     LLMResponse,
     create_backend,
 )
-from rtlagent_bfm.codegen.oracle_ir import (
-    ManifestSummary,
-    input_from_manifest_field,
-    load_manifest_summary,
-)
 from rtlagent_bfm.loader import load_ir
 
 from .claim_extraction import (
@@ -35,6 +30,7 @@ from .claim_extraction import (
     semantic_elements_from_claims,
     semantic_gaps_for_uncovered_claims,
 )
+from .manifest import ManifestSummary, input_from_manifest_field, load_manifest_summary
 from .representation_ast import REPRESENTATION_AST_VERSION, representation_ast_contract
 from .schema import (
     ALLOWED_CLAIM_OBLIGATION_KINDS,

@@ -6,8 +6,7 @@ from pathlib import Path
 import re
 from typing import Any, Iterable
 
-from rtlagent_bfm.codegen.oracle_ir import ManifestSummary, load_manifest_summary
-
+from .manifest import ManifestSummary, load_manifest_summary
 from .representation_ast import representation_requires_human_review
 from .representation_ast_validation import validate_representation
 from .schema import (

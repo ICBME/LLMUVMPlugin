@@ -7,10 +7,10 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
-from rtlagent_bfm.codegen.oracle_ir import load_manifest_summary
 from rtlagent_bfm.loader import load_ir
 
 from .claim_extraction import collect_source_claim_coverage, gap_requires_human_input
+from .manifest import load_manifest_summary
 from .representation_ast import (
     collect_representation_completeness_issues,
     iter_ast_field_refs,

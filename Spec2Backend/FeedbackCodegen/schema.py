@@ -139,6 +139,19 @@ class CodegenEvaluation:
     def failed(cls, *issues: CodegenEvaluationIssue, **metadata: Any) -> "CodegenEvaluation":
         return cls(passed=False, issues=tuple(issues), metadata=metadata)
 
+    @classmethod
+    def from_dict(cls, value: Any) -> "CodegenEvaluation":
+        if not isinstance(value, Mapping):
+            raise FeedbackCodegenError("codegen evaluation must be a mapping")
+        issues = value.get("issues", ())
+        if not isinstance(issues, list | tuple):
+            raise FeedbackCodegenError("codegen evaluation issues must be a list")
+        return cls(
+            passed=bool(value.get("passed", False)),
+            issues=tuple(issues),
+            metadata=value.get("metadata", {}),
+        )
+
     @property
     def blocking_issues(self) -> tuple[CodegenEvaluationIssue, ...]:
         return tuple(issue for issue in self.issues if issue.blocking)

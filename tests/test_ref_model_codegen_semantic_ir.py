@@ -5,7 +5,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from rtlagent_bfm.codegen.cli import main as codegen_cli_main
+try:
+    from rtlagent_bfm.codegen.cli import main as codegen_cli_main
+except ModuleNotFoundError:
+    codegen_cli_main = None
 from LLMPlugin import (
     CallableLLMBackend,
     LLMBackendError,
@@ -28,6 +31,13 @@ from Spec2Backend.Spec2IR import (
 )
 from Spec2Backend.Spec2IR.claim_extraction import extract_spec_claims
 from Spec2Backend.Spec2IR.schema import SourceDocument
+
+
+def _require_legacy_codegen_cli():
+    if codegen_cli_main is None:
+        raise unittest.SkipTest(
+            "legacy rtlagent_bfm.codegen CLI was removed; use Spec2Backend Python APIs"
+        )
 
 
 class TestSemanticSpecIRGeneration(unittest.TestCase):
@@ -676,6 +686,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(normalize_semantic_spec_ir_response({"semantic_spec_ir": expected}), expected)
 
     def test_semantic_spec_ir_cli_extracts_and_validates(self):
+        _require_legacy_codegen_cli()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "sha.toml"
@@ -1389,6 +1400,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
         self.assertFalse(readiness["elements"])
 
     def test_codegen_cli_writes_backend_readiness(self):
+        _require_legacy_codegen_cli()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "notgate.toml"
@@ -1559,6 +1571,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(plan["blocked_items"][0]["reason"], "backend readiness is missing this semantic element")
 
     def test_codegen_cli_writes_ref_model_plan(self):
+        _require_legacy_codegen_cli()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "notgate.toml"
@@ -1605,6 +1618,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(plan["summary"]["rule_count"], 3)
 
     def test_codegen_cli_ref_model_plan_blocks_when_review_required(self):
+        _require_legacy_codegen_cli()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "sha.toml"
@@ -1903,6 +1917,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertIn("provider is unavailable", result["llm_responses"][0]["message"])
 
     def test_semantic_repair_cli_writes_prompt_and_review_without_llm(self):
+        _require_legacy_codegen_cli()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "sha.toml"

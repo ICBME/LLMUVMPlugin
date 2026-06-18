@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import importlib
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 from typing import Any, Mapping
 
@@ -30,8 +31,8 @@ from .schema import (
 )
 
 
-DANGEROUS_IMPORT_ROOTS = {"subprocess", "socket", "requests", "urllib"}
-DANGEROUS_NAMES = {"eval", "exec"}
+DANGEROUS_IMPORT_ROOTS = {"importlib", "subprocess", "socket", "requests", "urllib"}
+DANGEROUS_NAMES = {"__import__", "eval", "exec"}
 DANGEROUS_OS_ATTRS = {"system", "popen", "spawnl", "spawnlp", "spawnv", "spawnvp"}
 DANGEROUS_WRITE_ATTRS = {
     "mkdir",
@@ -52,6 +53,7 @@ class RefModelCodegenTask:
     manifest_path: Path
     spec_paths: tuple[Path, ...] = ()
     golden_cases: tuple[GoldenCase, ...] = ()
+    evaluation_timeout_s: float = 10.0
     name: str = "ref_model_codegen"
     artifact_kind: str = "ref_model"
     target: str = field(init=False)
@@ -73,6 +75,12 @@ class RefModelCodegenTask:
         )
         object.__setattr__(self, "target", target)
 
+    def prepare_input_artifacts(self, output_dir: Path) -> None:
+        write_json(output_dir / "ref_model_plan.json", dict(self.ref_model_plan))
+
+    def input_artifacts(self, output_dir: Path) -> dict[str, Path]:
+        return {"plan": output_dir / "ref_model_plan.json"}
+
     def build_prompt(self, feedback: dict[str, Any] | None = None) -> dict[str, Any]:
         prompt: dict[str, Any] = {
             "task": "Generate a Python reference model plugin from RefModelPlan.",
@@ -83,7 +91,7 @@ class RefModelCodegenTask:
                 "Return strict JSON only.",
                 "Return a complete file bundle under files[].",
                 "Do not modify replay runtime, test infrastructure, or files outside the bundle.",
-                "Generated Python must not use subprocess, socket, requests, urllib, eval, exec, os.system, or file writes.",
+                "Generated Python must not use subprocess, socket, requests, urllib, importlib, __import__, eval, exec, os.system, or file writes.",
                 "The ref model plugin must define predict(case) and return ExpectedResult or {'expected': value}.",
                 "Use case.data for input fields and preserve RefModelPlan rule intent.",
                 "Include metadata.ref_model as 'module:Object' pointing at the generated plugin class.",
@@ -149,6 +157,32 @@ class RefModelCodegenTask:
             )
             return CodegenEvaluation(False, tuple(issues), metadata={"stage": "contract"})
 
+        return evaluate_candidate_ref_model_subprocess(
+            bundle,
+            candidate_dir=candidate_dir,
+            target=self.target,
+            plugin_spec=plugin_spec,
+            golden_cases=self.golden_cases,
+            timeout_s=self.evaluation_timeout_s,
+        )
+
+    def evaluate_in_process(
+        self,
+        bundle: GeneratedFileBundle,
+        candidate_dir: Path,
+    ) -> CodegenEvaluation:
+        """Evaluate in process for the worker and focused tests."""
+
+        plugin_spec = bundle.metadata.get("ref_model")
+        if not isinstance(plugin_spec, str) or not plugin_spec.strip():
+            return CodegenEvaluation.failed(
+                CodegenEvaluationIssue(
+                    stage="contract",
+                    path="metadata.ref_model",
+                    message="bundle metadata must define ref_model plugin spec",
+                ),
+                stage="contract",
+            )
         try:
             plugin = build_candidate_ref_model(
                 plugin_spec,
@@ -156,15 +190,16 @@ class RefModelCodegenTask:
                 target=self.target,
             )
         except Exception as exc:  # noqa: BLE001 - feedback should preserve import failure detail
-            issues.append(
+            return CodegenEvaluation.failed(
                 CodegenEvaluationIssue(
                     stage="contract",
                     path=plugin_spec,
                     message=f"{type(exc).__name__}: {exc}",
-                )
+                ),
+                stage="contract",
             )
-            return CodegenEvaluation(False, tuple(issues), metadata={"stage": "contract"})
 
+        issues: list[CodegenEvaluationIssue] = []
         issues.extend(golden_case_issues(plugin, self.golden_cases))
         return CodegenEvaluation(
             passed=not any(issue.blocking for issue in issues),
@@ -220,15 +255,16 @@ def generate_ref_model_with_feedback(
     golden_cases: tuple[GoldenCase | Mapping[str, Any], ...] = (),
     max_attempts: int = 3,
     model: str | None = None,
+    evaluation_timeout_s: float = 10.0,
 ) -> CodegenResult:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    write_json(output / "ref_model_plan.json", ref_model_plan)
     task = RefModelCodegenTask(
         ref_model_plan=ref_model_plan,
         manifest_path=Path(manifest_path),
         spec_paths=tuple(Path(path) for path in spec_paths),
         golden_cases=tuple(golden_cases),
+        evaluation_timeout_s=evaluation_timeout_s,
     )
     return generate_with_feedback(
         task,
@@ -302,6 +338,94 @@ def build_candidate_ref_model(
             sys.path.remove(str(candidate_dir))
         except ValueError:
             pass
+
+
+def evaluate_candidate_ref_model_subprocess(
+    bundle: GeneratedFileBundle,
+    *,
+    candidate_dir: Path,
+    target: str,
+    plugin_spec: str,
+    golden_cases: tuple[GoldenCase, ...],
+    timeout_s: float,
+) -> CodegenEvaluation:
+    request_dir = candidate_dir.parent
+    request_dir.mkdir(parents=True, exist_ok=True)
+    golden_cases_path = request_dir / "golden_cases.json"
+    report_path = request_dir / "evaluation_worker_report.json"
+    write_json(golden_cases_path, [case.to_json() for case in golden_cases])
+    command = [
+        sys.executable,
+        "-m",
+        "Spec2Backend.FeedbackCodegen.ref_model_eval_worker",
+        "--candidate-dir",
+        str(candidate_dir),
+        "--plugin-spec",
+        plugin_spec,
+        "--target",
+        target,
+        "--golden-cases",
+        str(golden_cases_path),
+        "--out",
+        str(report_path),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=max(0.1, float(timeout_s)),
+        )
+    except subprocess.TimeoutExpired as exc:
+        return CodegenEvaluation.failed(
+            CodegenEvaluationIssue(
+                stage="contract",
+                path=plugin_spec,
+                message=f"evaluation worker timed out after {timeout_s}s",
+            ),
+            stage="worker",
+            execution="subprocess",
+            timeout_s=timeout_s,
+            stderr=str(exc.stderr or ""),
+        )
+    if report_path.exists():
+        try:
+            report = json_load(report_path)
+            evaluation = CodegenEvaluation.from_dict(report)
+        except Exception as exc:  # noqa: BLE001 - malformed worker report should become feedback
+            return CodegenEvaluation.failed(
+                CodegenEvaluationIssue(
+                    stage="worker",
+                    path=str(report_path),
+                    message=f"{type(exc).__name__}: {exc}",
+                ),
+                stage="worker",
+                execution="subprocess",
+            )
+        metadata = dict(evaluation.metadata)
+        metadata.setdefault("execution", "subprocess")
+        metadata.setdefault("worker_returncode", completed.returncode)
+        return CodegenEvaluation(
+            passed=evaluation.passed and completed.returncode == 0,
+            issues=evaluation.issues,
+            metadata=metadata,
+        )
+    return CodegenEvaluation.failed(
+        CodegenEvaluationIssue(
+            stage="worker",
+            path=plugin_spec,
+            message=(
+                "evaluation worker did not produce a report"
+                f" (returncode={completed.returncode})"
+            ),
+        ),
+        stage="worker",
+        execution="subprocess",
+        returncode=completed.returncode,
+        stdout=completed.stdout[-4000:],
+        stderr=completed.stderr[-4000:],
+    )
 
 
 def golden_case_issues(
@@ -410,6 +534,15 @@ def bundle_summary(bundle: GeneratedFileBundle | None) -> dict[str, Any]:
     }
 
 
+def json_load(path: Path) -> dict[str, Any]:
+    import json
+
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise FeedbackCodegenError(f"{path}: expected JSON object")
+    return value
+
+
 def _dangerous_ast_issues(tree: ast.AST, *, path: str) -> tuple[CodegenEvaluationIssue, ...]:
     issues: list[CodegenEvaluationIssue] = []
     for node in ast.walk(tree):
@@ -481,6 +614,7 @@ def _manifest_target(path: Path) -> str:
 __all__ = [
     "RefModelCodegenTask",
     "build_candidate_ref_model",
+    "evaluate_candidate_ref_model_subprocess",
     "generate_ref_model_with_feedback",
     "golden_case_issues",
     "manifest_payload",

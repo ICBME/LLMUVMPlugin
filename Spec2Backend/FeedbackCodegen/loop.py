@@ -29,6 +29,12 @@ class FeedbackCodegenTask(Protocol):
     artifact_kind: str
     target: str
 
+    def prepare_input_artifacts(self, output_dir: Path) -> None:
+        ...
+
+    def input_artifacts(self, output_dir: Path) -> dict[str, Path]:
+        ...
+
     def build_prompt(self, feedback: dict[str, Any] | None = None) -> dict[str, Any]:
         ...
 
@@ -76,6 +82,8 @@ def generate_with_feedback(
     """Run a generic generate/evaluate/feedback loop for one codegen task."""
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
+    task.prepare_input_artifacts(config.output_dir)
+    task_input_artifacts = task.input_artifacts(config.output_dir)
     observation_context = config.observation_context
     topology_out = config.topology_out
     owned_runtime: ObservationRuntime | None = None
@@ -105,7 +113,7 @@ def generate_with_feedback(
             context = PipelineContext(
                 run_id=getattr(observation_context, "run_id", None),
                 artifacts={
-                    "plan": config.output_dir / "ref_model_plan.json",
+                    **task_input_artifacts,
                     "prompt": paths["prompt"],
                     "response": paths["response"],
                     "candidate_bundle": paths["candidate_bundle"],

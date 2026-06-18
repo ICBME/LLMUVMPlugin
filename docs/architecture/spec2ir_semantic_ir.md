@@ -82,8 +82,9 @@ LLMPlugin/
   registry.py             # backend registry
   langchain_backend.py    # OpenAI-compatible LangChain backend
   langgraph_backend.py    # LangGraph wrapper
-rtlagent_bfm/codegen/cli.py
-                          # extract/validate/review/repair semantic IR CLI
+Spec2Backend/FeedbackCodegen/
+  loop.py                 # feedback-driven LLM artifact generation loop
+  ref_model.py            # RefModelPlan -> reference model adapter
 ```
 
 ### `semantic_ir.py`
@@ -629,16 +630,8 @@ readiness report 包含：
   issue 会标为 `needs_human_input`。
 - interface declaration 目前视为 backend metadata；example trace 需要后续 test-vector backend。
 
-CLI:
-
-```bash
-rtlagent-codegen analyze-backend-readiness \
-  --semantic-ir semantic_ir.json \
-  --manifest manifest.toml \
-  --spec spec.md \
-  --require-review-passed \
-  --out backend_readiness.json
-```
+旧 `rtlagent-codegen` CLI 已随 `rtlagent_bfm.codegen` 移除。当前入口是
+`Spec2Backend.BackendReadiness.analyze_backend_readiness()`，调用方负责读写 JSON artifact。
 
 ## RefModelPlan
 
@@ -672,16 +665,9 @@ RefModelPlan expression 使用稳定 JSON 表达，例如 `field`、`signal`、`
 `unary_op`、`binary_op`、`mux`、`concat`、`slice`、`cast`、`clock_event` 和 `state_transition`。
 后续 Python ref model generator 应只消费 RefModelPlan，而不是直接消费 `RepresentationAST`。
 
-CLI:
-
-```bash
-rtlagent-codegen build-ref-model-plan \
-  --semantic-ir semantic_ir.json \
-  --manifest manifest.toml \
-  --spec spec.md \
-  --require-review-passed \
-  --out ref_model_plan.json
-```
+旧 `rtlagent-codegen build-ref-model-plan` CLI 已移除。当前入口是
+`Spec2Backend.RefModelPlan.build_ref_model_plan()`；生成 Python ref model 时再将 plan 交给
+`Spec2Backend.FeedbackCodegen.generate_ref_model_with_feedback()`。
 
 ### `semantic_consistency_review`
 
@@ -748,79 +734,39 @@ set +a
 
 然后执行带 LLM 的抽取或修复命令。
 
-## CLI
+## API Usage
 
-生成 SemanticSpecIR：
+旧 `rtlagent_bfm.codegen.cli` 已移除；当前默认只承诺 Python API。调用方直接使用
+`Spec2Backend.Spec2IR`、`Spec2Backend.BackendReadiness`、`Spec2Backend.RefModelPlan` 和
+`Spec2Backend.FeedbackCodegen` 的函数，并自行管理 JSON artifact 路径。
 
-```sh
-uv run python -m rtlagent_bfm.codegen.cli extract-semantic-ir \
-  --manifest /path/to/target.toml \
-  --spec /path/to/spec.md \
-  --out generated/semantic_ir.json
+```python
+from LLMPlugin import create_backend
+from Spec2Backend.BackendReadiness import analyze_backend_readiness
+from Spec2Backend.RefModelPlan import build_ref_model_plan
+from Spec2Backend.FeedbackCodegen import generate_ref_model_with_feedback
+
+readiness = analyze_backend_readiness(semantic_ir, review=review, require_review_passed=True)
+plan = build_ref_model_plan(semantic_ir, readiness=readiness)
+backend = create_backend("langgraph", model="...")
+result = generate_ref_model_with_feedback(
+    plan,
+    manifest_path="targets/demo.toml",
+    spec_paths=("specs/demo.md",),
+    output_dir="generated/ref_model_codegen/demo",
+    llm_backend=backend,
+    golden_cases=(),
+)
 ```
-
-使用 LLM backend：
-
-```sh
-uv run python -m rtlagent_bfm.codegen.cli extract-semantic-ir \
-  --manifest /path/to/target.toml \
-  --spec /path/to/spec.md \
-  --out generated/semantic_ir.json \
-  --prompt-out generated/semantic_prompt.json \
-  --llm \
-  --llm-backend langgraph \
-  --model "$OPENAI_MODEL"
-```
-
-结构校验：
-
-```sh
-uv run python -m rtlagent_bfm.codegen.cli validate-semantic-ir \
-  --semantic-ir generated/semantic_ir.json \
-  --manifest /path/to/target.toml \
-  --spec /path/to/spec.md \
-  --target my_dut
-```
-
-结构化 review：
-
-```sh
-uv run python -m rtlagent_bfm.codegen.cli review-semantic-ir \
-  --semantic-ir generated/semantic_ir.json \
-  --manifest /path/to/target.toml \
-  --spec /path/to/spec.md \
-  --target my_dut \
-  --out generated/semantic_review.json
-```
-
-repair loop：
-
-```sh
-uv run python -m rtlagent_bfm.codegen.cli repair-semantic-ir \
-  --semantic-ir generated/semantic_ir.json \
-  --manifest /path/to/target.toml \
-  --spec /path/to/spec.md \
-  --target my_dut \
-  --out generated/semantic_ir.repaired.json \
-  --prompt-out generated/semantic_repair_prompt.json \
-  --review-out generated/semantic_repair_review.json \
-  --llm \
-  --llm-backend langgraph \
-  --max-attempts 2
-```
-
-CLI exit code 约定：
-
-- `0`: 通过或修复成功。
-- `1`: validation/review/repair failed。
-- `2`: 需要人工输入或 LLM 不可用。
 
 ## 当前测试覆盖
 
-核心测试位于：
+核心测试分布在：
 
 ```text
+tests/test_feedback_codegen.py
 tests/test_ref_model_codegen_semantic_ir.py
+tests/test_generated_plugin_integration.py
 ```
 
 覆盖能力包括：
@@ -828,7 +774,8 @@ tests/test_ref_model_codegen_semantic_ir.py
 - rule-based SemanticSpecIR 生成。
 - LLM response normalization。
 - LLMPlugin registry、Callable backend 和 LangGraph delegate。
-- CLI extract、validate、review、repair。
+- FeedbackCodegen strict bundle validation、static validation、subprocess contract/golden
+  evaluation 和 retry feedback。
 - source quote/hash traceability。
 - completeness review 重新从 source spec 抽取 claims。
 - blocking formalization status 进入 `needs_human_input`。
@@ -840,13 +787,15 @@ tests/test_ref_model_codegen_semantic_ir.py
 推荐回归命令：
 
 ```sh
-uv run python -m pytest tests/test_ref_model_codegen_semantic_ir.py -q
-uv run python -m pytest tests/test_ref_model_codegen_semantic_ir.py tests/test_codegen_pipeline.py -q
+uv run python -m pytest \
+  tests/test_feedback_codegen.py \
+  tests/test_ref_model_codegen_semantic_ir.py \
+  tests/test_generated_plugin_integration.py \
+  -q
 uv run python -m py_compile \
-  Spec2Backend/Spec2IR/semantic_ir.py \
-  Spec2Backend/Spec2IR/validation_review.py \
-  Spec2Backend/Spec2IR/semantic_repair.py \
-  rtlagent_bfm/codegen/cli.py
+  Spec2Backend/FeedbackCodegen/*.py \
+  Spec2Backend/Spec2IR/*.py \
+  Spec2Backend/__init__.py
 git diff --check
 ```
 

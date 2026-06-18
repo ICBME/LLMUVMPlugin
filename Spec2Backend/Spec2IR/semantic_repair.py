@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from LLMPlugin import CallableLLMBackend, LLMBackend, LLMBackendError, LLMRequest
-from rtlagent_bfm.codegen.oracle_ir import load_manifest_summary
 from rtlagent_bfm.loader import load_ir
 
+from .manifest import load_manifest_summary
 from .semantic_ir import (
     SemanticSpecIRCallable,
     llm_response_to_json,

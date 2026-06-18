@@ -4,6 +4,13 @@ from pathlib import Path
 import tempfile
 import unittest
 
+import pytest
+
+pytest.importorskip(
+    "rtlagent_bfm.codegen",
+    reason="legacy rtlagent_bfm.codegen was removed; use Spec2Backend.FeedbackCodegen",
+)
+
 from rtlagent_bfm.codegen.artifacts import ArtifactBundle, ArtifactBundleError
 from rtlagent_bfm.codegen.cli import main as codegen_cli_main
 from rtlagent_bfm.codegen.manifest import update_manifest_text

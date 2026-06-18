@@ -32,10 +32,10 @@ source bundle / RTL / docs / registers
 系统分为几类主要模块：
 
 - `rtlagent_bfm`：提供 IR、HDL path resolver 和生成 BFM 的运行时访问层。
-- `rtlagent_bfm.codegen`：提供 LLM plugin candidate 写入、OracleIR ref model 生成、
-  校验、提升和 manifest 接入工具。
 - `Spec2Backend/Spec2IR`：提供自然语言 spec 到 `SemanticSpecIR` 的可溯源语义抽取、
   审查和 repair loop。
+- `Spec2Backend/FeedbackCodegen`：提供 RefModelPlan 到 reference model candidate 的
+  反馈闭环 LLM 代码生成、验证和 final artifact promotion。
 - `LLMPlugin`：提供 Spec2IR 和后续生成链路共享的插件化 LLM backend。
 - `libafl_bfm_fuzz`：提供 corpus generation、JSONL validation、pyUVM replay、
   scoreboard/ref-model hook、functional coverage 和 coverage feedback；仓库内的
