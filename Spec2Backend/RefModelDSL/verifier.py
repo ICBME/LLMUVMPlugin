@@ -6,6 +6,8 @@ import hashlib
 from pathlib import Path
 from typing import Any, Mapping
 
+from Spec2Backend.Checks import RefModelIRAdapter, run_checks
+
 from .extern import ExternRegistry, PYTHON_STDLIB_ALLOWLIST
 from .schema import (
     REF_MODEL_IR_SCHEMA_VERSION,
@@ -22,24 +24,7 @@ def verify_ref_model_ir(
     ref_model_plan: Mapping[str, Any] | None = None,
     base_dir: str | Path = ".",
 ) -> VerificationReport:
-    issues: list[VerificationIssue] = []
-    proved_rules: list[str] = []
-    trusted_externs: list[str] = []
     tested_externs: list[str] = []
-    try:
-        import z3  # noqa: F401
-    except Exception as exc:  # noqa: BLE001 - mandatory dependency should become a stable report
-        return VerificationReport(
-            status="failed",
-            verification_level="unverified",
-            issues=(
-                VerificationIssue(
-                    stage="z3",
-                    message=f"z3-solver is required for RefModelIR verification: {exc}",
-                ),
-            ),
-        )
-
     try:
         ir = normalize_ref_model_ir(ref_model_ir)
     except Exception as exc:  # noqa: BLE001
@@ -49,45 +34,36 @@ def verify_ref_model_ir(
             issues=(VerificationIssue(stage="schema", message=str(exc)),),
         )
 
-    issues.extend(_schema_issues(ir))
-    extern_summary = _extern_issues(ir, base_dir=Path(base_dir))
-    issues.extend(extern_summary["issues"])
-    trusted_externs.extend(extern_summary["trusted"])
-    tested_externs.extend(extern_summary["tested"])
+    check_report = run_checks(
+        ir,
+        RefModelIRAdapter(ref_model_plan=ref_model_plan),
+        base_dir=base_dir,
+    )
+    issues = [_verification_issue_from_check(issue) for issue in check_report.issues]
+    tested_externs.extend(check_report.tested_externs)
     if not any(issue.blocking for issue in issues):
-        totality = _z3_totality_and_overlap_issues(ir)
-        issues.extend(totality["issues"])
-        proved_rules.extend(totality["proved_rules"])
-    if ref_model_plan is not None and not any(issue.blocking for issue in issues):
-        equivalence = _z3_plan_equivalence_issues(ir, ref_model_plan)
-        issues.extend(equivalence["issues"])
-        proved_rules.extend(equivalence["proved_rules"])
-        trusted_externs.extend(item for item in equivalence["trusted"] if item not in trusted_externs)
+        for extern_id, spec in dict(ir.get("externs", {})).items():
+            if not isinstance(spec, Mapping):
+                continue
+            if spec.get("kind") == "c_abi" and spec.get("verification_policy") == "formal_model":
+                if _run_c_abi_conformance(str(extern_id), spec, base_dir=Path(base_dir), issues=issues):
+                    tested_externs.append(str(extern_id))
 
     blocked = [issue for issue in issues if issue.blocking]
     if blocked:
         status = "failed"
         level = "unverified"
-    elif trusted_externs and proved_rules:
-        status = "passed"
-        level = "mixed_formal_trusted"
-    elif trusted_externs:
-        status = "passed"
-        level = "trusted_standard"
-    elif proved_rules:
-        status = "passed"
-        level = "formally_verified"
     else:
         status = "passed"
-        level = "schema_verified"
+        level = check_report.verification_level
     return VerificationReport(
         status=status,
         verification_level=level,
-        proved_rules=tuple(dict.fromkeys(proved_rules)),
-        trusted_standard_externs=tuple(dict.fromkeys(trusted_externs)),
+        proved_rules=tuple(dict.fromkeys(check_report.proved_rules)),
+        trusted_standard_externs=tuple(dict.fromkeys(check_report.trusted_standard_externs)),
         tested_externs=tuple(dict.fromkeys(tested_externs)),
         issues=tuple(issues),
-        metadata={"schema_version": ir.get("schema_version"), "target": ir.get("target")},
+        metadata=dict(check_report.metadata),
     )
 
 
@@ -622,6 +598,18 @@ def _issue(
     extern_id: str | None = None,
 ) -> VerificationIssue:
     return VerificationIssue(stage=stage, path=path, message=message, rule_id=rule_id, extern_id=extern_id)
+
+
+def _verification_issue_from_check(value: Any) -> VerificationIssue:
+    return VerificationIssue(
+        stage=str(value.stage),
+        message=str(value.message),
+        severity=str(value.severity),
+        path=str(value.path) if value.path is not None else None,
+        blocking=bool(value.blocking),
+        rule_id=str(value.rule_id) if value.rule_id is not None else None,
+        extern_id=str(value.extern_id) if value.extern_id is not None else None,
+    )
 
 
 __all__ = ["verify_ref_model_ir"]

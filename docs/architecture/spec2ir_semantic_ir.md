@@ -4,7 +4,7 @@
 自然语言 spec -> 结构化、可审查、可溯源的 `SemanticSpecIR` 迁移，并把它作为后续
 ref model、SVA、OracleIR 或其他 backend artifact 的可信语义来源。
 
-当前实现版本为 `SemanticSpecIR` schema v3。
+当前实现版本为 `SemanticSpecIR` schema v6。
 
 ## 设计目标
 
@@ -16,6 +16,8 @@ ref model、SVA、OracleIR 或其他 backend artifact 的可信语义来源。
   `semantic_gaps`。
 - 支持 LLM 抽取、结构化 review、repair loop 和 human-in-loop 语义补全。
 - 在没有 LLM 或 LLM 不可用时，提供保守的 rule-based draft，保持测试和审查链路可运行。
+- 通过 `semantic_context` 提供符号表、类型上下文和局部约束，让后续检查器可以执行
+  类似 Sail 的强类型和局部形式检查。
 
 ## 非目标
 
@@ -73,6 +75,10 @@ SemanticSpecIR -> ArtifactPlan -> RefModelPlan / SVAPlan / HumanReviewPlan
 
 ```text
 Spec2Backend/
+  Checks/
+    model.py              # shared CheckIssue/CheckReport/TypeSpec/Symbol/CheckContext
+    engine.py             # reusable pass runner for schema/reference/type/extern/SMT checks
+    adapters.py           # SemanticSpecIR and RefModelIR adapters
   Spec2IR/
     semantic_ir.py        # prompt、生成、rule-based draft、schema validation、IO
     validation_review.py  # structured review、completeness、traceability、human gate
@@ -96,7 +102,8 @@ Spec2Backend/FeedbackCodegen/
 - 调用插件化 LLM backend 或 legacy callable adapter。
 - 归一化 LLM response，支持 `semantic_spec_ir`、`result`、`output` 等常见包裹形式。
 - 生成 rule-based conservative draft。
-- 校验 schema v3、source hash、quote、claim/evidence/element 引用关系和 manifest 字段引用。
+- 校验 schema v6、source hash、quote、claim/evidence/element 引用关系、manifest 字段引用
+  以及 `semantic_context` 符号/类型一致性。
 - 读写 `SemanticSpecIR` JSON。
 
 ### `validation_review.py`
@@ -117,6 +124,21 @@ Spec2Backend/FeedbackCodegen/
 - 对每次修复结果重新 review。
 - 对 human-blocking 情况停止自动 repair，并返回 `needs_human_input`。
 
+### `Spec2Backend.Checks`
+
+通用检查器提供可复用的 pass pipeline：
+
+- `schema` / `reference`: 检查必填字段、重复符号、field/signal/state/extern 引用。
+- `type`: 推导 RepresentationAST 和 RefModelIR 表达式类型，检查 bool condition、
+  assignment compatibility、compare operand compatibility 和 bitvector width。
+- `extern`: 检查 extern purity、determinism、allowlist、路径、hash 和 formal model policy。
+- `smt`: 只做局部 SMT，覆盖 RefModelIR totality/overlap/equivalence 和
+  SemanticSpecIR 可翻译 predicate 的 satisfiability；temporal/protocol AST 第一版只做
+  结构和类型检查，不做无界 temporal proof。
+
+现有 `validate_semantic_spec_ir()`、`collect_semantic_spec_ir_issues()` 和
+`verify_ref_model_ir()` 仍保留 public API，内部复用 `run_checks()` 和对应 adapter。
+
 ### `LLMPlugin`
 
 主要职责：
@@ -127,13 +149,13 @@ Spec2Backend/FeedbackCodegen/
 - `langgraph` 当前是单节点 wrapper，后续可以扩展为 retry、repair、review routing 或
   human handoff graph，而不改变 Spec2IR 调用接口。
 
-## SemanticSpecIR v5 数据模型
+## SemanticSpecIR v6 数据模型
 
 顶层对象必须是 JSON object，并包含以下关键字段。
 
 ### `schema_version`
 
-当前固定为 `5`。schema 升级时必须同时更新 validator、prompt contract、tests 和本文档。
+当前固定为 `6`。schema 升级时必须同时更新 validator、prompt contract、tests 和本文档。
 
 ### `target`
 
@@ -224,6 +246,35 @@ unknown
 由 manifest field 转换得到的输入摘要。当前用于让 LLM 和 validator 知道哪些字段是合法
 manifest field。`representation.ast` 中的 `field_ref` 节点必须引用已知 manifest
 field。
+
+### `semantic_context`
+
+v6 新增的强语义上下文，顶层必须包含：
+
+- `version`: 当前固定为 `1`。
+- `symbols`: 符号表。每个 symbol 包含 `name`、`kind`、`type`、`direction`、
+  `roles` 和 `source`。manifest fields 必须有对应 symbol；rule-based draft 会从
+  RepresentationAST 中补充 spec-level `signal_ref` / `state_ref`。
+- `constraints`: 可为空；用于记录 domain、invariant 或 assumption，表达式使用
+  RepresentationAST predicate 子集。
+
+类型系统使用最小集合：
+
+```text
+bool
+int
+uint
+bitvector(width)
+enum(choices)
+string(format="hex" 可选)
+bytes
+any
+```
+
+`any` 只作为迁移兜底。候选或已形式化语义依赖 `any` 时，通用 checker 会返回 blocking
+issue。`hex` manifest kind 映射为 `string(format="hex")`。
+
+`semantic_context` 不是 backend readiness，也不记录 ref model/SVA 是否支持某条语义。
 
 ### `evidence`
 

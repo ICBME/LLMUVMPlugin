@@ -62,8 +62,13 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 spec_paths=[spec],
             )
 
-            self.assertEqual(semantic_ir["schema_version"], 5)
+            self.assertEqual(semantic_ir["schema_version"], 6)
             self.assertEqual(semantic_ir["target"], "demo_sha")
+            self.assertEqual(semantic_ir["semantic_context"]["version"], 1)
+            self.assertIn(
+                "mode",
+                {symbol["name"] for symbol in semantic_ir["semantic_context"]["symbols"]},
+            )
             self.assertEqual(semantic_ir["sources"][0]["content_hash"], hashlib.sha256(spec.read_bytes()).hexdigest())
             self.assertEqual([claim["id"] for claim in semantic_ir["spec_claims"]], ["claim1"])
             claim = semantic_ir["spec_claims"][0]
@@ -937,6 +942,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             ]
             semantic_ir["semantic_gaps"] = []
             semantic_ir["open_questions"] = []
+            _add_semantic_symbol(semantic_ir, "y", typ={"kind": "int"}, roles=["output"])
 
             review = review_semantic_spec_ir(
                 semantic_ir,
@@ -988,6 +994,9 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                     },
                 },
             }
+            _add_semantic_symbol(semantic_ir, "clk", typ={"kind": "bool"}, roles=["clock"])
+            _add_semantic_symbol(semantic_ir, "digest_complete", typ={"kind": "bool"}, roles=["event"])
+            _add_semantic_symbol(semantic_ir, "done", typ={"kind": "bool"}, roles=["event"])
 
             review = review_semantic_spec_ir(
                 semantic_ir,
@@ -1986,6 +1995,28 @@ def _mark_first_latency_element_complete(semantic_ir):
             },
         },
     }
+
+
+def _add_semantic_symbol(semantic_ir, name, *, typ, roles):
+    context = semantic_ir.setdefault("semantic_context", {"version": 1, "symbols": [], "constraints": []})
+    symbols = context.setdefault("symbols", [])
+    for symbol in symbols:
+        if symbol.get("name") == name:
+            existing_roles = set(symbol.get("roles", []))
+            existing_roles.update(roles)
+            symbol["roles"] = sorted(existing_roles)
+            symbol["type"] = typ
+            return
+    symbols.append(
+        {
+            "name": name,
+            "kind": "signal",
+            "type": typ,
+            "direction": "internal",
+            "roles": list(roles),
+            "source": "test",
+        }
+    )
 
 
 def _sha_manifest():

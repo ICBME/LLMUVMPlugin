@@ -39,12 +39,12 @@ LLM strict JSON RefModelIR
 attempt_XXX/artifacts/ref_model_ir.json
       |
       v
-schema/type/extern/Z3 verification
+generic CheckReport schema/type/extern/Z3 verification
       |
       v
 deterministic UVM wrapper + golden evaluation
       |
-      +--> structured feedback -> next attempt
+      +--> structured verification feedback -> next attempt
       |
       v
 output_dir/final
@@ -117,6 +117,10 @@ IR-first 路径要求 LLM 返回：
 
 更多 schema、extern policy 和 verification level 见
 [RefModelIR/DSL 架构](ref_model_dsl.md)。
+
+RefModelIR-first 路径的验证内部复用 `Spec2Backend.Checks`。反馈环路消费的仍是兼容
+`VerificationReport` JSON，但其 blocking issues 来自统一 `CheckReport` pass，包括
+schema/reference/type/extern/SMT 检查。
 
 ## Legacy Bundle Contract
 

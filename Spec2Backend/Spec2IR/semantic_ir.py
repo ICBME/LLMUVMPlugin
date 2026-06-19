@@ -174,12 +174,15 @@ def generate_rule_based_semantic_spec_ir(
         or any(gap_requires_human_input(gap) for gap in semantic_gaps)
         or has_blocking_semantic_element
     ) else "draft"
+    semantic_context = semantic_context_from_manifest(manifest)
+    augment_semantic_context_from_elements(semantic_context, semantic_elements)
     return {
         "schema_version": SEMANTIC_SPEC_IR_SCHEMA_VERSION,
         "target": target,
         "sources": [document.payload() for document in documents],
         "spec_claims": spec_claims,
         "inputs": inputs,
+        "semantic_context": semantic_context,
         "semantic_elements": semantic_elements,
         "evidence": evidence,
         "open_questions": open_questions,
@@ -245,6 +248,9 @@ def build_semantic_spec_ir_prompt(
             "Every semantic element must cite at least one evidence id from the original spec text.",
             "Evidence must include source_id, line_start, line_end, and a short quote copied from those lines.",
             "Represent spec semantics independent of backend support; do not decide whether refmodel, SVA, or OracleIR can lower it.",
+            "Return SemanticSpecIR schema v6 with semantic_context.version=1, semantic_context.symbols, and semantic_context.constraints.",
+            "Every manifest field and every inputs[] entry must have one semantic_context.symbols[] entry with name, kind, type, direction, roles, and source.",
+            "Use type kinds bool, int, uint, bitvector, enum, string, bytes, or any; use any only when the spec truly lacks enough information and mark dependent candidate semantics for review.",
             "Use strict RepresentationAST v2 in semantic_elements[].representation; text is only review aid, ast is the semantic source of truth.",
             "RepresentationAST must include ast_version, kind, text, and ast; do not use legacy free-form type/fields representation.",
             "Prefer typed clock_reset_context, latency_rule, handshake_rule, and signal_binding nodes over text_expr for temporal and protocol semantics.",
@@ -363,6 +369,7 @@ def semantic_spec_ir_contract() -> dict[str, Any]:
             "sources",
             "spec_claims",
             "inputs",
+            "semantic_context",
             "semantic_elements",
             "evidence",
             "open_questions",
@@ -419,6 +426,31 @@ def semantic_spec_ir_contract() -> dict[str, Any]:
             "evidence": ["ev1"],
             "claim_ids": ["claim1"],
         },
+        "semantic_context_schema": {
+            "version": 1,
+            "symbols": [
+                {
+                    "name": "manifest field, signal, state, or protocol entity name",
+                    "kind": "field | signal | state | clock | reset | protocol_entity",
+                    "type": {
+                        "kind": "bool | int | uint | bitvector | enum | string | bytes | any",
+                        "width": "required positive integer for bitvector when known",
+                        "choices": "required list for enum when known",
+                        "format": "optional string format such as hex",
+                    },
+                    "direction": "input | output | internal | inout | unknown",
+                    "roles": ["input, output, clock, reset, state, valid, ready, payload, control, or unknown"],
+                    "source": "manifest, design_ir, spec, or human_review",
+                }
+            ],
+            "constraints": [
+                {
+                    "id": "stable constraint id",
+                    "kind": "domain | invariant | assumption",
+                    "expr": "RepresentationAST predicate node",
+                }
+            ],
+        },
         "representation_ast_schema": representation_ast_contract(),
         "semantic_gap_schema": {
             "id": "stable gap id such as gap1",
@@ -446,3 +478,192 @@ def manifest_summary_payload(manifest: ManifestSummary) -> dict[str, Any]:
             for field in manifest.fields
         ],
     }
+
+
+def semantic_context_from_manifest(manifest: ManifestSummary) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "symbols": [
+            {
+                "name": field.name,
+                "kind": "field",
+                "type": semantic_type_from_manifest_field(field),
+                "direction": "input",
+                "roles": ["input"],
+                "source": "manifest",
+            }
+            for field in manifest.fields
+        ],
+        "constraints": [],
+    }
+
+
+def semantic_type_from_manifest_field(field: Any) -> dict[str, Any]:
+    kind = str(getattr(field, "kind", "any") or "any")
+    if kind in {"bool", "boolean"}:
+        return {"kind": "bool"}
+    if kind == "enum":
+        result: dict[str, Any] = {"kind": "enum"}
+        choices = list(getattr(field, "choices", ()) or ())
+        if choices:
+            result["choices"] = choices
+        return result
+    if kind in {"int", "integer"}:
+        return {"kind": "int"}
+    if kind in {"uint", "unsigned"}:
+        return {"kind": "uint"}
+    if kind in {"bitvector", "bits"}:
+        result = {"kind": "bitvector"}
+        width = getattr(field, "width", None)
+        if isinstance(width, int) and width > 0:
+            result["width"] = width
+        return result
+    if kind == "hex":
+        result = {"kind": "string", "format": "hex"}
+        hex_len = getattr(field, "hex_len", None)
+        if isinstance(hex_len, int) and hex_len > 0:
+            result["length"] = hex_len
+        return result
+    if kind in {"string", "bytes"}:
+        return {"kind": kind}
+    return {"kind": "any"}
+
+
+def augment_semantic_context_from_elements(
+    semantic_context: dict[str, Any],
+    semantic_elements: list[dict[str, Any]],
+) -> None:
+    symbols = semantic_context.setdefault("symbols", [])
+    if not isinstance(symbols, list):
+        return
+    by_name = {
+        str(item.get("name")): item
+        for item in symbols
+        if isinstance(item, dict) and item.get("name")
+    }
+    for element in semantic_elements:
+        if not isinstance(element, dict):
+            continue
+        representation = element.get("representation")
+        if not isinstance(representation, dict):
+            continue
+        ast = representation.get("ast")
+        if isinstance(ast, dict):
+            for name, hint in collect_ast_symbol_hints(ast).items():
+                if name in by_name:
+                    merge_symbol_hint(by_name[name], hint)
+                    continue
+                symbol = {
+                    "name": name,
+                    "kind": hint.get("kind", "signal"),
+                    "type": hint.get("type", {"kind": "any"}),
+                    "direction": hint.get("direction", "internal"),
+                    "roles": sorted(hint.get("roles", {"unknown"})),
+                    "source": "spec",
+                }
+                symbols.append(symbol)
+                by_name[name] = symbol
+
+
+def collect_ast_symbol_hints(ast: Any) -> dict[str, dict[str, Any]]:
+    hints: dict[str, dict[str, Any]] = {}
+
+    def visit(node: Any, *, role: str | None = None, target_type: dict[str, Any] | None = None) -> None:
+        if not isinstance(node, dict):
+            return
+        node_kind = str(node.get("node") or "")
+        if node_kind == "signal_ref":
+            name = str(node.get("name") or "")
+            if name:
+                add_hint(
+                    name,
+                    {
+                        "kind": "signal",
+                        "type": target_type or ({"kind": "bool"} if role in {"clock", "reset", "valid", "ready", "event"} else {"kind": "any"}),
+                        "roles": {role or "unknown"},
+                    },
+                )
+            return
+        if node_kind == "state_ref":
+            name = str(node.get("name") or "")
+            if name:
+                add_hint(name, {"kind": "state", "type": target_type or {"kind": "any"}, "roles": {"state"}})
+            return
+        if node_kind == "field_ref":
+            return
+        if node_kind in {"assignment", "constant_relation"}:
+            visit(node.get("target"), target_type=literal_type_hint(node.get("value")))
+            visit(node.get("value"))
+            return
+        if node_kind == "conditional_assignment":
+            visit(node.get("condition"), role="condition")
+            visit(node.get("target"), target_type=literal_type_hint(node.get("value")))
+            visit(node.get("value"))
+            return
+        if node_kind == "clock_event":
+            visit(node.get("signal"), role="clock", target_type={"kind": "bool"})
+            return
+        if node_kind in {"rose", "fell", "stable", "past"}:
+            visit(node.get("signal"), role="event", target_type={"kind": "bool"})
+            return
+        if node_kind == "handshake_rule":
+            visit(node.get("valid"), role="valid", target_type={"kind": "bool"})
+            visit(node.get("ready"), role="ready", target_type={"kind": "bool"})
+            for payload in node.get("payload", []) if isinstance(node.get("payload"), list) else []:
+                visit(payload, role="payload")
+            return
+        if node_kind == "signal_binding":
+            binding_role = str(node.get("role") or role or "unknown")
+            visit(node.get("signal"), role=binding_role)
+            return
+        for value in node.values():
+            if isinstance(value, dict):
+                visit(value, role=role)
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item, role=role)
+
+    def add_hint(name: str, hint: dict[str, Any]) -> None:
+        current = hints.setdefault(
+            name,
+            {
+                "kind": hint.get("kind", "signal"),
+                "type": hint.get("type", {"kind": "any"}),
+                "roles": set(),
+                "direction": "internal",
+            },
+        )
+        if current.get("type", {}).get("kind") == "any" and hint.get("type", {}).get("kind") != "any":
+            current["type"] = hint["type"]
+        current.setdefault("roles", set()).update(hint.get("roles", set()))
+
+    visit(ast)
+    return hints
+
+
+def literal_type_hint(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    if value.get("node") != "literal":
+        return None
+    literal = value.get("value")
+    if isinstance(literal, bool):
+        return {"kind": "bool"}
+    if isinstance(literal, int):
+        width = value.get("width")
+        if isinstance(width, int) and width > 0:
+            return {"kind": "bitvector", "width": width}
+        return {"kind": "int"}
+    if isinstance(literal, str):
+        return {"kind": "string"}
+    return None
+
+
+def merge_symbol_hint(symbol: dict[str, Any], hint: dict[str, Any]) -> None:
+    roles = set(symbol.get("roles", []) if isinstance(symbol.get("roles"), list) else [])
+    roles.update(str(role) for role in hint.get("roles", set()))
+    symbol["roles"] = sorted(role for role in roles if role)
+    current_type = symbol.get("type") if isinstance(symbol.get("type"), dict) else {"kind": "any"}
+    hint_type = hint.get("type") if isinstance(hint.get("type"), dict) else {"kind": "any"}
+    if current_type.get("kind") == "any" and hint_type.get("kind") != "any":
+        symbol["type"] = hint_type

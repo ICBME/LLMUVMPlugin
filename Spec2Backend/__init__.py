@@ -27,6 +27,13 @@ from .FeedbackCodegen import (
     generate_ref_model_with_feedback,
     generate_with_feedback,
 )
+from .Checks import (
+    CheckIssue,
+    CheckReport,
+    RefModelIRAdapter,
+    SemanticSpecIRAdapter,
+    run_checks,
+)
 from .RefModelDSL import (
     REF_MODEL_IR_SCHEMA_VERSION,
     RefModelDSLError,
@@ -46,6 +53,8 @@ __all__ = [
     "CodegenEvaluationIssue",
     "CodegenLoopConfig",
     "CodegenResult",
+    "CheckIssue",
+    "CheckReport",
     "FeedbackCodegenError",
     "GeneratedFile",
     "GeneratedFileBundle",
@@ -53,8 +62,10 @@ __all__ = [
     "RefModelCodegenTask",
     "RefModelDSLError",
     "RefModelIRCodegenTask",
+    "RefModelIRAdapter",
     "RefModelInterpreter",
     "RefModelPlanError",
+    "SemanticSpecIRAdapter",
     "VerificationReport",
     "analyze_backend_readiness",
     "build_ref_model_plan",
@@ -63,6 +74,7 @@ __all__ = [
     "generate_with_feedback",
     "load_backend_readiness",
     "load_ref_model_plan",
+    "run_checks",
     "verify_ref_model_ir",
     "write_backend_readiness",
     "write_ref_model_plan",

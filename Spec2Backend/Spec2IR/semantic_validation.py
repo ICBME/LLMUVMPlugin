@@ -6,6 +6,8 @@ from pathlib import Path
 import re
 from typing import Any, Iterable
 
+from Spec2Backend.Checks import SemanticSpecIRAdapter, run_checks
+
 from .manifest import ManifestSummary, load_manifest_summary
 from .representation_ast import representation_requires_human_review
 from .representation_ast_validation import validate_representation
@@ -103,6 +105,17 @@ def collect_semantic_spec_ir_issues(
     validate_string_list(ir.get("assumptions", []), "assumptions", issues)
     validate_review(ir.get("review"), require_reviewed, issues)
     validate_semantic_gaps(ir.get("semantic_gaps", []), claim_ids, issues)
+    for check_issue in run_checks(
+        ir,
+        SemanticSpecIRAdapter(manifest_fields=manifest_fields),
+        passes=("schema", "reference", "type", "smt"),
+    ).issues:
+        issues.append(
+            SemanticSpecIRIssue(
+                check_issue.path or "$",
+                f"{check_issue.stage}: {check_issue.message}",
+            )
+        )
     semantic_gaps = ir.get("semantic_gaps", [])
     if not ir.get("semantic_elements") and not semantic_gaps and not ir.get("open_questions"):
         issues.append(

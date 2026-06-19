@@ -16,6 +16,10 @@ RefModelIR JSON”，再由框架确定性生成 UVM plugin wrapper。
 ## 目录
 
 ```text
+Spec2Backend/Checks/
+  model.py        # shared check issue/report/type/symbol models
+  engine.py       # generic schema/reference/type/extern/SMT pass runner
+  adapters.py     # RefModelIRAdapter and SemanticSpecIRAdapter
 Spec2Backend/RefModelDSL/
   schema.py        # RefModelIR schema helpers and verification report objects
   interpreter.py   # DSL interpreter used by generated wrapper
@@ -164,7 +168,10 @@ schema/verifier 要求：
 
 ## Verifier
 
-`verify_ref_model_ir()` 输出稳定 JSON report：
+`verify_ref_model_ir()` 输出稳定 JSON report，并保持旧 public API。内部通过
+`Spec2Backend.Checks.RefModelIRAdapter` 调用通用 checker，再把 `CheckReport` 映射回
+`VerificationReport`；C ABI runtime conformance 仍在 RefModelDSL 侧执行，因为它依赖
+`ExternRegistry`。
 
 ```json
 {
@@ -179,7 +186,8 @@ schema/verifier 要求：
 
 验证层包括：
 
-- schema/type/reference 检查：target、inputs、outputs、rules、field/extern 引用。
+- schema/reference/type 检查：target、inputs、outputs、rules、field/state/extern 引用、
+  bool condition、assignment compatibility 和 bitvector width。
 - rule totality：每个 output 在所有输入域上必须至少被一条 rule 赋值。
 - rule overlap：同一 output 的多条 rule 不能在同一输入条件下同时赋值。
 - extern policy：allowlist、路径、hash、formal model、conformance。
