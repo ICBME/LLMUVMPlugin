@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+import importlib
 import json
 from pathlib import Path
+import sys
 from typing import Any, Mapping
 
 from fuzz_bfm.target_config import TargetConfig
@@ -446,10 +448,32 @@ def _build_generated_plugin(
 ) -> Any:
     from fuzz_bfm.plugin_loader import build_plugin
 
+    _prepare_generated_plugin_import(spec)
     kwargs = {"target": target, "config": config}
     if role == "scoreboard" and comparator is not None:
         kwargs["comparator"] = comparator
     return build_plugin(spec, **kwargs)
+
+
+def _prepare_generated_plugin_import(spec: str) -> None:
+    """Refresh top-level generated package paths before validating a bundle."""
+
+    module_name, _, _ = spec.partition(":")
+    package_name = module_name.split(".", 1)[0]
+    importlib.invalidate_caches()
+    package = sys.modules.get(package_name)
+    if package is None or not hasattr(package, "__path__"):
+        return
+    package_paths = list(getattr(package, "__path__", ()))
+    for search_path in sys.path:
+        candidate = Path(search_path) / package_name
+        if (candidate / "__init__.py").exists():
+            candidate_text = str(candidate)
+            if candidate_text not in package_paths:
+                package_paths.insert(0, candidate_text)
+    package.__path__ = package_paths
+    if package_name == "generated":
+        sys.modules.pop(module_name, None)
 
 
 def _plugin_spec_error(spec: Any) -> str | None:

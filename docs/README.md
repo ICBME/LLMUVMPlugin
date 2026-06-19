@@ -9,18 +9,19 @@
 2. [IR 与运行时架构](architecture/ir_runtime.md)
 3. [Spec2IR SemanticSpecIR 设计](architecture/spec2ir_semantic_ir.md)
 4. [LLM Plugin Codegen 架构](architecture/llm_plugin_codegen.md)
-5. [Reference Model OracleIR 评估](architecture/ref_model_oracle_ir_eval.md)
-6. [Fuzz/Replay 架构](architecture/fuzz_replay.md)
-7. [Connector Observability 架构](architecture/connector_observability.md)
-8. [UVM-Fuzz Connector 迁移计划](architecture/uvm_fuzz_connector_migration_plan.md)
-9. [Coverage Feedback 设计](architecture/coverage_feedback_design.md)
-10. [Coverage Feedback 评估](architecture/coverage_feedback_eval.md)
-11. [Target Manifest 参考](reference/target_manifest.md)
-12. [插件契约](reference/plugin_contracts.md)
-13. [Corpus 与 Mutation Directives](reference/corpus_directives.md)
-14. [接入新 DUT 指南](guides/add_new_dut.md)
-15. [Secworks 示例闭环](guides/secworks_examples.md)
-16. [设计约束](guides/design_constraints.md)
+5. [RefModelIR/DSL 架构](architecture/ref_model_dsl.md)
+6. [Reference Model OracleIR 评估](architecture/ref_model_oracle_ir_eval.md)
+7. [Fuzz/Replay 架构](architecture/fuzz_replay.md)
+8. [Connector Observability 架构](architecture/connector_observability.md)
+9. [UVM-Fuzz Connector 迁移计划](architecture/uvm_fuzz_connector_migration_plan.md)
+10. [Coverage Feedback 设计](architecture/coverage_feedback_design.md)
+11. [Coverage Feedback 评估](architecture/coverage_feedback_eval.md)
+12. [Target Manifest 参考](reference/target_manifest.md)
+13. [插件契约](reference/plugin_contracts.md)
+14. [Corpus 与 Mutation Directives](reference/corpus_directives.md)
+15. [接入新 DUT 指南](guides/add_new_dut.md)
+16. [Secworks 示例闭环](guides/secworks_examples.md)
+17. [设计约束](guides/design_constraints.md)
 
 ## 文档层次
 
@@ -51,6 +52,7 @@
   harness 主链路执行结果。
 - LLM 生成的 ref model / scoreboard 和 OracleIR 生成的 ref model 都先作为 candidate
   artifact，经验证后才能提升为 manifest 指向的 final artifact。
+- Ref model 的可信推荐路径是 RefModelIR/DSL：LLM 生成 IR，框架验证并生成 wrapper。
 
 ## Import Guidance
 

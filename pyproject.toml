@@ -12,6 +12,7 @@ dependencies = [
     "PySocks>=1.7.1",
     "pyuvm>=4.0.1",
     "socksio>=1.0.0",
+    "z3-solver>=4.13.0",
 ]
 
 [build-system]

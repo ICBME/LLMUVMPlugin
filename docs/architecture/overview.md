@@ -36,6 +36,8 @@ source bundle / RTL / docs / registers
   审查和 repair loop。
 - `Spec2Backend/FeedbackCodegen`：提供 RefModelPlan 到 reference model candidate 的
   反馈闭环 LLM 代码生成、验证和 final artifact promotion。
+- `Spec2Backend/RefModelDSL`：提供 RefModelPlan 到可验证 RefModelIR 的反馈闭环生成、
+  DSL 解释执行、Z3 verification、外部调用策略和 deterministic UVM wrapper 生成。
 - `LLMPlugin`：提供 Spec2IR 和后续生成链路共享的插件化 LLM backend。
 - `libafl_bfm_fuzz`：提供 corpus generation、JSONL validation、pyUVM replay、
   scoreboard/ref-model hook、functional coverage 和 coverage feedback；仓库内的
@@ -150,7 +152,10 @@ connector 事件、monitor 汇总和 topology JSON 的格式见
 - Spec2IR 的 `SemanticSpecIR` 描述自然语言规格的可溯源语义，是 ref model、SVA 或
   其他 backend artifact planning 之前的可信审查层；它不记录 backend support 判断。
 - LLM 生成的 ref model / scoreboard 必须先通过 candidate validation，再作为
-  final plugin 由 manifest 接入。
+  final plugin 由 manifest 接入；ref model 的可信推荐路径是先生成 RefModelIR/DSL，
+  再由框架生成 wrapper。
+- RefModelIR/DSL 对可形式化规则使用 Z3 验证；标准参考实现通过
+  `trusted_standard` provenance 和 conformance 接入，不宣称 SMT 证明标准库本身。
 - OracleIR 生成的 ref model 也复用同一条 candidate/final validation 链路；当前
   VerilogEval smoke 测试覆盖 stateless 小规模组合逻辑，详见
   [Reference Model OracleIR 评估](ref_model_oracle_ir_eval.md)。

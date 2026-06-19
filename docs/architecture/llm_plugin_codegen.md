@@ -4,9 +4,14 @@
 实现已经移除；新的实现目录是 `Spec2Backend/FeedbackCodegen`，首版只提供
 Python API，不提供 CLI。
 
+可信推荐路径是 `Spec2Backend/RefModelDSL` 的 IR-first 入口：LLM 生成
+`RefModelIR`，框架再确定性生成 UVM wrapper 并用 Z3 验证可形式化规则。本文档中的
+Python file-bundle 路径仍保留为 legacy/fallback。
+
 ## 目标
 
-- 从 `RefModelPlan` 生成 reference model Python plugin candidate。
+- 从 `RefModelPlan` 生成 reference model candidate。
+- 推荐模式生成可验证 `RefModelIR`，legacy 模式生成 Python plugin file bundle。
 - 每轮生成都经过 candidate 目录、静态检查、插件契约检查和 golden case 检查。
 - 将失败诊断压缩成结构化 feedback，进入下一轮 LLM prompt。
 - 使用 `ConnectGraph`/`PipelineOrchestrator` 记录 prompt、LLM response、candidate、
@@ -25,19 +30,19 @@ BackendReadiness
 RefModelPlan
       |
       v
-Spec2Backend.FeedbackCodegen prompt
+Spec2Backend.RefModelDSL prompt
       |
       v
-LLM strict JSON file bundle
+LLM strict JSON RefModelIR
       |
       v
-attempt_XXX/artifacts
+attempt_XXX/artifacts/ref_model_ir.json
       |
       v
-static validation
+schema/type/extern/Z3 verification
       |
       v
-subprocess contract + golden evaluation
+deterministic UVM wrapper + golden evaluation
       |
       +--> structured feedback -> next attempt
       |
@@ -49,11 +54,11 @@ output_dir/final
 
 ```python
 from LLMPlugin import create_backend
-from Spec2Backend.FeedbackCodegen import generate_ref_model_with_feedback
+from Spec2Backend.RefModelDSL import generate_ref_model_ir_with_feedback
 
 backend = create_backend("langgraph", model="...")
 
-result = generate_ref_model_with_feedback(
+result = generate_ref_model_ir_with_feedback(
     ref_model_plan,
     manifest_path="targets/demo.toml",
     spec_paths=("specs/demo.md",),
@@ -79,7 +84,41 @@ result = generate_ref_model_with_feedback(
 - `invalid_bundle`
 - `max_attempts_exhausted`
 
-## Bundle Contract
+## RefModelIR Contract
+
+IR-first 路径要求 LLM 返回：
+
+```json
+{
+  "ref_model_ir": {
+    "schema_version": 1,
+    "target": "demo",
+    "inputs": {"value": {"type": "int"}},
+    "outputs": {"expected": {"type": "int"}},
+    "rules": [
+      {
+        "id": "ref_rule_1",
+        "source_rule_id": "ref_rule_1",
+        "assign": {"expected": {"field": "value"}}
+      }
+    ],
+    "externs": {},
+    "verification": {"required": true},
+    "metadata": {}
+  },
+  "metadata": {},
+  "assumptions": []
+}
+```
+
+成功 promotion 会写出 `final/ref_model_ir.json`、`final/verification_report.json`、
+`final/generated/<target>_dsl_ref_model.py` 和 `final/bundle.json`。`bundle.json`
+中的 `metadata.ref_model` 由框架生成，不信任 LLM 覆盖。
+
+更多 schema、extern policy 和 verification level 见
+[RefModelIR/DSL 架构](ref_model_dsl.md)。
+
+## Legacy Bundle Contract
 
 LLM 返回 strict JSON：
 
@@ -108,9 +147,9 @@ LLM 返回 strict JSON：
 - 生成代码不能使用 `subprocess`、`socket`、`requests`、`urllib`、`eval`、`exec`、
   `__import__`、`importlib`、`os.system` 或文件写入 API。
 
-## Evaluation
+## Legacy Evaluation
 
-首版 evaluation 分两层：
+Python file-bundle fallback 的 evaluation 分两层：
 
 - 主进程静态检查：`ast.parse`、危险 import/API、明显路径写入。
 - 子进程 contract/golden 检查：临时把 candidate artifact 目录加入 `sys.path`，
@@ -150,7 +189,7 @@ Evaluation issue 使用稳定 JSON：
 
 ## 当前边界
 
-- 首版只实现 ref model adapter。
+- 首版只实现 ref model adapter；可信推荐入口是 RefModelIR/DSL。
 - OracleIR、scoreboard、SVA、test-vector backend 后续通过同一个 task protocol 接入。
 - 不自动修改 manifest；调用方负责 review final artifact 并决定是否接入 replay。
 - 不默认运行 replay/simulation；需要时应新增 evaluator plugin。

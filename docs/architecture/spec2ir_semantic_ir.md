@@ -635,9 +635,9 @@ readiness report 包含：
 
 ## RefModelPlan
 
-`Spec2Backend/RefModelPlan` 是 `SemanticSpecIR` 到 ref model 代码生成之间的计划层。它只消费
-`ref_model` backend ready 的 semantic elements，不处理 SVA-only elements，也不直接生成 Python
-插件。
+`Spec2Backend/RefModelPlan` 是 `SemanticSpecIR` 到 ref model 后端之间的计划层。它只消费
+`ref_model` backend ready 的 semantic elements，不处理 SVA-only elements，也不直接生成
+Python 插件或 RefModelIR。
 
 `build_ref_model_plan()` 输入：
 
@@ -663,11 +663,20 @@ plan report 包含：
 
 RefModelPlan expression 使用稳定 JSON 表达，例如 `field`、`signal`、`literal`、`compare`、
 `unary_op`、`binary_op`、`mux`、`concat`、`slice`、`cast`、`clock_event` 和 `state_transition`。
-后续 Python ref model generator 应只消费 RefModelPlan，而不是直接消费 `RepresentationAST`。
+后续 ref model backend 应只消费 RefModelPlan，而不是直接消费 `RepresentationAST`。
 
 旧 `rtlagent-codegen build-ref-model-plan` CLI 已移除。当前入口是
-`Spec2Backend.RefModelPlan.build_ref_model_plan()`；生成 Python ref model 时再将 plan 交给
-`Spec2Backend.FeedbackCodegen.generate_ref_model_with_feedback()`。
+`Spec2Backend.RefModelPlan.build_ref_model_plan()`。
+
+推荐的可信生成路径是将 plan 交给
+`Spec2Backend.RefModelDSL.generate_ref_model_ir_with_feedback()`：
+
+- LLM 生成 `RefModelIR` JSON。
+- `Spec2Backend/RefModelDSL` 执行 schema/type/extern/Z3 verification。
+- 框架确定性生成 UVM wrapper，并通过现有 `GeneratedPluginBundle` / manifest overlay 接入。
+
+`Spec2Backend.FeedbackCodegen.generate_ref_model_with_feedback()` 仍可作为 legacy Python
+file-bundle fallback，但它不提供 IR-level formal proof。
 
 ### `semantic_consistency_review`
 
