@@ -6,6 +6,8 @@ import hashlib
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
+from Spec2Backend.Proof import run_proof_backend
+
 from .expression import ExpressionChecker, ref_name, z3_condition, z3_constraints, z3_env, z3_expr
 from .model import CheckIssue, CheckReport, issue, type_compatible
 
@@ -32,12 +34,15 @@ def run_checks(
     *,
     passes: Iterable[str] | None = None,
     base_dir: str | Path = ".",
+    proof_backend: str | None = None,
+    proof_options: Mapping[str, Any] | None = None,
 ) -> CheckReport:
     selected = tuple(passes or DEFAULT_PASSES)
     issues: list[CheckIssue] = []
     proved_rules: list[str] = []
     trusted_externs: list[str] = []
     tested_externs: list[str] = []
+    proof_metadata: dict[str, Any] | None = None
 
     if "schema" in selected:
         issues.extend(adapter.schema_issues(subject, base_dir=Path(base_dir)))
@@ -118,6 +123,16 @@ def run_checks(
                 proved_rules.extend(smt_result["proved_rules"])
                 trusted_externs.extend(item for item in smt_result["trusted"] if item not in trusted_externs)
 
+        if "proof" in selected and not any(item.blocking for item in issues):
+            proof_result = run_proof_backend(
+                context,
+                proof_backend=proof_backend,
+                proof_options=proof_options,
+            )
+            issues.extend(proof_result.issues)
+            proved_rules.extend(proof_result.proved_rules)
+            proof_metadata = dict(proof_result.metadata)
+
     if context is not None:
         tested_externs.extend(str(item) for item in context.metadata.get("tested_externs", ()))
 
@@ -141,6 +156,8 @@ def run_checks(
     metadata = dict(context.metadata) if context is not None else {}
     metadata.setdefault("target", str(subject.get("target") or ""))
     metadata.setdefault("schema_version", subject.get("schema_version"))
+    if "proof" in selected and context is not None:
+        metadata.setdefault("proof", proof_metadata if proof_metadata is not None else {"backend": proof_backend, "skipped": True})
     return CheckReport(
         status=status,
         verification_level=level,

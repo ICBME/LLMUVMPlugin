@@ -42,6 +42,9 @@ attempt_XXX/artifacts/ref_model_ir.json
 generic CheckReport schema/type/extern/Z3 verification
       |
       v
+optional Lean4 proof pass for RefModelPlan/RefModelIR equivalence
+      |
+      v
 deterministic UVM wrapper + golden evaluation
       |
       +--> structured verification feedback -> next attempt
@@ -49,6 +52,11 @@ deterministic UVM wrapper + golden evaluation
       v
 output_dir/final
 ```
+
+Lean4 proof pass 是显式 opt-in。启用后，feedback 会包含 `proof` stage 的 blocking issues、
+Lean theorem hash、axiom report 和 failed obligation id。LLM 可以根据这些结构化诊断修复
+`RefModelIR` candidate，但不能自行声明 proof 成功；只有 Lean kernel 接受且 axiom policy 通过的
+obligation 才会进入 `proved_rules` / `metadata.proof.proved_obligations`。
 
 ## Python API
 

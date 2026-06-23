@@ -196,6 +196,26 @@ schema/verifier 要求：
 
 如果 `z3-solver` 不可 import，IR-first final promotion 会失败，并返回 blocking issue。
 
+### Lean4 proof backend
+
+`verify_ref_model_ir()` 和通用 `run_checks()` 支持显式启用 Lean4 proof pass。默认验证流程仍只使用
+schema/reference/type/extern/Z3；调用方必须传入 `proof_backend="lean4"` 并让 passes 包含
+`"proof"`，才会启动 Lean。
+
+Lean4 v1 只证明 `RefModelPlan` 与 `RefModelIR` 之间的纯表达式等价 obligation：
+
+- 支持 `bool`、`int`、`uint` 和已知宽度 `bitvector(width)`。
+- 不支持 `any`、`string`、`bytes`、未知 extern、trusted extern、无宽度 bitvector、复杂 operation
+  或 temporal/SVA 义务；这些情况返回 blocking `proof` issue。
+- Bool 义务使用 case split/simp；BitVec 义务使用 Lean `Std.Tactic.BVDecide`。
+- Lean proof source 不落盘，report metadata 记录 backend、Lean version、obligation id、theorem
+  SHA256、axioms 和 proved obligations。
+
+证明通过必须满足两个条件：Lean kernel 接受 theorem，且 `#print axioms` 中不存在未批准 axiom。
+实现禁止生成或接受 `sorry`、`admit`、`axiom`、`unsafe`。Lean 4.31 的 `bv_decide` 会报告
+`propext`、`Classical.choice`、`Quot.sound` 以及 theorem-local native certificate axiom；这些会被
+显式记录在 metadata 中，仅作为该 tactic 的批准内建依赖处理。
+
 ## 与 Legacy Python File-Bundle 路径的关系
 
 `Spec2Backend.FeedbackCodegen.generate_ref_model_with_feedback()` 仍保留，适合作为 legacy

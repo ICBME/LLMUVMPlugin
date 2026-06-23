@@ -681,6 +681,22 @@ readiness report 包含：
   issue 会标为 `needs_human_input`。
 - interface declaration 目前视为 backend metadata；example trace 需要后续 test-vector backend。
 
+## Kernel-checked proof boundary
+
+`SemanticSpecIR` 仍是可审查的语义源，不因为接入交互式证明器而替代人工 review。Lean4/Rocq
+后端只检查已经形式化后的 obligation，例如 `SemanticSpecIR -> RefModelPlan -> RefModelIR`
+链路中的纯表达式等价；它不能证明自然语言抽取本身正确。
+
+当前实现先接入 Lean4，作为 opt-in proof pass：
+
+- proof pass 消费通用 checker context 中的 equivalence obligation。
+- 通过 Lean stdin 临时验证 theorem，不把证明文件写回 `SemanticSpecIR` 或 repo-tracked artifact。
+- 证明 metadata 写入 `CheckReport.metadata["proof"]`，包括 Lean version、theorem hash、axioms
+  和 proved obligation ids。
+- Coq/Rocq 只保留后端接口和占位错误，后续可复用同一套 obligation 提取。
+
+因此 `semantic_context` 仍只表达类型、符号和约束，不记录 backend readiness 或 proof status。
+
 旧 `rtlagent-codegen` CLI 已随 `rtlagent_bfm.codegen` 移除。当前入口是
 `Spec2Backend.BackendReadiness.analyze_backend_readiness()`，调用方负责读写 JSON artifact。
 

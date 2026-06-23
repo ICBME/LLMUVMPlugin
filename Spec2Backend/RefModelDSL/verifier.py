@@ -23,6 +23,9 @@ def verify_ref_model_ir(
     *,
     ref_model_plan: Mapping[str, Any] | None = None,
     base_dir: str | Path = ".",
+    proof_backend: str | None = None,
+    lean_bin: str | Path | None = None,
+    proof_options: Mapping[str, Any] | None = None,
 ) -> VerificationReport:
     tested_externs: list[str] = []
     try:
@@ -34,10 +37,19 @@ def verify_ref_model_ir(
             issues=(VerificationIssue(stage="schema", message=str(exc)),),
         )
 
+    selected_passes = None
+    merged_proof_options = dict(proof_options or {})
+    if proof_backend is not None:
+        selected_passes = ("schema", "reference", "type", "extern", "smt", "proof")
+    if lean_bin is not None:
+        merged_proof_options["lean_bin"] = str(lean_bin)
     check_report = run_checks(
         ir,
         RefModelIRAdapter(ref_model_plan=ref_model_plan),
         base_dir=base_dir,
+        passes=selected_passes,
+        proof_backend=proof_backend,
+        proof_options=merged_proof_options,
     )
     issues = [_verification_issue_from_check(issue) for issue in check_report.issues]
     tested_externs.extend(check_report.tested_externs)
