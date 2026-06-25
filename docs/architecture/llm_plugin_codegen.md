@@ -45,7 +45,7 @@ generic CheckReport schema/type/extern/Z3 verification
 optional Lean4 proof pass for RefModelPlan/RefModelIR equivalence
       |
       v
-deterministic UVM wrapper + golden evaluation
+optional wrapper template check + deterministic UVM wrapper + golden evaluation
       |
       +--> structured verification feedback -> next attempt
       |
@@ -54,9 +54,23 @@ output_dir/final
 ```
 
 Lean4 proof pass 是显式 opt-in。启用后，feedback 会包含 `proof` stage 的 blocking issues、
-Lean theorem hash、axiom report 和 failed obligation id。LLM 可以根据这些结构化诊断修复
-`RefModelIR` candidate，但不能自行声明 proof 成功；只有 Lean kernel 接受且 axiom policy 通过的
-obligation 才会进入 `proved_rules` / `metadata.proof.proved_obligations`。
+Lean theorem hash、normalized obligation hash、obligation kind、subgoal count、axiom report、
+failed/unsupported obligation id 和 proof scope。LLM 可以根据这些结构化诊断修复 `RefModelIR`
+candidate、调整可形式化的 SemanticSpecIR candidate，或降低不受支持的语义表达复杂度，但不能
+自行声明 proof 成功；只有 Lean kernel 接受且 axiom policy 通过的 obligation 才会进入
+`proved_rules` / `metadata.proof.proved_obligations`。
+
+proof scope 中的 obligation kind 表示失败边界：
+
+- `expr_equiv`、`rule_equiv`、`step_equiv`: RefModelPlan 与 RefModelIR 的表达式、规则或一步状态等价。
+- `semantic_plan_equiv`: SemanticSpecIR RepresentationAST 到 RefModelPlan lowering 的语义等价。
+- `plan_ir_expr_equiv`、`plan_ir_step_equiv`: RefModelPlan 到 RefModelIR 的组合或一步状态等价。
+- `wrapper_template_check`: deterministic wrapper 模板检查；metadata 会标注
+  `implementation_boundary="wrapper_template_only"` 和 `trusted_runtime="RefModelInterpreter"`。
+
+LLM 只能修复 candidate IR 或 wrapper 输入，不能在 metadata 中宣称 semantic equivalence、
+implementation correctness 或 proof readiness。`wrapper_template_check` 也不证明任意 Python
+插件或 `RefModelInterpreter` 本身，只证明生成 wrapper 没有越过固定模板边界。
 
 ## Python API
 

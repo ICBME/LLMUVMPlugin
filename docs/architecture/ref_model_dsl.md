@@ -20,6 +20,11 @@ Spec2Backend/Checks/
   model.py        # shared check issue/report/type/symbol models
   engine.py       # generic schema/reference/type/extern/SMT pass runner
   adapters.py     # RefModelIRAdapter and SemanticSpecIRAdapter
+Spec2Backend/Proof/
+  model.py        # proof backend protocol/result/obligation models
+  plan.py         # temporary proof obligation planning and normalization
+  lean4.py        # opt-in Lean4 backend
+  wrapper.py      # deterministic wrapper template checker
 Spec2Backend/RefModelDSL/
   schema.py        # RefModelIR schema helpers and verification report objects
   interpreter.py   # DSL interpreter used by generated wrapper
@@ -202,19 +207,76 @@ schema/verifier 要求：
 schema/reference/type/extern/Z3；调用方必须传入 `proof_backend="lean4"` 并让 passes 包含
 `"proof"`，才会启动 Lean。
 
-Lean4 v1 只证明 `RefModelPlan` 与 `RefModelIR` 之间的纯表达式等价 obligation：
+Lean4 v2 使用 checker 内部的临时 proof plan，不新增持久 IR 层。默认
+`proof_scope=("expr",)`，保持只证明 `RefModelPlan` 与 `RefModelIR` 的纯表达式等价；
+调用方可传 `proof_options={"proof_scope": ("expr", "rule", "step")}` 追加规则等价和一步
+state update 等价证明。`proof_options["max_subgoals"]` 默认 64，超过后返回 blocking
+`proof_subgoal_limit` issue。
 
-- 支持 `bool`、`int`、`uint` 和已知宽度 `bitvector(width)`。
+增强后的 proof plan 继续保持 opt-in，并新增两个显式 scope：
+
+- `semantic`: 从 `SemanticSpecIR` 的 RepresentationAST、`RefModelPlan.rules` 和
+  `RefModelIRAdapter` 的 equivalence context 构造 `semantic_plan_equiv`、
+  `plan_ir_expr_equiv`、`plan_ir_step_equiv` obligation。调用方可以通过
+  `proof_options["semantic_ir"]` 和 `proof_options["ref_model_plan"]` 传入语义来源；
+  adapter metadata 中已有 plan 时也可复用。第一版证明的是 per-rule/per-step expression
+  等价，metadata 明确记录 obligation kind 和 normalized hash；完整多规则优先级、totality
+  和 overlap 仍由 SMT pass 负责。
+- `implementation`: 运行 `wrapper_template_check`，输入为
+  `proof_options["wrapper_source"]` 或 `proof_options["wrapper_path"]`。该检查只接受
+  `emit_ref_model_plugin()` 生成的 deterministic wrapper 形状：`__init__` 必须通过
+  `RefModelInterpreter.from_path(...)` 构造 interpreter 并初始化 state，`predict()` 只能调用
+  interpreter `step()`，再把 interpreter outputs 包装成 `ExpectedResult`。该 scope 不启动
+  Lean，metadata 标注 `implementation_boundary="wrapper_template_only"` 和
+  `trusted_runtime="RefModelInterpreter"`。
+
+`rule` scope 第一版证明的是按 `source_rule_id`/`id` 匹配后的 condition-aware per-rule
+表达式等价；规则 totality、overlap 和多规则覆盖关系仍由 SMT pass 负责。`step` scope 针对
+`step_rules` 中的一步 state update obligation，不做无界 temporal proof。
+
+- 支持 `bool`、`int`、`uint`、已知宽度 `bitvector(width)` 和 choices 唯一的 `enum`。
+- BitVec 支持算术/位运算以及 fixed-width `concat`、`slice`、`reduce_and`、`reduce_or`、
+  `reduce_xor`。
+- `mux`/`if` 会在 proof plan 中拆成 bounded 子目标，condition 会提升为 theorem assumption。
+- `invariant` scope 已注册但第一版不实现 preservation proof；显式请求会返回
+  `invariant_unimplemented` blocking issue。
 - 不支持 `any`、`string`、`bytes`、未知 extern、trusted extern、无宽度 bitvector、复杂 operation
   或 temporal/SVA 义务；这些情况返回 blocking `proof` issue。
-- Bool 义务使用 case split/simp；BitVec 义务使用 Lean `Std.Tactic.BVDecide`。
+- `semantic` scope 支持 `assignment`、`constant_relation`、`conditional_assignment`、
+  `compare`、`unary_op`、`binary_op`、`mux`、`concat`、`slice`、`reduce`、fixed-width
+  BitVec、Bool、Int、UInt 和 enum 子集；temporal/protocol AST 第一版只做结构/类型检查，
+  请求 kernel proof 时返回 blocking `unsupported_semantic_obligation`。
+- Bool 义务使用 case split/simp；BitVec 义务使用 Lean `Std.Tactic.BVDecide`；Int/UInt 只使用
+  Lean/Std 可用的 `simp`/`rfl` 风格证明，不依赖 mathlib。
 - Lean proof source 不落盘，report metadata 记录 backend、Lean version、obligation id、theorem
-  SHA256、axioms 和 proved obligations。
+  SHA256、normalized obligation SHA256、obligation kind、subgoal count、axioms、proved obligations
+  和 unsupported obligations。静态 wrapper 检查结果记录在 `metadata.proof.static_checks`。
 
 证明通过必须满足两个条件：Lean kernel 接受 theorem，且 `#print axioms` 中不存在未批准 axiom。
 实现禁止生成或接受 `sorry`、`admit`、`axiom`、`unsafe`。Lean 4.31 的 `bv_decide` 会报告
 `propext`、`Classical.choice`、`Quot.sound` 以及 theorem-local native certificate axiom；这些会被
 显式记录在 metadata 中，仅作为该 tactic 的批准内建依赖处理。
+
+### RefModelPlan lowering provenance
+
+`build_ref_model_plan()` 生成的 rule 保持 schema_version 兼容，并为 proof backend 附加
+非持久 provenance 字段：
+
+- `semantic_element_id`
+- `source_ast_node`
+- `source_ast_hash`
+- `lowering_kind`
+- `lowered_rule_hash`
+
+这些字段只进入 proof metadata 和审计链路，不写回 `SemanticSpecIR`，也不代表 backend
+readiness。hash 变化会改变 proof obligation 的 normalized hash，使语义 lowering 变更能被
+review 和 CI 捕获。
+
+### Implementation correctness boundary
+
+当前 implementation scope 的结论是“生成 wrapper 未越过固定模板边界”，不是“任意 Python
+实现已经被 Lean 证明”。`RefModelInterpreter` 暂作为小可信运行时；若需要提升该边界，后续应
+引入 Lean semantics 与 interpreter differential/exhaustive tests，或把 interpreter 语义本身形式化。
 
 ## 与 Legacy Python File-Bundle 路径的关系
 

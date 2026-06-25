@@ -32,7 +32,9 @@ from Spec2Backend.Checks.model import (
     type_compatible,
 )
 
-from .model import ProofResult
+from .model import ProofObligation, ProofResult
+from .plan import build_proof_plan, normalize_proof_scope, proof_obligation_hash
+from .wrapper import check_wrapper_template
 
 
 FORBIDDEN_LEAN_TOKENS = re.compile(r"\b(sorry|admit|axiom|unsafe)\b")
@@ -90,61 +92,115 @@ class Lean4ProofBackend:
         lean_bin: str | os.PathLike[str] | None = None,
         timeout_s: float = 10.0,
         allowed_axioms: tuple[str, ...] = ("Classical.choice", "Quot.sound", "propext"),
+        proof_scope: Any = None,
+        max_subgoals: int = 64,
+        semantic_ir: Mapping[str, Any] | None = None,
+        ref_model_plan: Mapping[str, Any] | None = None,
+        wrapper_source: str | None = None,
+        wrapper_path: str | os.PathLike[str] | None = None,
     ):
         self.lean_bin = str(lean_bin) if lean_bin is not None else None
         self.timeout_s = float(timeout_s)
         self.allowed_axioms = tuple(str(item) for item in allowed_axioms)
+        self.proof_scope = normalize_proof_scope(proof_scope)
+        self.max_subgoals = int(max_subgoals)
+        self.semantic_ir = semantic_ir
+        self.ref_model_plan = ref_model_plan
+        self.wrapper_source = wrapper_source
+        self.wrapper_path = str(wrapper_path) if wrapper_path is not None else None
 
     def prove_context(self, context: Any) -> ProofResult:
-        command = discover_lean(self.lean_bin)
+        proof_plan, plan_issues = build_proof_plan(
+            context,
+            proof_scope=self.proof_scope,
+            max_subgoals=self.max_subgoals,
+            semantic_ir=self.semantic_ir,
+            ref_model_plan=self.ref_model_plan,
+            wrapper_source=self.wrapper_source,
+            wrapper_path=self.wrapper_path,
+        )
         metadata: dict[str, Any] = {
             "backend": self.name,
-            "scope": "equivalence",
+            "scope": list(proof_plan.scope),
             "allowed_axioms": list(self.allowed_axioms),
-            "obligation_count": len(tuple(getattr(context, "equivalences", ()))),
+            "obligation_count": len(proof_plan.obligations),
+            "subgoal_count": len(proof_plan.obligations),
+            "max_subgoals": self.max_subgoals,
+            "obligation_kinds": list(proof_plan.metadata.get("obligation_kinds", ())),
             "proved_obligations": [],
+            "unsupported_obligations": [],
             "theorems": [],
+            "static_checks": [],
         }
+        if plan_issues:
+            return ProofResult("failed", issues=plan_issues, metadata=metadata)
+        issues: list[CheckIssue] = []
+        proved_rules: list[str] = []
+        lean_obligations: list[tuple[int, ProofObligation]] = []
+        for index, obligation in enumerate(proof_plan.obligations):
+            if obligation.kind == "wrapper_template_check":
+                result = check_wrapper_template(str(obligation.metadata.get("wrapper_source") or ""))
+                check_metadata = {
+                    "obligation_id": obligation.obligation_id,
+                    "kind": obligation.kind,
+                    "path": obligation.path,
+                    "wrapper_sha256": obligation.metadata.get("wrapper_sha256"),
+                    **dict(result.metadata),
+                }
+                metadata["static_checks"].append(check_metadata)
+                if result.ok:
+                    metadata["proved_obligations"].append(obligation.obligation_id)
+                else:
+                    issues.append(
+                        issue(
+                            "proof",
+                            obligation.path,
+                            result.message,
+                            rule_id=obligation.rule_id,
+                            code=result.code,
+                        )
+                    )
+                    metadata["unsupported_obligations"].append(obligation.obligation_id)
+                continue
+            lean_obligations.append((index, obligation))
+
+        if not lean_obligations:
+            status = "failed" if any(item.blocking for item in issues) else "passed"
+            return ProofResult(status, proved_rules=tuple(dict.fromkeys(proved_rules)), issues=tuple(issues), metadata=metadata)
+
+        command = discover_lean(self.lean_bin)
         if command is None:
             return ProofResult(
                 "failed",
-                issues=(issue("proof", "$", "Lean4 executable was not found", code="lean_missing"),),
+                issues=(*issues, issue("proof", "$", "Lean4 executable was not found", code="lean_missing")),
                 metadata=metadata,
             )
         metadata["lean_bin"] = command
         metadata["lean_version"] = lean_version(command, timeout_s=self.timeout_s)
 
-        issues: list[CheckIssue] = []
-        proved_rules: list[str] = []
         externs = {extern.extern_id: extern.spec for extern in getattr(context, "externs", ())}
-        for index, equivalence in enumerate(getattr(context, "equivalences", ())):
-            rule_id = str(equivalence.rule_id or f"equivalence_{index + 1}")
-            theorem_name = lean_identifier(f"spec2backend_{rule_id}_{index + 1}")
-            path = str(equivalence.path or "$")
-            if getattr(equivalence, "trusted_extern_id", None):
+        for index, obligation in lean_obligations:
+            rule_id = str(obligation.rule_id or obligation.obligation_id or f"obligation_{index + 1}")
+            theorem_name = lean_identifier(f"spec2backend_{obligation.kind}_{rule_id}_{index + 1}")
+            path = str(obligation.path or "$")
+            if obligation.trusted_extern_id:
                 issues.append(
                     issue(
                         "proof",
                         path,
-                        f"trusted extern {equivalence.trusted_extern_id!r} cannot be kernel-proved by Lean4",
+                        f"trusted extern {obligation.trusted_extern_id!r} cannot be kernel-proved by Lean4",
                         rule_id=rule_id,
-                        extern_id=str(equivalence.trusted_extern_id),
+                        extern_id=str(obligation.trusted_extern_id),
                         code="trusted_extern_not_proved",
                     )
                 )
+                metadata["unsupported_obligations"].append(obligation.obligation_id)
                 continue
             try:
-                source = LeanObligationBuilder(
-                    getattr(context, "symbols", {}),
-                    externs,
-                ).build_equivalence(
-                    equivalence.left,
-                    equivalence.right,
-                    condition=equivalence.condition,
-                    theorem_name=theorem_name,
-                )
+                source = self._build_source(context, externs, obligation, theorem_name)
             except ProofBuildError as exc:
                 issues.append(issue("proof", path, str(exc), rule_id=rule_id, code="unsupported_obligation"))
+                metadata["unsupported_obligations"].append(obligation.obligation_id)
                 continue
 
             theorem_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
@@ -156,15 +212,18 @@ class Lean4ProofBackend:
                 allowed_axioms=self.allowed_axioms,
             )
             theorem_metadata = {
-                "obligation_id": rule_id,
+                "obligation_id": obligation.obligation_id,
+                "rule_id": rule_id,
+                "kind": obligation.kind,
                 "theorem": theorem_name,
                 "sha256": theorem_hash,
+                "normalized_sha256": proof_obligation_hash(obligation),
                 "path": path,
                 "axioms": result["axioms"],
             }
             metadata["theorems"].append(theorem_metadata)
             if result["ok"]:
-                metadata["proved_obligations"].append(rule_id)
+                metadata["proved_obligations"].append(obligation.obligation_id)
                 proved_rules.append(rule_id)
             else:
                 issues.append(
@@ -180,6 +239,35 @@ class Lean4ProofBackend:
         status = "failed" if any(item.blocking for item in issues) else "passed"
         return ProofResult(status, proved_rules=tuple(dict.fromkeys(proved_rules)), issues=tuple(issues), metadata=metadata)
 
+    def _build_source(
+        self,
+        context: Any,
+        externs: Mapping[str, Mapping[str, Any]],
+        obligation: ProofObligation,
+        theorem_name: str,
+    ) -> str:
+        if obligation.kind not in {
+            "expr_equiv",
+            "rule_equiv",
+            "step_equiv",
+            "constraint_sat",
+            "semantic_plan_equiv",
+            "plan_ir_expr_equiv",
+            "plan_ir_step_equiv",
+        }:
+            raise ProofBuildError(f"Lean4 proof does not support obligation kind {obligation.kind!r}")
+        if obligation.left is None or obligation.right is None:
+            raise ProofBuildError(f"obligation {obligation.obligation_id!r} does not define both sides")
+        return LeanObligationBuilder(
+            getattr(context, "symbols", {}),
+            externs,
+        ).build_equivalence(
+            obligation.left,
+            obligation.right,
+            condition=obligation.condition,
+            theorem_name=theorem_name,
+        )
+
 
 class LeanObligationBuilder:
     def __init__(self, symbols: Mapping[str, Symbol], externs: Mapping[str, Mapping[str, Any]]):
@@ -189,6 +277,7 @@ class LeanObligationBuilder:
         self.name_map = lean_name_map(symbols)
         self.used_symbols: set[str] = set()
         self.uses_bitvector = False
+        self.has_condition = False
 
     def build_equivalence(self, left: Any, right: Any, *, condition: Any | None, theorem_name: str) -> str:
         left_type, _ = self.checker.infer(left, "left")
@@ -202,7 +291,7 @@ class LeanObligationBuilder:
             raise ProofBuildError(
                 f"equivalence operands have incompatible Lean types {left_term.type.to_json()} and {right_term.type.to_json()}"
             )
-        if left_term.type.kind not in {"bool", "int", "uint", "bitvector"}:
+        if left_term.type.kind not in {"bool", "int", "uint", "bitvector", "enum"}:
             raise ProofBuildError(f"Lean4 proof does not support type {left_term.type.to_json()}")
 
         proposition = f"({left_term.text} = {right_term.text})"
@@ -211,6 +300,7 @@ class LeanObligationBuilder:
             if not cond.type.is_bool:
                 raise ProofBuildError("Lean4 proof condition must be bool")
             proposition = f"({cond.text} = true) -> {proposition}"
+            self.has_condition = True
 
         declarations = self.declarations()
         tactic = self.tactic()
@@ -237,16 +327,18 @@ class LeanObligationBuilder:
         return " " + " ".join(items) if items else ""
 
     def tactic(self) -> list[str]:
+        prefix = ["intro h"] if self.has_condition else []
         if self.uses_bitvector:
-            return ["bv_decide"]
+            return [*prefix, "bv_decide"]
         bool_vars = [
             self.name_map[name]
             for name in sorted(self.used_symbols)
             if self.symbols[name].type.kind == "bool"
         ]
         if bool_vars:
-            return [" <;> ".join([f"cases {name}" for name in bool_vars] + ["simp"])]
-        return ["simp"]
+            final = "simp at h <;> simp" if self.has_condition else "simp"
+            return [*prefix, " <;> ".join([f"cases {name}" for name in bool_vars] + [final])]
+        return [*prefix, "simp at h", "simp"] if self.has_condition else ["simp"]
 
     def translate(self, expr: Any, *, expected: TypeSpec | None = None) -> LeanTerm:
         if isinstance(expr, bool):
@@ -257,6 +349,8 @@ class LeanObligationBuilder:
         if isinstance(expr, bytes):
             raise ProofBuildError("Lean4 proof does not support bytes literals")
         if isinstance(expr, str):
+            if expected is not None and expected.kind == "enum":
+                return LeanTerm(lean_enum_literal(expr, expected), expected)
             raise ProofBuildError("Lean4 proof does not support string literals")
         if not isinstance(expr, Mapping):
             raise ProofBuildError(f"Lean4 proof does not support expression {expr!r}")
@@ -279,12 +373,24 @@ class LeanObligationBuilder:
                 return LeanTerm("true" if value else "false", BOOL)
             if isinstance(value, int):
                 return LeanTerm(lean_literal_int(value, literal_type), literal_type)
+            if isinstance(value, str) and literal_type.kind == "enum":
+                return LeanTerm(lean_enum_literal(value, literal_type), literal_type)
             raise ProofBuildError("Lean4 proof supports only bool/int literals")
 
         if "extern_call" in expr:
             raise ProofBuildError(f"Lean4 proof does not support extern {expr.get('extern_call')!r}")
         if "operation" in expr:
             raise ProofBuildError(f"Lean4 proof does not support operation {expr.get('operation')!r}")
+
+        if node == "constraint":
+            return self.translate(expr.get("expr"), expected=BOOL)
+
+        if node == "implication":
+            antecedent = self.translate(expr.get("antecedent"), expected=BOOL)
+            consequent = self.translate(expr.get("consequent"), expected=BOOL)
+            if not antecedent.type.is_bool or not consequent.type.is_bool:
+                raise ProofBuildError("implication operands must be bool")
+            return LeanTerm(f"((!{antecedent.text}) || {consequent.text})", BOOL)
 
         if node == "cast":
             target = TypeSpec(str(expr.get("type") or "any"), width=expr.get("width") if isinstance(expr.get("width"), int) else None)
@@ -354,7 +460,7 @@ class LeanObligationBuilder:
                 return LeanTerm(numeric_binary(left, right, op), result_type)
             raise ProofBuildError(f"Lean4 proof does not support binary op {op!r}")
 
-        if node == "mux" or "if" in expr:
+        if node in {"mux", "if"} or "if" in expr:
             spec = expr.get("if", expr)
             cond = self.translate(spec.get("condition", spec.get("cond")), expected=BOOL)
             if not cond.type.is_bool:
@@ -366,8 +472,38 @@ class LeanObligationBuilder:
             when_false = self.translate(spec.get("when_false", spec.get("else")), expected=result_type)
             return LeanTerm(f"(if {cond.text} then {when_true.text} else {when_false.text})", result_type)
 
-        if node in {"concat", "slice", "reduce"} or any(key in expr for key in ("concat", "slice")):
-            raise ProofBuildError(f"Lean4 proof does not support {node or 'bitvector structural'} expressions in v1")
+        if node == "concat" or "concat" in expr:
+            parts_expr = expr.get("parts", expr.get("concat", ()))
+            if not isinstance(parts_expr, list | tuple) or not parts_expr:
+                raise ProofBuildError("concat requires a non-empty parts list")
+            parts = [self.translate(part) for part in parts_expr]
+            self.uses_bitvector = True
+            return bitvec_concat(parts)
+
+        if node == "slice" or "slice" in expr:
+            spec = expr.get("slice", expr)
+            if not isinstance(spec, Mapping):
+                raise ProofBuildError("slice expression must be an object")
+            value = self.translate(spec.get("value"))
+            if value.type.kind != "bitvector" or value.type.width is None:
+                raise ProofBuildError("slice value must be a fixed-width bitvector")
+            msb = spec.get("msb")
+            lsb = spec.get("lsb")
+            if not isinstance(msb, int) or not isinstance(lsb, int) or msb < lsb or lsb < 0:
+                raise ProofBuildError("slice requires integer msb >= lsb >= 0")
+            if msb >= value.type.width:
+                raise ProofBuildError("slice msb exceeds bitvector width")
+            self.uses_bitvector = True
+            return LeanTerm(
+                f"(BitVec.extractLsb {msb} {lsb} {value.text})",
+                TypeSpec("bitvector", width=msb - lsb + 1),
+            )
+
+        if node == "reduce":
+            operand = self.translate(expr.get("operand"))
+            op = str(expr.get("op") or expr.get("reduction") or expr.get("kind") or "")
+            self.uses_bitvector = True
+            return bitvec_reduce(operand, op)
 
         raise ProofBuildError(f"Lean4 proof does not support expression {expr!r}")
 
@@ -378,6 +514,9 @@ class LeanObligationBuilder:
             if typ.width is None:
                 raise ProofBuildError(f"{label} bitvector type must define width")
             self.uses_bitvector = True
+            return
+        if typ.kind == "enum":
+            check_enum_choices(typ)
             return
         if typ.kind not in {"bool", "int", "uint"}:
             raise ProofBuildError(f"Lean4 proof does not support {label} type {typ.to_json()}")
@@ -531,6 +670,9 @@ def lean_type(typ: TypeSpec) -> str:
         return "Bool"
     if typ.kind in {"int", "uint"}:
         return "Int"
+    if typ.kind == "enum":
+        check_enum_choices(typ)
+        return "Int"
     if typ.kind == "bitvector" and typ.width is not None:
         return f"BitVec {typ.width}"
     raise ProofBuildError(f"unsupported Lean type {typ.to_json()}")
@@ -541,12 +683,44 @@ def lean_literal_int(value: int, typ: TypeSpec) -> str:
         if typ.width is None:
             raise ProofBuildError("bitvector literal requires width")
         return f"({int(value)} : BitVec {typ.width})"
+    if typ.kind == "enum":
+        check_enum_choices(typ)
+        return f"({int(value)} : Int)"
     return f"({int(value)} : Int)"
+
+
+def lean_enum_literal(value: Any, typ: TypeSpec) -> str:
+    check_enum_choices(typ)
+    if isinstance(value, int):
+        index = int(value)
+    else:
+        choices = [str(choice) for choice in typ.choices]
+        raw = str(value)
+        if raw not in choices:
+            raise ProofBuildError(f"enum literal {raw!r} is not in choices {choices!r}")
+        index = choices.index(raw)
+    if index < 0 or index >= len(typ.choices):
+        raise ProofBuildError(f"enum literal index {index} is outside choices")
+    return f"({index} : Int)"
+
+
+def check_enum_choices(typ: TypeSpec) -> None:
+    if not typ.choices:
+        raise ProofBuildError("enum type must define choices for Lean4 proof")
+    choices = [str(choice) for choice in typ.choices]
+    if len(set(choices)) != len(choices):
+        raise ProofBuildError("enum choices must be unique for Lean4 proof")
 
 
 def type_from_literal(value: Any, expr: Mapping[str, Any], expected: TypeSpec | None) -> TypeSpec:
     if isinstance(value, bool):
         return BOOL
+    if expected is not None and expected.kind == "enum":
+        return expected
+    if "type" in expr:
+        declared = TypeSpec(str(expr.get("type") or "any"), choices=tuple(expr.get("choices", ()) if isinstance(expr.get("choices"), list | tuple) else ()))
+        if declared.kind == "enum":
+            return declared
     if isinstance(value, int):
         width = expr.get("width")
         if isinstance(width, int) and width > 0:
@@ -562,10 +736,18 @@ def common_expected_type(left: TypeSpec, right: TypeSpec) -> TypeSpec:
         return right
     if right.is_any:
         return left
+    if left.kind == "enum" and right.kind == "string":
+        return left
+    if right.kind == "enum" and left.kind == "string":
+        return right
     if type_compatible(left, right):
         if left.kind == "bitvector":
             return left if left.width is not None else right
         if right.kind == "bitvector":
+            return right
+        if left.kind == "enum":
+            return left
+        if right.kind == "enum":
             return right
         if left.kind == right.kind:
             return left
@@ -638,6 +820,47 @@ def bool_binary(left: str, right: str, op: str) -> str:
     if op in {"xor", "bitwise_xor", "^"}:
         return f"(Bool.xor {left} {right})"
     raise ProofBuildError(f"Lean4 proof does not support bool op {op!r}")
+
+
+def bitvec_concat(parts: list[LeanTerm]) -> LeanTerm:
+    converted: list[LeanTerm] = []
+    for part in parts:
+        if part.type.kind == "bool":
+            converted.append(LeanTerm(f"(BitVec.ofBool {part.text})", TypeSpec("bitvector", width=1)))
+            continue
+        if part.type.kind != "bitvector" or part.type.width is None:
+            raise ProofBuildError("concat parts must be bool or fixed-width bitvector")
+        converted.append(part)
+    result = converted[0]
+    for part in converted[1:]:
+        if result.type.width is None or part.type.width is None:
+            raise ProofBuildError("concat part widths must be known")
+        result = LeanTerm(
+            f"(BitVec.append {result.text} {part.text})",
+            TypeSpec("bitvector", width=result.type.width + part.type.width),
+        )
+    return result
+
+
+def bitvec_reduce(operand: LeanTerm, op: str) -> LeanTerm:
+    if operand.type.kind != "bitvector" or operand.type.width is None:
+        raise ProofBuildError("reduce operand must be a fixed-width bitvector")
+    width = operand.type.width
+    normalized = op.lower()
+    if normalized in {"and", "reduce_and", "reduction_and", "&"}:
+        return LeanTerm(f"(decide ({operand.text} = BitVec.allOnes {width}))", BOOL)
+    if normalized in {"or", "reduce_or", "reduction_or", "|", "reduce"}:
+        return LeanTerm(f"(decide ({operand.text} ≠ 0#{width}))", BOOL)
+    if normalized in {"xor", "reduce_xor", "reduction_xor", "^"}:
+        parts = [
+            f"(decide (BitVec.extractLsb' {index} 1 {operand.text} = 1#1))"
+            for index in range(width)
+        ]
+        text = parts[0]
+        for part in parts[1:]:
+            text = f"(Bool.xor {text} {part})"
+        return LeanTerm(text, BOOL)
+    raise ProofBuildError(f"Lean4 proof does not support reduce op {op!r}")
 
 
 def numeric_binary(left: LeanTerm, right: LeanTerm, op: str) -> str:

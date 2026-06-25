@@ -117,6 +117,9 @@ class SemanticSpecIRAdapter:
                 "schema_version": ir.get("schema_version"),
                 "target": ir.get("target"),
                 "subject": "SemanticSpecIR",
+                "semantic_ir": dict(ir),
+                "semantic_elements": tuple(dict(element) for element in elements if isinstance(element, Mapping)) if isinstance(elements, list) else (),
+                "semantic_context": dict(semantic_context),
             },
         )
 
@@ -298,6 +301,11 @@ class RefModelIRAdapter:
                 "schema_version": ir.get("schema_version"),
                 "target": ir.get("target"),
                 "subject": "RefModelIR",
+                "rule_ids": tuple(str(rule.get("id") or "") for rule in rules),
+                "step_rule_ids": tuple(str(rule.get("id") or "") for rule in step_rules),
+                "ref_model_ir_rules": tuple(dict(rule) for rule in rules),
+                "ref_model_ir_step_rules": tuple(dict(rule) for rule in step_rules),
+                "ref_model_plan": dict(self.ref_model_plan or {}),
             },
         )
 

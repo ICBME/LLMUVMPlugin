@@ -166,7 +166,7 @@ class ExpressionChecker:
                     issues.append(issue("type", f"{path}.or[{index}]", "or operands must be bool", code="condition_type"))
             return BOOL
 
-        if node == "mux" or "if" in expr:
+        if node in {"mux", "if"} or "if" in expr:
             spec = expr.get("if", expr)
             cond = self._infer(spec.get("condition", spec.get("cond")), f"{path}.condition", issues)
             if not (cond.is_bool or cond.is_any):
@@ -399,7 +399,7 @@ def z3_expr(expr: Any, env: Mapping[str, Any], symbols: Mapping[str, Symbol], ex
         if op in {"bitwise_or", "|"}:
             return left | right
 
-    if node == "mux" or "if" in expr:
+    if node in {"mux", "if"} or "if" in expr:
         spec = expr.get("if", expr)
         return z3.If(
             z3_condition(spec.get("condition", spec.get("cond")), env, symbols, externs),

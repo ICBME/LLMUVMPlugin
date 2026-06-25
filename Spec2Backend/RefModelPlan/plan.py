@@ -7,6 +7,7 @@ future ref model code generator.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -159,9 +160,10 @@ def lower_semantic_element(element: dict[str, Any], *, index: int) -> list[dict[
     if not isinstance(ast, dict):
         raise RefModelPlanError("representation.ast must be an object")
 
+    representation_kind = str(representation.get("kind") or "")
     rule = lower_ast_rule(
         ast,
-        representation_kind=str(representation.get("kind") or ""),
+        representation_kind=representation_kind,
     )
     rule.update(
         {
@@ -170,8 +172,11 @@ def lower_semantic_element(element: dict[str, Any], *, index: int) -> list[dict[
             "claim_ids": string_list(element.get("claim_ids", [])),
             "evidence": string_list(element.get("evidence", [])),
             "source_ast_node": str(ast.get("node") or ""),
+            "source_ast_hash": stable_hash(ast),
+            "lowering_kind": f"{representation_kind}:{ast.get('node') or ''}",
         }
     )
+    rule["lowered_rule_hash"] = stable_hash({key: value for key, value in rule.items() if key != "lowered_rule_hash"})
     return [rule]
 
 
@@ -470,6 +475,12 @@ def required_string(value: dict[str, Any], key: str) -> str:
 def copy_optional(source: dict[str, Any], target: dict[str, Any], key: str) -> None:
     if key in source:
         target[key] = source[key]
+
+
+def stable_hash(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
 
 
 def write_ref_model_plan(path: str | Path, plan: dict[str, Any]) -> None:

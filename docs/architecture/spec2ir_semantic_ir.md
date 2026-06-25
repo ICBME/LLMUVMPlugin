@@ -139,6 +139,34 @@ Spec2Backend/FeedbackCodegen/
 现有 `validate_semantic_spec_ir()`、`collect_semantic_spec_ir_issues()` 和
 `verify_ref_model_ir()` 仍保留 public API，内部复用 `run_checks()` 和对应 adapter。
 
+### Kernel-checked semantic equivalence boundary
+
+`SemanticSpecIR` 本身不新增持久 proof layer，也不记录 proof status。Lean4 backend 通过
+checker 内部的临时 proof obligation pipeline 消费以下输入：
+
+- `SemanticSpecIR.semantic_elements[].representation.ast`
+- `RefModelPlan.rules[]` 中的 lowering provenance
+- `RefModelIRAdapter` 生成的 RefModelPlan/RefModelIR equivalence context
+
+显式启用 `proof_backend="lean4"` 且 `proof_scope` 包含 `"semantic"` 时，checker 会构造：
+
+- `semantic_plan_equiv`: 证明可翻译 RepresentationAST 与对应 RefModelPlan rule 的 value
+  或 condition 等价。
+- `plan_ir_expr_equiv`: 证明 RefModelPlan rule 表达式与 RefModelIR combinational rule 表达式等价。
+- `plan_ir_step_equiv`: 证明 RefModelPlan one-step state update 与 RefModelIR `step_rules`
+  表达式等价。
+
+第一版语义证明范围限定为组合逻辑和一步状态子集，覆盖 `assignment`、
+`constant_relation`、`conditional_assignment`、`compare`、`unary_op`、`binary_op`、`mux`、
+`concat`、`slice`、`reduce`、fixed-width BitVec、Bool、Int、UInt 和 choices 唯一的 enum。
+temporal/protocol/SVA AST 仍只做结构和类型检查；如果被放入 Lean semantic proof scope，会返回
+blocking `proof` issue，而不会静默跳过或写入“已证明”状态。
+
+`build_ref_model_plan()` 为 lowered rule 附加 `semantic_element_id`、`source_ast_node`、
+`source_ast_hash`、`lowering_kind` 和 `lowered_rule_hash`。这些字段用于 proof metadata、
+审计和 CI 变更检测，不改变 `SemanticSpecIR` schema，也不把 backend readiness 或 proof readiness
+写回 Spec2IR。
+
 ### `LLMPlugin`
 
 主要职责：
@@ -689,10 +717,14 @@ readiness report 包含：
 
 当前实现先接入 Lean4，作为 opt-in proof pass：
 
-- proof pass 消费通用 checker context 中的 equivalence obligation。
+- proof pass 消费通用 checker context 中的临时 proof plan；默认只包含 expression equivalence，
+  可显式扩展到 rule/step equivalence 和 constraint predicate 子目标。
+- SemanticSpecIR 的 `semantic_context.constraints` 可被 adapter 暴露为 checker predicate；
+  Lean4 第一版只证明可翻译为纯 bool 表达式的 obligation，不处理无界 temporal/protocol proof。
 - 通过 Lean stdin 临时验证 theorem，不把证明文件写回 `SemanticSpecIR` 或 repo-tracked artifact。
 - 证明 metadata 写入 `CheckReport.metadata["proof"]`，包括 Lean version、theorem hash、axioms
-  和 proved obligation ids。
+  obligation kind、normalized obligation hash、subgoal count、proved obligation ids 和 unsupported
+  obligation ids。
 - Coq/Rocq 只保留后端接口和占位错误，后续可复用同一套 obligation 提取。
 
 因此 `semantic_context` 仍只表达类型、符号和约束，不记录 backend readiness 或 proof status。
