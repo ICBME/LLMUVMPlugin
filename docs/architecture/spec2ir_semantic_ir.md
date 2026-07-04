@@ -167,6 +167,13 @@ blocking `proof` issue，而不会静默跳过或写入“已证明”状态。
 审计和 CI 变更检测，不改变 `SemanticSpecIR` schema，也不把 backend readiness 或 proof readiness
 写回 Spec2IR。
 
+Theorem statement 由 Spec2Backend 根据 `ProofObligation` 确定性生成。LLM 如果接入 proof
+流程，只能生成 Lean proof body，不能生成或修改 theorem statement、assumption、conclusion、
+imports 或 definitions。proof metadata 会记录 `semantic_ir_sha256`、`source_ast_hash`、
+`lowered_rule_hash`、`canonical_theorem_sha256` 和 `proof_body_sha256`，用于审计 theorem 是否
+绑定到当前 SemanticSpecIR artifact。更详细的信任边界见
+[Lean Semantic Proof Backend](lean_semantic_proof.md)。
+
 ### `LLMPlugin`
 
 主要职责：

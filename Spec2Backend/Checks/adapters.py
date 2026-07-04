@@ -301,6 +301,7 @@ class RefModelIRAdapter:
                 "schema_version": ir.get("schema_version"),
                 "target": ir.get("target"),
                 "subject": "RefModelIR",
+                "ref_model_ir": dict(ir),
                 "rule_ids": tuple(str(rule.get("id") or "") for rule in rules),
                 "step_rule_ids": tuple(str(rule.get("id") or "") for rule in step_rules),
                 "ref_model_ir_rules": tuple(dict(rule) for rule in rules),

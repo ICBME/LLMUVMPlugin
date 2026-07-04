@@ -29,6 +29,7 @@ def run_proof_backend(
         try:
             timeout_s = float(options.get("timeout_s", 10.0))
             max_subgoals = int(options.get("max_subgoals", 64))
+            llm_max_attempts = int(options.get("llm_max_attempts", 1))
         except Exception as exc:  # noqa: BLE001 - option errors must be reported, not raised
             return ProofResult(
                 "failed",
@@ -45,6 +46,9 @@ def run_proof_backend(
             ref_model_plan=options.get("ref_model_plan"),
             wrapper_source=options.get("wrapper_source"),
             wrapper_path=options.get("wrapper_path"),
+            llm_backend=options.get("llm_backend"),
+            llm_model=options.get("llm_model"),
+            llm_max_attempts=llm_max_attempts,
         )
         return backend.prove_context(context)
     if backend_name == "coq":

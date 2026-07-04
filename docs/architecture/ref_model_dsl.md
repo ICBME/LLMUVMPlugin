@@ -230,6 +230,14 @@ state update 等价证明。`proof_options["max_subgoals"]` 默认 64，超过�
   Lean，metadata 标注 `implementation_boundary="wrapper_template_only"` 和
   `trusted_runtime="RefModelInterpreter"`。
 
+Semantic proof obligations 使用 canonical theorem 模式：Spec2Backend 从
+`ProofObligation`、符号表、condition 和 artifact metadata 确定性生成 theorem statement。
+LLM 只允许通过 `proof_options["llm_backend"]` 提供 proof body，不能生成或修改 theorem statement。
+可选项包括 `llm_model` 和 `llm_max_attempts`。LLM proof body 会被拒绝任何
+`theorem`、`def`、`axiom`、`opaque`、`unsafe`、`sorry`、`admit`、`import`、`set_option`、
+`#eval`、`#check` 或 `#print` escape。Lean diagnostics 会进入下一轮 proof-body prompt；
+超过尝试次数后返回 blocking `llm_proof_failed` issue。
+
 `rule` scope 第一版证明的是按 `source_rule_id`/`id` 匹配后的 condition-aware per-rule
 表达式等价；规则 totality、overlap 和多规则覆盖关系仍由 SMT pass 负责。`step` scope 针对
 `step_rules` 中的一步 state update obligation，不做无界 temporal proof。
@@ -250,7 +258,9 @@ state update 等价证明。`proof_options["max_subgoals"]` 默认 64，超过�
   Lean/Std 可用的 `simp`/`rfl` 风格证明，不依赖 mathlib。
 - Lean proof source 不落盘，report metadata 记录 backend、Lean version、obligation id、theorem
   SHA256、normalized obligation SHA256、obligation kind、subgoal count、axioms、proved obligations
-  和 unsupported obligations。静态 wrapper 检查结果记录在 `metadata.proof.static_checks`。
+  和 unsupported obligations。canonical theorem metadata 还记录 statement hash、proof body hash、
+  artifact hash、source AST hash 和 lowering hash。静态 wrapper 检查结果记录在
+  `metadata.proof.static_checks`。
 
 证明通过必须满足两个条件：Lean kernel 接受 theorem，且 `#print axioms` 中不存在未批准 axiom。
 实现禁止生成或接受 `sorry`、`admit`、`axiom`、`unsafe`。Lean 4.31 的 `bv_decide` 会报告

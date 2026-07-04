@@ -10,8 +10,10 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import textwrap
 from typing import Any, Mapping
 
+from LLMPlugin.base import LLMRequest
 from Spec2Backend.Checks.expression import (
     ARITH_BINARY_OPS,
     BIT_BINARY_OPS,
@@ -38,6 +40,9 @@ from .wrapper import check_wrapper_template
 
 
 FORBIDDEN_LEAN_TOKENS = re.compile(r"\b(sorry|admit|axiom|unsafe)\b")
+FORBIDDEN_PROOF_BODY_TOKENS = re.compile(r"\b(sorry|admit|axiom|opaque|unsafe|import|theorem|def|set_option)\b")
+FORBIDDEN_PROOF_BODY_COMMANDS = ("#eval", "#check", "#print")
+LLM_PROOF_OBLIGATION_KINDS = {"semantic_plan_equiv", "plan_ir_expr_equiv", "plan_ir_step_equiv"}
 LEAN_RESERVED = {
     "as",
     "axiom",
@@ -79,6 +84,25 @@ class LeanTerm:
     type: TypeSpec
 
 
+@dataclass(frozen=True)
+class LeanSourceBuild:
+    source: str
+    canonical_statement: str
+    proof_body: str
+    theorem_header: str
+    proposition: str
+    declarations: str
+    tactic_profile: str
+
+    @property
+    def canonical_theorem_sha256(self) -> str:
+        return sha256_text(self.canonical_statement)
+
+    @property
+    def proof_body_sha256(self) -> str:
+        return sha256_text(self.proof_body)
+
+
 class ProofBuildError(ValueError):
     """Raised when an obligation is outside the Lean v1 supported subset."""
 
@@ -98,6 +122,9 @@ class Lean4ProofBackend:
         ref_model_plan: Mapping[str, Any] | None = None,
         wrapper_source: str | None = None,
         wrapper_path: str | os.PathLike[str] | None = None,
+        llm_backend: Any | None = None,
+        llm_model: str | None = None,
+        llm_max_attempts: int = 1,
     ):
         self.lean_bin = str(lean_bin) if lean_bin is not None else None
         self.timeout_s = float(timeout_s)
@@ -108,6 +135,9 @@ class Lean4ProofBackend:
         self.ref_model_plan = ref_model_plan
         self.wrapper_source = wrapper_source
         self.wrapper_path = str(wrapper_path) if wrapper_path is not None else None
+        self.llm_backend = llm_backend
+        self.llm_model = llm_model
+        self.llm_max_attempts = max(1, int(llm_max_attempts))
 
     def prove_context(self, context: Any) -> ProofResult:
         proof_plan, plan_issues = build_proof_plan(
@@ -197,30 +227,38 @@ class Lean4ProofBackend:
                 metadata["unsupported_obligations"].append(obligation.obligation_id)
                 continue
             try:
-                source = self._build_source(context, externs, obligation, theorem_name)
+                source_build = self._build_source(context, externs, obligation, theorem_name)
             except ProofBuildError as exc:
                 issues.append(issue("proof", path, str(exc), rule_id=rule_id, code="unsupported_obligation"))
                 metadata["unsupported_obligations"].append(obligation.obligation_id)
                 continue
 
-            theorem_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
-            result = run_lean_source(
-                source,
+            proof_run = self._run_source_build(
+                source_build,
                 command=command,
-                timeout_s=self.timeout_s,
                 theorem_name=theorem_name,
-                allowed_axioms=self.allowed_axioms,
+                obligation=obligation,
             )
+            result = proof_run["result"]
+            source = str(proof_run["source"])
+            proof_body = str(proof_run["proof_body"])
             theorem_metadata = {
                 "obligation_id": obligation.obligation_id,
                 "rule_id": rule_id,
                 "kind": obligation.kind,
                 "theorem": theorem_name,
-                "sha256": theorem_hash,
+                "sha256": sha256_text(source),
                 "normalized_sha256": proof_obligation_hash(obligation),
                 "path": path,
                 "axioms": result["axioms"],
+                "statement_mode": "canonical",
+                "canonical_theorem_sha256": source_build.canonical_theorem_sha256,
+                "proof_body_sha256": sha256_text(proof_body),
+                "tactic_profile": source_build.tactic_profile,
+                **proof_artifact_metadata(context, self.semantic_ir, obligation),
             }
+            if proof_run.get("llm_attempts") is not None:
+                theorem_metadata["llm_attempts"] = proof_run["llm_attempts"]
             metadata["theorems"].append(theorem_metadata)
             if result["ok"]:
                 metadata["proved_obligations"].append(obligation.obligation_id)
@@ -245,7 +283,7 @@ class Lean4ProofBackend:
         externs: Mapping[str, Mapping[str, Any]],
         obligation: ProofObligation,
         theorem_name: str,
-    ) -> str:
+    ) -> LeanSourceBuild:
         if obligation.kind not in {
             "expr_equiv",
             "rule_equiv",
@@ -261,12 +299,106 @@ class Lean4ProofBackend:
         return LeanObligationBuilder(
             getattr(context, "symbols", {}),
             externs,
-        ).build_equivalence(
+        ).build_equivalence_source(
             obligation.left,
             obligation.right,
             condition=obligation.condition,
             theorem_name=theorem_name,
         )
+
+    def _run_source_build(
+        self,
+        source_build: LeanSourceBuild,
+        *,
+        command: str,
+        theorem_name: str,
+        obligation: ProofObligation,
+    ) -> dict[str, Any]:
+        if self.llm_backend is not None and obligation.kind in LLM_PROOF_OBLIGATION_KINDS:
+            return self._run_llm_proof_loop(source_build, command=command, theorem_name=theorem_name, obligation=obligation)
+        result = run_lean_source(
+            source_build.source,
+            command=command,
+            timeout_s=self.timeout_s,
+            theorem_name=theorem_name,
+            allowed_axioms=self.allowed_axioms,
+        )
+        return {"result": result, "source": source_build.source, "proof_body": source_build.proof_body}
+
+    def _run_llm_proof_loop(
+        self,
+        source_build: LeanSourceBuild,
+        *,
+        command: str,
+        theorem_name: str,
+        obligation: ProofObligation,
+    ) -> dict[str, Any]:
+        attempts: list[dict[str, Any]] = []
+        previous_diagnostics = ""
+        last_result: dict[str, Any] = {"ok": False, "code": "llm_proof_failed", "message": "LLM proof did not run", "axioms": []}
+        last_source = source_build.source
+        last_proof_body = source_build.proof_body
+        for attempt in range(1, self.llm_max_attempts + 1):
+            proof_body_result = request_llm_proof_body(
+                self.llm_backend,
+                model=self.llm_model,
+                source_build=source_build,
+                obligation=obligation,
+                theorem_name=theorem_name,
+                attempt=attempt,
+                previous_diagnostics=previous_diagnostics,
+            )
+            if not proof_body_result["ok"]:
+                last_result = {
+                    "ok": False,
+                    "code": proof_body_result["code"],
+                    "message": proof_body_result["message"],
+                    "axioms": [],
+                }
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "status": "rejected",
+                        "code": proof_body_result["code"],
+                        "message": proof_body_result["message"],
+                    }
+                )
+                break
+            proof_body = str(proof_body_result["proof_body"])
+            last_proof_body = proof_body
+            last_source = compose_lean_source(source_build, proof_body)
+            lean_result = run_lean_source(
+                last_source,
+                command=command,
+                timeout_s=self.timeout_s,
+                theorem_name=theorem_name,
+                allowed_axioms=self.allowed_axioms,
+            )
+            attempts.append(
+                {
+                    "attempt": attempt,
+                    "status": "passed" if lean_result["ok"] else "failed",
+                    "code": lean_result["code"],
+                    "message": lean_result["message"],
+                    "proof_body_sha256": sha256_text(proof_body),
+                }
+            )
+            if lean_result["ok"]:
+                return {
+                    "result": lean_result,
+                    "source": last_source,
+                    "proof_body": proof_body,
+                    "llm_attempts": attempts,
+                }
+            previous_diagnostics = str(lean_result["message"])
+            last_result = lean_result
+        if last_result.get("code") == "lean_rejected":
+            last_result = {
+                **last_result,
+                "code": "llm_proof_failed",
+                "message": f"LLM proof failed after {len(attempts)} attempt(s): {last_result.get('message')}",
+            }
+        return {"result": last_result, "source": last_source, "proof_body": last_proof_body, "llm_attempts": attempts}
 
 
 class LeanObligationBuilder:
@@ -279,7 +411,7 @@ class LeanObligationBuilder:
         self.uses_bitvector = False
         self.has_condition = False
 
-    def build_equivalence(self, left: Any, right: Any, *, condition: Any | None, theorem_name: str) -> str:
+    def build_equivalence_source(self, left: Any, right: Any, *, condition: Any | None, theorem_name: str) -> LeanSourceBuild:
         left_type, _ = self.checker.infer(left, "left")
         right_type, _ = self.checker.infer(right, "right")
         expected = common_expected_type(left_type, right_type)
@@ -304,18 +436,31 @@ class LeanObligationBuilder:
 
         declarations = self.declarations()
         tactic = self.tactic()
-        source = "\n".join(
-            [
-                "import Std.Tactic.BVDecide",
-                "set_option autoImplicit false",
-                f"theorem {theorem_name}{declarations} : {proposition} := by",
-                *[f"  {line}" for line in tactic],
-                f"#print axioms {theorem_name}",
-                "",
-            ]
+        theorem_header = f"theorem {theorem_name}{declarations} : {proposition} := by"
+        proof_body = "\n".join(tactic)
+        canonical_statement = "\n".join(
+            ["import Std.Tactic.BVDecide", "set_option autoImplicit false", theorem_header, ""]
         )
+        source_build = LeanSourceBuild(
+            source="",
+            canonical_statement=canonical_statement,
+            proof_body=proof_body,
+            theorem_header=theorem_header,
+            proposition=proposition,
+            declarations=declarations,
+            tactic_profile="bitvector" if self.uses_bitvector else "bool_case_split" if self.used_symbols else "simp",
+        )
+        source = compose_lean_source(source_build, proof_body)
         reject_forbidden_source(source)
-        return source
+        return LeanSourceBuild(
+            source=source,
+            canonical_statement=canonical_statement,
+            proof_body=proof_body,
+            theorem_header=theorem_header,
+            proposition=proposition,
+            declarations=declarations,
+            tactic_profile=source_build.tactic_profile,
+        )
 
     def declarations(self) -> str:
         items = []
@@ -552,6 +697,136 @@ def lean_version(command: str, *, timeout_s: float) -> str:
     except Exception as exc:  # noqa: BLE001
         return f"unavailable: {type(exc).__name__}: {exc}"
     return (completed.stdout or completed.stderr).strip()
+
+
+def compose_lean_source(source_build: LeanSourceBuild, proof_body: str) -> str:
+    normalized = normalize_proof_body(proof_body)
+    lines = [
+        "import Std.Tactic.BVDecide",
+        "set_option autoImplicit false",
+        source_build.theorem_header,
+        *[f"  {line}" if line else "" for line in normalized.splitlines()],
+        f"#print axioms {theorem_name_from_header(source_build.theorem_header)}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def theorem_name_from_header(header: str) -> str:
+    match = re.match(r"\s*theorem\s+([A-Za-z0-9_']+)", header)
+    if not match:
+        raise ProofBuildError("canonical theorem header is malformed")
+    return match.group(1)
+
+
+def normalize_proof_body(value: str) -> str:
+    return textwrap.dedent(str(value)).strip()
+
+
+def request_llm_proof_body(
+    llm_backend: Any,
+    *,
+    model: str | None,
+    source_build: LeanSourceBuild,
+    obligation: ProofObligation,
+    theorem_name: str,
+    attempt: int,
+    previous_diagnostics: str,
+) -> dict[str, Any]:
+    prompt = {
+        "workflow": "lean4_canonical_proof_body",
+        "response_contract": {"proof_body": "Lean tactic proof body only; do not include theorem/import/axiom/sorry."},
+        "theorem_name": theorem_name,
+        "canonical_theorem_statement": source_build.canonical_statement,
+        "canonical_theorem_sha256": source_build.canonical_theorem_sha256,
+        "obligation": {
+            "id": obligation.obligation_id,
+            "kind": obligation.kind,
+            "path": obligation.path,
+            "rule_id": obligation.rule_id,
+            "metadata": dict(obligation.metadata),
+        },
+        "attempt": attempt,
+        "previous_diagnostics": previous_diagnostics,
+        "allowed_output": "Return strict JSON: {\"proof_body\": \"...\"}.",
+        "forbidden": sorted([*FORBIDDEN_PROOF_BODY_COMMANDS, "admit", "axiom", "def", "import", "opaque", "set_option", "sorry", "theorem", "unsafe"]),
+    }
+    try:
+        response = llm_backend.invoke(
+            LLMRequest(
+                prompt=prompt,
+                model=model,
+                system_prompt=(
+                    "You generate only the body of an existing Lean theorem. "
+                    "Never restate or modify the theorem statement."
+                ),
+                run_name="lean4_canonical_proof_body",
+                tags=("proof", "lean4", "canonical_theorem"),
+                metadata={"obligation_id": obligation.obligation_id, "theorem_name": theorem_name},
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - proof backend reports tool/LLM failures as issues
+        return {"ok": False, "code": "llm_proof_error", "message": f"{type(exc).__name__}: {exc}"}
+    if response is None:
+        return {"ok": False, "code": "llm_proof_unavailable", "message": "LLM proof backend returned no response"}
+    payload = response.parsed_json
+    if payload is None:
+        try:
+            payload = json.loads(response.content)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "code": "llm_proof_invalid_response", "message": f"LLM proof response is not JSON: {exc}"}
+    if not isinstance(payload, Mapping):
+        return {"ok": False, "code": "llm_proof_invalid_response", "message": "LLM proof response must be a JSON object"}
+    proof_body = payload.get("proof_body")
+    if not isinstance(proof_body, str) or not proof_body.strip():
+        return {"ok": False, "code": "llm_proof_invalid_response", "message": "LLM proof response must define non-empty proof_body"}
+    proof_body = normalize_proof_body(proof_body)
+    try:
+        validate_llm_proof_body(proof_body)
+    except ValueError as exc:
+        return {"ok": False, "code": "llm_proof_body_forbidden", "message": str(exc)}
+    return {"ok": True, "proof_body": proof_body}
+
+
+def validate_llm_proof_body(proof_body: str) -> None:
+    if "```" in proof_body:
+        raise ValueError("LLM proof body must not use markdown code fences")
+    for command in FORBIDDEN_PROOF_BODY_COMMANDS:
+        if command in proof_body:
+            raise ValueError(f"LLM proof body contains forbidden command {command!r}")
+    match = FORBIDDEN_PROOF_BODY_TOKENS.search(proof_body)
+    if match:
+        raise ValueError(f"LLM proof body contains forbidden token {match.group(1)!r}")
+    for line in proof_body.splitlines():
+        stripped = line.strip()
+        if stripped == "by" or stripped.startswith(":="):
+            raise ValueError("LLM proof body must not include theorem delimiters")
+
+
+def proof_artifact_metadata(context: Any, semantic_ir_override: Mapping[str, Any] | None, obligation: ProofObligation) -> dict[str, Any]:
+    metadata = getattr(context, "metadata", {}) or {}
+    semantic_ir = semantic_ir_override or metadata.get("semantic_ir")
+    ref_model_ir = metadata.get("ref_model_ir")
+    result: dict[str, Any] = {}
+    if isinstance(semantic_ir, Mapping):
+        result["semantic_ir_sha256"] = sha256_json(semantic_ir)
+    if isinstance(ref_model_ir, Mapping):
+        result["ref_model_ir_sha256"] = sha256_json(ref_model_ir)
+    source_ast_hash = obligation.metadata.get("source_ast_hash")
+    lowered_rule_hash = obligation.metadata.get("lowered_rule_hash")
+    if source_ast_hash:
+        result["source_ast_hash"] = str(source_ast_hash)
+    if lowered_rule_hash:
+        result["lowered_rule_hash"] = str(lowered_rule_hash)
+    return result
+
+
+def sha256_json(value: Any) -> str:
+    return sha256_text(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str))
+
+
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def run_lean_source(

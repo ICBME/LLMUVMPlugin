@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import copy
+
+from LLMPlugin import CallableLLMBackend
 from Spec2Backend.Checks import RefModelIRAdapter, SemanticSpecIRAdapter, run_checks
 from Spec2Backend.Checks.model import CheckContext, EquivalenceCheck, PredicateCheck, Symbol, TypeSpec
 from Spec2Backend.Proof import discover_lean, run_lean_source
@@ -458,6 +461,129 @@ def test_lean_backend_proves_semantic_plan_equivalence() -> None:
     assert proof["proved_obligations"] == ["semantic_plan_equiv:ref_rule_1:value"]
     assert proof["theorems"][0]["kind"] == "semantic_plan_equiv"
     assert proof["theorems"][0]["normalized_sha256"]
+    assert proof["theorems"][0]["statement_mode"] == "canonical"
+    assert proof["theorems"][0]["canonical_theorem_sha256"]
+    assert proof["theorems"][0]["proof_body_sha256"]
+    assert proof["theorems"][0]["semantic_ir_sha256"]
+    assert proof["theorems"][0]["source_ast_hash"] == plan["rules"][0]["source_ast_hash"]
+    assert proof["theorems"][0]["lowered_rule_hash"] == plan["rules"][0]["lowered_rule_hash"]
+
+
+def test_canonical_theorem_hash_changes_with_semantic_ast() -> None:
+    semantic_ir, readiness = _semantic_notgate_ir_and_readiness()
+    plan = build_ref_model_plan(semantic_ir, readiness=readiness)
+    report = run_checks(
+        semantic_ir,
+        SemanticSpecIRAdapter(),
+        passes=("schema", "reference", "type", "proof"),
+        proof_backend="lean4",
+        proof_options={"proof_scope": ("semantic",), "ref_model_plan": plan},
+    )
+
+    changed_ir = copy.deepcopy(semantic_ir)
+    changed_ir["semantic_elements"][0]["representation"]["ast"]["value"] = {"node": "field_ref", "name": "value"}
+    changed_plan = build_ref_model_plan(changed_ir, readiness=readiness)
+    changed_report = run_checks(
+        changed_ir,
+        SemanticSpecIRAdapter(),
+        passes=("schema", "reference", "type", "proof"),
+        proof_backend="lean4",
+        proof_options={"proof_scope": ("semantic",), "ref_model_plan": changed_plan},
+    )
+
+    assert report.passed is True
+    assert changed_report.passed is True
+    assert plan["rules"][0]["source_ast_hash"] != changed_plan["rules"][0]["source_ast_hash"]
+    assert (
+        report.metadata["proof"]["theorems"][0]["canonical_theorem_sha256"]
+        != changed_report.metadata["proof"]["theorems"][0]["canonical_theorem_sha256"]
+    )
+
+
+def test_llm_proof_body_can_prove_canonical_semantic_theorem() -> None:
+    semantic_ir, readiness = _semantic_notgate_ir_and_readiness()
+    plan = build_ref_model_plan(semantic_ir, readiness=readiness)
+    prompts = []
+
+    def llm(prompt, model):
+        prompts.append(prompt)
+        return {"proof_body": "simp"}
+
+    report = run_checks(
+        semantic_ir,
+        SemanticSpecIRAdapter(),
+        passes=("schema", "reference", "type", "proof"),
+        proof_backend="lean4",
+        proof_options={
+            "proof_scope": ("semantic",),
+            "ref_model_plan": plan,
+            "llm_backend": CallableLLMBackend(llm),
+            "llm_model": "fake-lean",
+        },
+    )
+
+    assert report.passed is True
+    theorem = report.metadata["proof"]["theorems"][0]
+    assert theorem["statement_mode"] == "canonical"
+    assert theorem["llm_attempts"][0]["status"] == "passed"
+    assert prompts[0]["workflow"] == "lean4_canonical_proof_body"
+    assert "canonical_theorem_statement" in prompts[0]
+
+
+def test_llm_proof_body_retries_with_lean_diagnostics() -> None:
+    semantic_ir, readiness = _semantic_and4_ir_and_readiness()
+    plan = build_ref_model_plan(semantic_ir, readiness=readiness)
+    ref_ir = _and4_ref_model_ir_commuted()
+    prompts = []
+
+    def llm(prompt, model):
+        prompts.append(prompt)
+        if len(prompts) <= 2:
+            return {"proof_body": "rfl"}
+        return {"proof_body": "bv_decide"}
+
+    report = run_checks(
+        ref_ir,
+        RefModelIRAdapter(ref_model_plan=plan),
+        passes=("schema", "reference", "type", "proof"),
+        proof_backend="lean4",
+        proof_options={
+            "proof_scope": ("semantic",),
+            "semantic_ir": semantic_ir,
+            "llm_backend": CallableLLMBackend(llm),
+            "llm_model": "fake-lean",
+            "llm_max_attempts": 2,
+        },
+    )
+
+    assert report.passed is True
+    assert len(prompts) == 3
+    assert prompts[2]["previous_diagnostics"]
+    theorem = next(item for item in report.metadata["proof"]["theorems"] if item["kind"] == "plan_ir_expr_equiv")
+    assert [attempt["status"] for attempt in theorem["llm_attempts"]] == ["failed", "passed"]
+
+
+def test_llm_proof_body_forbidden_tokens_are_blocking() -> None:
+    semantic_ir, readiness = _semantic_notgate_ir_and_readiness()
+    plan = build_ref_model_plan(semantic_ir, readiness=readiness)
+
+    def llm(prompt, model):
+        return {"proof_body": "theorem bad : True := by\n  trivial"}
+
+    report = run_checks(
+        semantic_ir,
+        SemanticSpecIRAdapter(),
+        passes=("schema", "reference", "type", "proof"),
+        proof_backend="lean4",
+        proof_options={
+            "proof_scope": ("semantic",),
+            "ref_model_plan": plan,
+            "llm_backend": CallableLLMBackend(llm),
+        },
+    )
+
+    assert report.passed is False
+    assert any(issue.code == "llm_proof_body_forbidden" for issue in report.blocked_issues)
 
 
 def test_lean_backend_proves_semantic_plan_and_plan_ir_equivalence() -> None:
@@ -750,3 +876,111 @@ def _semantic_notgate_ir_and_readiness() -> tuple[dict, dict]:
         ],
     }
     return semantic_ir, readiness
+
+
+def _semantic_and4_ir_and_readiness() -> tuple[dict, dict]:
+    semantic_ir = {
+        "schema_version": 6,
+        "target": "and4",
+        "inputs": [{"name": "a"}, {"name": "b"}],
+        "semantic_context": {
+            "version": 1,
+            "symbols": [
+                {
+                    "name": "a",
+                    "kind": "field",
+                    "type": {"type": "bitvector", "width": 4},
+                    "direction": "input",
+                    "roles": ["input"],
+                    "source": "manifest",
+                },
+                {
+                    "name": "b",
+                    "kind": "field",
+                    "type": {"type": "bitvector", "width": 4},
+                    "direction": "input",
+                    "roles": ["input"],
+                    "source": "manifest",
+                },
+                {
+                    "name": "expected",
+                    "kind": "field",
+                    "type": {"type": "bitvector", "width": 4},
+                    "direction": "output",
+                    "roles": ["output"],
+                    "source": "manifest",
+                },
+            ],
+            "constraints": [],
+        },
+        "semantic_elements": [
+            {
+                "id": "sem1",
+                "kind": "combinational_behavior",
+                "summary": "expected is a bitwise and b",
+                "formalization_status": "candidate",
+                "confidence": 1.0,
+                "subjects": ["expected"],
+                "evidence": [],
+                "claim_ids": [],
+                "representation": {
+                    "ast_version": 2,
+                    "kind": "combinational_relation",
+                    "text": "expected = a & b",
+                    "ast": {
+                        "node": "assignment",
+                        "target": {"node": "field_ref", "name": "expected"},
+                        "value": {
+                            "node": "binary_op",
+                            "op": "&",
+                            "left": {"node": "field_ref", "name": "a"},
+                            "right": {"node": "field_ref", "name": "b"},
+                        },
+                    },
+                },
+            }
+        ],
+    }
+    readiness = {
+        "schema_version": 1,
+        "status": "ready",
+        "review_gate": {},
+        "elements": [
+            {
+                "semantic_element_id": "sem1",
+                "support_status": "ready",
+                "recommended_backends": ["ref_model"],
+                "lowering_targets": [{"backend": "ref_model", "status": "ready"}],
+            }
+        ],
+    }
+    return semantic_ir, readiness
+
+
+def _and4_ref_model_ir_commuted() -> dict:
+    return {
+        "schema_version": 1,
+        "target": "and4",
+        "inputs": {
+            "a": {"type": "bitvector", "width": 4},
+            "b": {"type": "bitvector", "width": 4},
+        },
+        "outputs": {"expected": {"type": "bitvector", "width": 4}},
+        "rules": [
+            {
+                "id": "ref_rule_1",
+                "source_rule_id": "ref_rule_1",
+                "assign": {
+                    "expected": {
+                        "kind": "binary_op",
+                        "op": "&",
+                        "left": {"field": "b"},
+                        "right": {"field": "a"},
+                    }
+                },
+            }
+        ],
+        "externs": {},
+        "verification": {"required": True},
+        "metadata": {},
+    }

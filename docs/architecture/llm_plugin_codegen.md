@@ -72,6 +72,12 @@ LLM 只能修复 candidate IR 或 wrapper 输入，不能在 metadata 中宣称 
 implementation correctness 或 proof readiness。`wrapper_template_check` 也不证明任意 Python
 插件或 `RefModelInterpreter` 本身，只证明生成 wrapper 没有越过固定模板边界。
 
+当 proof feedback 使用 `llm_backend` 进行 Lean proof-body search 时，LLM 仍不能生成 theorem
+statement。Spec2Backend 会把 canonical theorem statement 和上一轮 Lean diagnostics 放入 prompt，
+LLM 只能返回 `{ "proof_body": "..." }`。任何试图输出 `theorem`、`def`、`axiom`、`sorry`、
+`import`、`set_option` 等 escape 的 proof body 都会被 proof backend 拒绝，并作为 blocking
+`proof` issue 反馈给下一轮生成或人工审查。
+
 ## Python API
 
 ```python
