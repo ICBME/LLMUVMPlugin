@@ -20,6 +20,8 @@ from LLMPlugin.langgraph_backend import create_langgraph_backend
 from Spec2Backend.BackendReadiness import analyze_backend_readiness
 from Spec2Backend.RefModelPlan import build_ref_model_plan
 from Spec2Backend.Spec2IR import (
+    AutomationPolicyGraph,
+    AutomationPolicyRule,
     build_semantic_spec_ir_repair_prompt,
     build_semantic_spec_ir_prompt,
     collect_semantic_spec_ir_issues,
@@ -1866,7 +1868,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             spec.write_text("The block computes SHA-256 over the input message.\n")
             fixed_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
             broken_ir = json.loads(json.dumps(fixed_ir))
-            broken_ir["evidence"][0]["quote"] = "missing quote"
+            broken_ir["semantic_elements"][0].pop("representation")
             testcase = self
 
             class FakeRepairBackend:
@@ -1895,6 +1897,165 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(result["review"]["status"], "passed")
             self.assertEqual(result["semantic_ir"], fixed_ir)
 
+    def test_semantic_repair_loop_applies_deterministic_traceability_repair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["sources"][0]["content_hash"] = "0" * 64
+            semantic_ir["spec_claims"][0].pop("fingerprint")
+            semantic_ir["spec_claims"][0].pop("decomposition")
+            semantic_ir["evidence"][0]["quote"] = "missing quote"
+
+            result = repair_semantic_spec_ir_with_review(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+                max_attempts=0,
+            )
+
+            self.assertEqual(result["status"], "valid")
+            self.assertEqual(result["attempt_count"], 0)
+            self.assertTrue(result["deterministic_repairs"])
+            actions = {
+                action["kind"]
+                for repair in result["deterministic_repairs"]
+                for action in repair["actions"]
+            }
+            self.assertIn("refresh_sources", actions)
+            self.assertIn("repair_claim_metadata", actions)
+            self.assertIn("repair_evidence_traceability", actions)
+            validate_semantic_spec_ir(
+                result["semantic_ir"],
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+            )
+
+    def test_semantic_repair_loop_auto_formalizes_machine_resolvable_gap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The done signal must pulse exactly one cycle after digest completion.\n")
+            broken_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            fixed_ir = copy.deepcopy(broken_ir)
+            _mark_first_latency_element_complete(fixed_ir)
+            testcase = self
+
+            class FakeFormalizeBackend:
+                name = "fake-formalize"
+
+                def invoke(self, request):
+                    testcase.assertEqual(
+                        request.prompt["workflow"],
+                        "semantic_spec_ir_auto_formalization",
+                    )
+                    testcase.assertEqual(
+                        request.prompt["automation_decision"]["route"],
+                        "llm_formalize",
+                    )
+                    return LLMResponse(
+                        content=json.dumps({"semantic_spec_ir": fixed_ir}),
+                    )
+
+            result = repair_semantic_spec_ir_with_review(
+                broken_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+                llm_backend=FakeFormalizeBackend(),
+                max_attempts=1,
+            )
+
+            self.assertEqual(result["status"], "repaired")
+            self.assertEqual(result["attempt_count"], 1)
+            self.assertEqual(result["review"]["status"], "passed")
+            self.assertEqual(result["automation_decisions"][0]["route"], "llm_formalize")
+
+    def test_semantic_repair_loop_accepts_custom_automation_policy_graph(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("This block has documented behavior.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            policy = AutomationPolicyGraph(
+                rules=(
+                    AutomationPolicyRule(
+                        name="local_policy_requires_human",
+                        route="human_required",
+                        reason="local policy disables LLM formalization",
+                        statuses=("needs_human_input",),
+                    ),
+                )
+            )
+
+            class UnexpectedBackend:
+                name = "unexpected"
+
+                def invoke(self, request):
+                    raise AssertionError("custom human policy must not invoke LLM repair")
+
+            result = repair_semantic_spec_ir_with_review(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+                llm_backend=UnexpectedBackend(),
+                automation_policy_graph=policy,
+                max_attempts=1,
+            )
+
+            self.assertEqual(result["status"], "needs_human_input")
+            self.assertEqual(result["attempt_count"], 0)
+            self.assertEqual(result["automation_decisions"][0]["policy_rule"], "local_policy_requires_human")
+
+    def test_semantic_repair_loop_keeps_true_human_question_blocking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["open_questions"] = [
+                {
+                    "id": "q1",
+                    "blocking": True,
+                    "status": "open",
+                    "question": "Confirm whether this candidate formalization is complete.",
+                    "related_items": ["sem1"],
+                    "claim_ids": ["claim1"],
+                    "suggested_answers": ["complete", "needs_more_detail"],
+                }
+            ]
+
+            class UnexpectedBackend:
+                name = "unexpected"
+
+                def invoke(self, request):
+                    raise AssertionError("human-only questions must not invoke LLM repair")
+
+            result = repair_semantic_spec_ir_with_review(
+                semantic_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+                llm_backend=UnexpectedBackend(),
+                max_attempts=1,
+            )
+
+            self.assertEqual(result["status"], "needs_human_input")
+            self.assertEqual(result["attempt_count"], 0)
+            self.assertEqual(result["automation_decisions"][0]["route"], "human_required")
+
     def test_semantic_repair_loop_reports_backend_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1903,7 +2064,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             manifest.write_text(_sha_manifest())
             spec.write_text("The block computes SHA-256 over the input message.\n")
             broken_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
-            broken_ir["evidence"][0]["quote"] = "missing quote"
+            broken_ir["semantic_elements"][0].pop("representation")
 
             class ErrorBackend:
                 name = "error-backend"
@@ -1937,7 +2098,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             manifest.write_text(_sha_manifest())
             spec.write_text("The block computes SHA-256 over the input message.\n")
             semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
-            semantic_ir["evidence"][0]["quote"] = "missing quote"
+            semantic_ir["semantic_elements"][0].pop("representation")
             semantic_ir_path.write_text(json.dumps(semantic_ir))
 
             status = codegen_cli_main(

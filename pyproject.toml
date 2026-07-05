@@ -21,7 +21,17 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = [
+    "ConnectGraph*",
     "LLMPlugin*",
     "Spec2Backend*",
+    "harness_optimization*",
     "rtlagent_bfm*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "real_data: tests that exercise Spec2IR on external or benchmark datasets",
+    "llm: tests that may call a configured LLM backend",
+    "slow: tests that are expected to take longer than ordinary unit tests",
 ]
