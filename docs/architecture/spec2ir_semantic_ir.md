@@ -82,6 +82,7 @@ Spec2Backend/
   Spec2IR/
     semantic_ir.py        # prompt、生成、rule-based draft、schema validation、IO
     validation_review.py  # structured review、completeness、traceability、human gate
+    automation.py         # review finding routing: LLM retry vs human-required
     semantic_repair.py    # validation-feedback repair loop
 LLMPlugin/
   base.py                 # provider-neutral request/response/backend protocol
@@ -121,8 +122,31 @@ Spec2Backend/FeedbackCodegen/
 
 - 根据当前 IR 和 review report 构造 repair prompt。
 - 调用 LLM 修复 schema、traceability、coverage 或 consistency 问题。
+- 对可由现有 source/manifest/DesignIR 推断的 blocking formalization gap 构造 auto-formalization
+  prompt，让 LLM 在进入 human-in-loop 前先尝试补全 typed `RepresentationAST`。
 - 对每次修复结果重新 review。
-- 对 human-blocking 情况停止自动 repair，并返回 `needs_human_input`。
+- 对缺少外部设计意图、存在真实歧义或冲突的 human-blocking 情况停止自动 repair，并返回
+  `needs_human_input`。
+- 在 LLM 调用前后运行 deterministic repair pass，修复 source payload、claim metadata 和
+  evidence traceability 这类机械字段，并在结果中记录 `deterministic_repairs` 供审计。
+
+### `automation.py`
+
+主要职责：
+
+- 将 `review_semantic_spec_ir()` 的 structured findings 归类为 `done`、`llm_repair`、
+  `llm_formalize` 或 `human_required`。
+- 通过 `AutomationPolicyGraph` / `AutomationPolicyRule` 表达默认 policy graph；调用方可以
+  传入自定义 graph 覆盖路由策略，例如在某些 target 上禁用 LLM formalization。
+- 提供 `deterministic_repair_semantic_spec_ir()`，只修复可从现有 spec files 机械重建的字段：
+  `sources[]` payload、`spec_claims[].fingerprint`、`spec_claims[].decomposition` 和
+  `evidence[]` 的 source/line/quote。
+- 把 source coverage 缺失、placeholder/text-only AST、缺 clock context、operation operand
+  缺失等局部形式化问题交给 LLM 再尝试。
+- 把 blocking open question、unknown reset polarity/synchrony、`ambiguous`/`conflict` 和
+  `missing_context` gap 保留给 human-in-loop。
+- policy graph 只输出路由决策，不调用 LLM；deterministic repair 只处理机械 traceability
+  字段，不做语义猜测，避免与 review、backend readiness 和 LLM provider 过度耦合。
 
 ### `Spec2Backend.Checks`
 
@@ -804,14 +828,26 @@ file-bundle fallback，但它不提供 IR-level formal proof。
 
 `repair_semantic_spec_ir_with_review()` 的行为：
 
-1. 对当前 IR 运行 review。
-2. 如果 review 已 `passed`，返回 `valid`。
-3. 如果 review 为 `needs_human_input`，返回 `needs_human_input`，不让 LLM 猜测人工语义。
-4. 如果 review 为 `failed` 且提供 LLM backend，则构造 repair prompt。
-5. LLM 返回完整修复后的 `SemanticSpecIR`。
-6. 归一化、review，并按 `max_attempts` 重试。
-7. 成功返回 `repaired`；LLM 不可用返回 `llm_unavailable`；响应不可解析返回
+1. 对当前 IR 先运行 deterministic repair pass，刷新机械 traceability 字段。
+2. 对修复后的 IR 运行 review。
+3. 如果 review 已 `passed`，返回 `valid`。
+4. 使用 `classify_review_for_automation()` 对 review findings 做路由。
+5. 如果 review 为 `failed` 且提供 LLM backend，则构造 validation-feedback repair prompt。
+6. 如果 review 为 `needs_human_input` 但路由为 `llm_formalize`，则构造 auto-formalization
+   prompt，让 LLM 只解决可由现有上下文支持的 typed AST / claim coverage 缺口。
+7. 如果路由为 `human_required`，或没有可用 LLM backend，则返回 `needs_human_input`。
+8. LLM 返回完整修复后的 `SemanticSpecIR`。
+9. 归一化后再次运行 deterministic repair pass，避免 LLM 破坏机械 traceability 字段。
+10. 重新 review，并按 `max_attempts` 重试。
+11. 成功返回 `repaired`；LLM 不可用返回 `llm_unavailable`；响应不可解析返回
    `llm_invalid_response`；耗尽尝试返回 `repair_failed`。
+
+repair result 会包含：
+
+- `automation_decisions`: 每轮 review 的 policy graph 路由结果，包括 rule name、route、
+  affected claims 和 issue codes。
+- `deterministic_repairs`: 每次规则修复的 action 列表，例如 `refresh_sources`、
+  `repair_claim_metadata` 和 `repair_evidence_traceability`。
 
 repair prompt 的核心约束：
 
@@ -821,6 +857,15 @@ repair prompt 的核心约束：
 - 不发明 manifest fields、DesignIR bindings 或 source files。
 - 不在 Spec2IR 阶段生成 Python、OracleIR、SVA 或 plugin artifact。
 - 无法安全形式化时，把语义留在 `semantic_gaps` 或 `open_questions`。
+
+auto-formalization prompt 额外约束：
+
+- 只能解决 `automation_decision` 指向的局部问题。
+- 只有当 source、manifest 或 DesignIR 已提供足够证据时，才能把 `semantic_claim`、`text_expr`
+  或缺失 clock context 修成 typed `RepresentationAST`。
+- 不能替 human 回答需要设计意图的问题；仍有多种合理解释时必须保留 blocking
+  `open_questions` 或 `semantic_gaps`。
+- 不能把 `review.status` 标为 `accepted`。
 
 ## LLM backend 插件化
 
@@ -898,6 +943,10 @@ tests/test_generated_plugin_integration.py
 - legacy `representation.type` / `representation.fields[]` 会被拒绝。
 - `field_ref` AST 节点必须引用 manifest fields。
 - repair loop 成功、backend error 和无 LLM 情况。
+- automation routing：可机器解决的 `needs_human_input` 会进入 auto-formalization prompt；
+  blocking open question 不会调用 LLM。
+- custom automation policy graph 可以覆盖默认路由。
+- deterministic repair 可以在无 LLM 时修复机械 traceability/claim metadata 问题。
 
 推荐回归命令：
 
@@ -927,6 +976,10 @@ git diff --check
 - `confidence` 当前只做范围校验，还没有基于证据强度或多轮一致性的评分策略。
 - human answers 当前只作为 review gate 信号，尚未定义标准 patch/action 格式。
 - optional DesignIR 当前只做可加载性检查，尚未参与 signal/port/clock/reset 层的一致性验证。
+- automation routing 当前是保守可配置 policy graph；它能区分常见机器可修复 gap 与明显
+  human-only 问题，但还没有基于历史成功率、置信度或多 agent 交叉审查的动态策略。
+- deterministic repair 当前只修机械 traceability 字段，不会补 AST、signal binding 或
+  clock/reset 语义；这些仍由 LLM formalization 或 human-in-loop 完成。
 
 这些限制不会破坏现有审查链路，因为无法完整形式化的语义必须进入 blocking
 `formalization_status`、`semantic_gaps` 或 `open_questions`，后续 artifact 生成不应消费未通过
@@ -946,9 +999,11 @@ review gate 的 IR。
    register maps 和简单 waveform/example。
 5. 定义 human-in-loop patch/action 格式，例如 answer question、accept element、
    reject element、split claim、merge claims、add semantic gap。
-6. 建立 VerilogEval 小集合 golden SemanticSpecIR benchmark，例如 zero、notgate、hadd、
+6. 将 `automation.py` 的固定规则演进为可配置 policy graph，记录每类 finding 的尝试次数、
+   成功率、置信度和最终 human escalation 原因。
+7. 建立 VerilogEval 小集合 golden SemanticSpecIR benchmark，例如 zero、notgate、hadd、
    dff、fsm2s。
-7. 新增 `ArtifactPlan` 层，将 `SemanticSpecIR` 映射为 ref model plan、SVA plan 和
+8. 新增 `ArtifactPlan` 层，将 `SemanticSpecIR` 映射为 ref model plan、SVA plan 和
    human review plan。该层可以判断 backend support，但判断结果不应回写为 Spec2IR 语义。
 
 ## 设计原则

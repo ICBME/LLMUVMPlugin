@@ -10,6 +10,12 @@ from typing import Any, Callable, Iterable
 from LLMPlugin import CallableLLMBackend, LLMBackend, LLMBackendError, LLMRequest
 from rtlagent_bfm.loader import load_ir
 
+from .automation import (
+    AutomationPolicyGraph,
+    LLM_FORMALIZE,
+    classify_review_for_automation,
+    deterministic_repair_semantic_spec_ir,
+)
 from .manifest import load_manifest_summary
 from .semantic_ir import (
     SemanticSpecIRCallable,
@@ -82,6 +88,44 @@ def build_semantic_spec_ir_repair_prompt(
     }
 
 
+def build_semantic_spec_ir_auto_formalization_prompt(
+    semantic_ir: dict[str, Any],
+    *,
+    manifest_path: str | Path | None = None,
+    spec_paths: Iterable[str | Path] = (),
+    design_ir_path: str | Path | None = None,
+    target: str | None = None,
+    require_reviewed: bool = False,
+    automation_decision: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a focused prompt for resolving local SemanticSpecIR gaps."""
+
+    prompt = build_semantic_spec_ir_repair_prompt(
+        semantic_ir,
+        manifest_path=manifest_path,
+        spec_paths=spec_paths,
+        design_ir_path=design_ir_path,
+        target=target,
+        require_reviewed=require_reviewed,
+    )
+    prompt["task"] = (
+        "Resolve machine-resolvable SemanticSpecIR gaps using only the provided "
+        "manifest, DesignIR, source specs, current IR, and review findings."
+    )
+    prompt["workflow"] = "semantic_spec_ir_auto_formalization"
+    prompt["automation_decision"] = automation_decision or {}
+    prompt["constraints"] = [
+        *prompt["constraints"],
+        "Only resolve findings that are supported by the provided source text, manifest, or DesignIR.",
+        "You may replace semantic_claim or text_expr placeholders with typed RepresentationAST when the evidence is sufficient.",
+        "You may add missing clock_reset_context only when the clock/reset signal is explicit in the source, manifest, or DesignIR.",
+        "You may add spec_claims for uncovered source spans only when the quote and line range are traceable to the supplied specs.",
+        "Do not answer questions that require external design intent; preserve those as blocking open_questions or semantic_gaps.",
+        "If multiple interpretations remain plausible, return the uncertainty explicitly instead of choosing one.",
+    ]
+    return prompt
+
+
 def repair_semantic_spec_ir_with_review(
     semantic_ir: dict[str, Any],
     *,
@@ -94,6 +138,7 @@ def repair_semantic_spec_ir_with_review(
     llm_callable: SemanticSpecIRCallable | None = None,
     model: str | None = None,
     max_attempts: int = 2,
+    automation_policy_graph: AutomationPolicyGraph | None = None,
 ) -> dict[str, Any]:
     """Review and optionally repair a SemanticSpecIR with an LLM backend."""
 
@@ -103,6 +148,15 @@ def repair_semantic_spec_ir_with_review(
     if backend is None and llm_callable is not None:
         backend = CallableLLMBackend(llm_callable)
     llm_responses: list[dict[str, Any]] = []
+    automation_decisions: list[dict[str, Any]] = []
+    deterministic_repairs: list[dict[str, Any]] = []
+    deterministic = deterministic_repair_semantic_spec_ir(
+        current,
+        spec_paths=spec_path_tuple,
+    )
+    if deterministic.changed:
+        current = deterministic.semantic_ir
+        deterministic_repairs.append(deterministic.to_dict())
     review = review_semantic_spec_ir(
         current,
         manifest_path=manifest_path,
@@ -120,14 +174,64 @@ def repair_semantic_spec_ir_with_review(
         require_reviewed=require_reviewed,
     )
     if review["status"] == "passed":
-        return repair_result("valid", current, review, prompt, llm_responses)
-    if review["status"] == "needs_human_input":
-        return repair_result("needs_human_input", current, review, prompt, llm_responses)
+        return repair_result(
+            "valid",
+            current,
+            review,
+            prompt,
+            llm_responses,
+            automation_decisions,
+            deterministic_repairs,
+        )
+    decision = classify_review_for_automation(
+        review,
+        current,
+        policy_graph=automation_policy_graph,
+    )
+    automation_decisions.append(decision.to_dict())
+    if review["status"] == "needs_human_input" and not decision.needs_llm:
+        return repair_result(
+            "needs_human_input",
+            current,
+            review,
+            prompt,
+            llm_responses,
+            automation_decisions,
+            deterministic_repairs,
+        )
     if backend is None:
-        return repair_result("invalid", current, review, prompt, llm_responses)
+        status = "needs_human_input" if review["status"] == "needs_human_input" else "invalid"
+        return repair_result(
+            status,
+            current,
+            review,
+            prompt,
+            llm_responses,
+            automation_decisions,
+            deterministic_repairs,
+        )
 
     attempts = max(0, int(max_attempts))
     for _attempt in range(attempts):
+        if decision.route == LLM_FORMALIZE:
+            prompt = build_semantic_spec_ir_auto_formalization_prompt(
+                current,
+                manifest_path=manifest_path,
+                spec_paths=spec_path_tuple,
+                design_ir_path=design_ir_path,
+                target=target,
+                require_reviewed=require_reviewed,
+                automation_decision=decision.to_dict(),
+            )
+        else:
+            prompt = build_semantic_spec_ir_repair_prompt(
+                current,
+                manifest_path=manifest_path,
+                spec_paths=spec_path_tuple,
+                design_ir_path=design_ir_path,
+                target=target,
+                require_reviewed=require_reviewed,
+            )
         try:
             response = invoke_semantic_repair_backend(
                 backend,
@@ -137,15 +241,47 @@ def repair_semantic_spec_ir_with_review(
             )
         except LLMBackendError as exc:
             llm_responses.append(llm_error_payload(exc, backend=backend))
-            return repair_result("llm_unavailable", current, review, prompt, llm_responses)
+            return repair_result(
+                "llm_unavailable",
+                current,
+                review,
+                prompt,
+                llm_responses,
+                automation_decisions,
+                deterministic_repairs,
+            )
         if response is None:
-            return repair_result("llm_unavailable", current, review, prompt, llm_responses)
+            return repair_result(
+                "llm_unavailable",
+                current,
+                review,
+                prompt,
+                llm_responses,
+                automation_decisions,
+                deterministic_repairs,
+            )
         llm_responses.append(response)
         try:
             current = normalize_semantic_spec_ir_response(response)
         except (TypeError, ValueError) as exc:
             review = review_with_response_error(review, str(exc))
-            return repair_result("llm_invalid_response", current, review, prompt, llm_responses)
+            return repair_result(
+                "llm_invalid_response",
+                current,
+                review,
+                prompt,
+                llm_responses,
+                automation_decisions,
+                deterministic_repairs,
+            )
+
+        deterministic = deterministic_repair_semantic_spec_ir(
+            current,
+            spec_paths=spec_path_tuple,
+        )
+        if deterministic.changed:
+            current = deterministic.semantic_ir
+            deterministic_repairs.append(deterministic.to_dict())
 
         review = review_semantic_spec_ir(
             current,
@@ -155,20 +291,42 @@ def repair_semantic_spec_ir_with_review(
             target=target,
             require_reviewed=require_reviewed,
         )
-        prompt = build_semantic_spec_ir_repair_prompt(
-            current,
-            manifest_path=manifest_path,
-            spec_paths=spec_path_tuple,
-            design_ir_path=design_ir_path,
-            target=target,
-            require_reviewed=require_reviewed,
-        )
         if review["status"] == "passed":
-            return repair_result("repaired", current, review, prompt, llm_responses)
-        if review["status"] == "needs_human_input":
-            return repair_result("needs_human_input", current, review, prompt, llm_responses)
+            return repair_result(
+                "repaired",
+                current,
+                review,
+                prompt,
+                llm_responses,
+                automation_decisions,
+                deterministic_repairs,
+            )
+        decision = classify_review_for_automation(
+            review,
+            current,
+            policy_graph=automation_policy_graph,
+        )
+        automation_decisions.append(decision.to_dict())
+        if review["status"] == "needs_human_input" and not decision.needs_llm:
+            return repair_result(
+                "needs_human_input",
+                current,
+                review,
+                prompt,
+                llm_responses,
+                automation_decisions,
+                deterministic_repairs,
+            )
 
-    return repair_result("repair_failed", current, review, prompt, llm_responses)
+    return repair_result(
+        "repair_failed",
+        current,
+        review,
+        prompt,
+        llm_responses,
+        automation_decisions,
+        deterministic_repairs,
+    )
 
 
 def repair_semantic_spec_ir_file(
@@ -230,6 +388,8 @@ def repair_result(
     review: dict[str, Any],
     prompt: dict[str, Any],
     llm_responses: list[dict[str, Any]],
+    automation_decisions: list[dict[str, Any]] | None = None,
+    deterministic_repairs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
         "status": status,
@@ -237,6 +397,8 @@ def repair_result(
         "review": review,
         "prompt": prompt,
         "llm_responses": llm_responses,
+        "automation_decisions": automation_decisions or [],
+        "deterministic_repairs": deterministic_repairs or [],
         "attempt_count": len(llm_responses),
     }
 
