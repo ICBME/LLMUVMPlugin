@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import tempfile
 
 import pytest
+
+from LLMPlugin import LLMResponse
+
+from Spec2Backend.Spec2IR import generate_semantic_spec_ir
 
 from .adapters import materialize_verilogeval_case
 from .datasets import RealDataCase, load_verilogeval_cases, verilogeval_root_from_env
@@ -154,6 +159,60 @@ def test_verilogeval_llm_mode_rejects_backend_without_response() -> None:
             )
 
 
+def test_verilogeval_llm_agent_uses_previous_attempt_context_for_repair() -> None:
+    class ContextAwareBackend:
+        name = "context-aware"
+
+        def __init__(self, fixed_ir: dict):
+            self.fixed_ir = fixed_ir
+            self.prompts: list[dict] = []
+
+        def invoke(self, request):  # noqa: ANN001 - protocol-shaped test double
+            self.prompts.append(request.prompt)
+            if len(self.prompts) == 1:
+                return LLMResponse(
+                    content='{"action": "submit_semantic_spec_ir", "semantic_spec_ir": {"not": "semantic ir"}}'
+                )
+            history = request.prompt["attempt_history"]
+            assert history
+            assert history[0]["status"] == "llm_invalid_response"
+            assert history[0]["harness_result"]["error"]["type"] == "ValueError"
+            return LLMResponse(
+                content='{"action": "submit_semantic_spec_ir", "semantic_spec_ir": '
+                + json.dumps(self.fixed_ir, sort_keys=True)
+                + "}"
+            )
+
+    case = _available_cases(limit=1)[0]
+    with tempfile.TemporaryDirectory() as tmp:
+        materialized = materialize_verilogeval_case(case, Path(tmp) / "materialized")
+        fixed_ir = generate_semantic_spec_ir(
+            manifest_path=materialized.manifest_path,
+            spec_paths=[materialized.spec_path],
+            target=materialized.target,
+        )
+        fixed_ir["review"]["status"] = "draft"
+        backend = ContextAwareBackend(fixed_ir)
+        result = run_verilogeval_case(
+            case,
+            work_root=Path(tmp) / "run",
+            with_llm=True,
+            llm_backend=backend,
+        )
+
+    assert result.status == "passed"
+    assert result.repair_result is not None
+    assert result.repair_result["attempt_count"] == 2
+    assert [attempt["status"] for attempt in result.repair_result["attempts"]] == [
+        "llm_invalid_response",
+        "review_failed",
+    ]
+    assert result.repair_result["status"] == "repair_failed"
+    assert len(backend.prompts) == 2
+    assert backend.prompts[1]["attempt_history"][0]["status"] == "llm_invalid_response"
+    assert any(stage.name == "llm_agent" and stage.status == "passed" for stage in result.stages)
+
+
 @pytest.mark.llm
 @pytest.mark.slow
 def test_verilogeval_optional_llm_smoke() -> None:
@@ -167,6 +226,6 @@ def test_verilogeval_optional_llm_smoke() -> None:
     assert result.status == "passed"
     assert result.schema_valid
     assert any(
-        stage.name == "llm_generation" and stage.status == "passed"
+        stage.name == "llm_agent" and stage.status == "passed"
         for stage in result.stages
     )

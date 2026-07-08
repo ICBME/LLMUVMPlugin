@@ -14,6 +14,7 @@ from Spec2Backend.Spec2IR import (
     generate_semantic_spec_ir,
     repair_semantic_spec_ir_with_review,
     review_semantic_spec_ir,
+    run_spec2ir_agent,
     validate_semantic_spec_ir,
 )
 
@@ -85,11 +86,6 @@ class RealDataCaseResult:
         return payload
 
 
-def _is_rule_based_semantic_ir(semantic_ir: dict[str, Any]) -> bool:
-    metadata = semantic_ir.get("metadata", {})
-    return metadata.get("source") == "rule_based_semantic_spec_ir_generator"
-
-
 def _env_int(name: str, default: int) -> int:
     raw_value = os.environ.get(name)
     if raw_value in (None, ""):
@@ -142,33 +138,11 @@ def run_verilogeval_case(
             result.add_stage("llm_backend", "failed", result.error)
             raise RealDataLLMRuntimeError(result.error)
 
-        semantic_ir = None
-        if with_llm and backend is not None:
-            try:
-                semantic_ir = generate_semantic_spec_ir(
-                    manifest_path=materialized.manifest_path,
-                    spec_paths=[materialized.spec_path],
-                    target=materialized.target,
-                    llm_backend=backend,
-                    model=model,
-                )
-            except Exception as exc:  # noqa: BLE001 - normalize provider/setup errors
-                result.error = f"{type(exc).__name__}: {exc}"
-                result.add_stage("llm_generation", "failed", result.error)
-                raise RealDataLLMRuntimeError(
-                    f"Spec2IR LLM generation failed: {result.error}"
-                ) from exc
-            if _is_rule_based_semantic_ir(semantic_ir):
-                result.error = "LLM backend returned no response; generation fell back to rule-based IR"
-                result.add_stage("llm_generation", "failed", result.error)
-                raise RealDataLLMRuntimeError(result.error)
-            result.add_stage("llm_generation", "passed")
-        else:
-            semantic_ir = generate_semantic_spec_ir(
-                manifest_path=materialized.manifest_path,
-                spec_paths=[materialized.spec_path],
-                target=materialized.target,
-            )
+        semantic_ir = generate_semantic_spec_ir(
+            manifest_path=materialized.manifest_path,
+            spec_paths=[materialized.spec_path],
+            target=materialized.target,
+        )
         result.semantic_ir = semantic_ir
         result.add_stage("generation", "passed")
 
@@ -181,21 +155,33 @@ def run_verilogeval_case(
         result.schema_valid = True
         result.add_stage("schema_validation", "passed")
 
-        repair = repair_semantic_spec_ir_with_review(
-            semantic_ir,
-            manifest_path=materialized.manifest_path,
-            spec_paths=[materialized.spec_path],
-            target=materialized.target,
-            llm_backend=backend if with_llm else None,
-            model=model,
-            max_attempts=2,
-        )
+        if with_llm and backend is not None:
+            repair = run_spec2ir_agent(
+                initial_semantic_ir=semantic_ir,
+                manifest_path=materialized.manifest_path,
+                spec_paths=[materialized.spec_path],
+                target=materialized.target,
+                llm_backend=backend,
+                model=model,
+                max_attempts=2,
+                run_name="spec2ir_real_data_agent",
+            )
+            if repair["status"] in {"llm_unavailable", "llm_invalid_response"}:
+                result.error = llm_agent_error_message(repair)
+                result.add_stage("llm_agent", "failed", result.error)
+                raise RealDataLLMRuntimeError(result.error)
+            result.add_stage("llm_agent", "passed")
+        else:
+            repair = repair_semantic_spec_ir_with_review(
+                semantic_ir,
+                manifest_path=materialized.manifest_path,
+                spec_paths=[materialized.spec_path],
+                target=materialized.target,
+                max_attempts=2,
+            )
         result.repair_result = repair
         result.semantic_ir = repair["semantic_ir"]
         result.add_stage("automation_repair", repair["status"])
-        if with_llm and repair["status"] in {"llm_unavailable", "llm_invalid_response"}:
-            result.error = f"Spec2IR LLM repair failed with status {repair['status']}"
-            raise RealDataLLMRuntimeError(result.error)
 
         review = review_semantic_spec_ir(
             result.semantic_ir,
@@ -223,6 +209,23 @@ def run_verilogeval_case(
         result.traceback_text = traceback.format_exc()
         result.add_stage("error", "failed", result.error)
         return result
+
+
+def llm_agent_error_message(repair: dict[str, Any]) -> str:
+    status = str(repair.get("status") or "unknown")
+    attempts = repair.get("attempts")
+    if isinstance(attempts, list):
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                continue
+            error = attempt.get("error")
+            if isinstance(error, dict):
+                message = str(error.get("message") or "")
+                if message:
+                    if status == "llm_unavailable" and "returned no response" in message:
+                        return f"Spec2IR LLM agent returned no response: {message}"
+                    return f"Spec2IR LLM agent failed with status {status}: {message}"
+    return f"Spec2IR LLM agent failed with status {status}"
 
 
 def run_verilogeval_cases(

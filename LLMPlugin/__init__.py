@@ -7,6 +7,7 @@ from .base import (
     LLMRequest,
     LLMResponse,
 )
+from .agent import LLMAgentConfig, LLMAgentHarness, LLMAgentRunner
 from .langchain_backend import LangChainBackendConfig, LangChainLLMBackend
 from .langgraph_backend import LangGraphBackendConfig, LangGraphLLMBackend
 from .registry import (
@@ -21,6 +22,9 @@ __all__ = [
     "LLMBackendError",
     "LLMRequest",
     "LLMResponse",
+    "LLMAgentConfig",
+    "LLMAgentHarness",
+    "LLMAgentRunner",
     "LangChainBackendConfig",
     "LangChainLLMBackend",
     "LangGraphBackendConfig",

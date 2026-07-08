@@ -52,10 +52,11 @@ SPEC2IR_REALDATA_ENABLE_LLM=1 \
 uv run pytest tests_real/spec2ir -m "real_data and llm" -q
 ```
 
-LLM-enabled real-data runs are strict. If the backend cannot be created, the LLM
-request fails, or the backend returns no response and would otherwise fall back
-to offline rule-based generation, the runner raises `RealDataLLMRuntimeError`.
-This keeps real LLM smoke tests from passing when the LLM was not actually used.
+LLM-enabled real-data runs are strict. The runner first builds a deterministic
+rule-based draft, then calls the `LLMPlugin` agent through `Spec2IRHarness`.
+If the backend cannot be created, the LLM request fails, or the backend returns
+no response, the runner raises `RealDataLLMRuntimeError`. This keeps real LLM
+smoke tests from passing when the LLM was not actually used.
 
 ## Batch Evaluation
 
@@ -72,7 +73,7 @@ uv run python -m tests_real.spec2ir.run_eval \
 The runner uses this stage graph:
 
 ```text
-dataset -> adapter -> generation -> automation_repair -> review -> readiness -> metrics
+dataset -> adapter -> generation -> llm_agent? -> automation_repair -> review -> readiness -> metrics
 ```
 
 Default runs are offline and do not call an LLM. Add `--with-llm` only for manual

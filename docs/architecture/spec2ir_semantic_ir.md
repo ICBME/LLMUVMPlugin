@@ -38,28 +38,25 @@ natural-language specs
 optional DesignIR
         |
         v
-build_semantic_spec_ir_prompt()
+Spec2IRHarness
         |
-        +--> LLMPlugin backend --------------+
-        |                                    |
-        +--> rule-based conservative draft --+
-                                             |
-                                             v
-                         normalize_semantic_spec_ir_response()
-                                             |
-                                             v
-                              validate_semantic_spec_ir()
-                                             |
-                                             v
-                              review_semantic_spec_ir()
-                                             |
-                      +----------------------+----------------------+
-                      |                                             |
-                      v                                             v
-        passed / accepted SemanticSpecIR            repair prompt / human input
-                      |                                             |
-                      v                                             |
-       future ArtifactPlan / RefModelPlan / SVAPlan <---------------+
+        +--> rule-based conservative draft
+        +--> normalize submitted candidate
+        +--> deterministic repair
+        +--> review_semantic_spec_ir()
+        |
+        v
+LLMPlugin Agent observes harness state and submits JSON actions
+        |
+        +--> submit_semantic_spec_ir
+        +--> mark_human_required
+        +--> request_finalize
+        |
+        v
+passed / accepted SemanticSpecIR or human input handoff
+        |
+        v
+future ArtifactPlan / RefModelPlan / SVAPlan
 ```
 
 `SemanticSpecIR` 是规格语义层。后续产物规划应另建 `ArtifactPlan` 或类似中间层：
@@ -84,8 +81,10 @@ Spec2Backend/
     validation_review.py  # structured review、completeness、traceability、human gate
     automation.py         # review finding routing: LLM retry vs human-required
     semantic_repair.py    # validation-feedback repair loop
+    harness.py            # agent-callable Spec2IR harness and run_spec2ir_agent assembly
 LLMPlugin/
   base.py                 # provider-neutral request/response/backend protocol
+  agent.py                # reusable LLM agent loop over JSON-action harnesses
   registry.py             # backend registry
   langchain_backend.py    # OpenAI-compatible LangChain backend
   langgraph_backend.py    # LangGraph wrapper
@@ -129,6 +128,23 @@ Spec2Backend/FeedbackCodegen/
   `needs_human_input`。
 - 在 LLM 调用前后运行 deterministic repair pass，修复 source payload、claim metadata 和
   evidence traceability 这类机械字段，并在结果中记录 `deterministic_repairs` 供审计。
+
+该模块中的直接 LLM repair loop 是迁移前接口，保留给兼容调用和 prompt helper。新的推荐
+LLM 入口是 `run_spec2ir_agent()`，由 `LLMPlugin.agent` 维护多轮上下文并调用
+`Spec2IRHarness`。
+
+### `harness.py`
+
+主要职责：
+
+- 提供 `Spec2IRHarness`，把 Spec2IR 暴露为 agent 可调用的 JSON action harness。
+- `start()` 加载或接收初始 `SemanticSpecIR`，运行 deterministic repair 和 review。
+- `observe()` 返回当前 IR、review report、automation decision、schema/response contract、
+  输入上下文、deterministic repair 和 harness attempt history。
+- `apply()` 只接受 `submit_semantic_spec_ir`、`mark_human_required` 和 `request_finalize`。
+  `submit_semantic_spec_ir` 会归一化完整 candidate IR，重新 deterministic repair 并 review。
+- harness 不调用 LLM、不持有 backend、不构造 provider message；LLM 上下文和 provider
+  provenance 由 `LLMPlugin.agent` 管理。
 
 ### `automation.py`
 
@@ -203,10 +219,15 @@ imports 或 definitions。proof metadata 会记录 `semantic_ir_sha256`、`sourc
 主要职责：
 
 - 提供 provider-neutral `LLMRequest` / `LLMResponse` / `LLMBackend` 协议。
+- 提供 provider-neutral `LLMAgentRunner` / `LLMAgentHarness` 协议，用 JSON action loop
+  驱动任意 harness。
 - 通过 registry 支持插件化 backend 创建。
 - 当前内置 `langchain` 和 `langgraph` backend。
 - `langgraph` 当前是单节点 wrapper，后续可以扩展为 retry、repair、review routing 或
   human handoff graph，而不改变 Spec2IR 调用接口。
+
+`LLMPlugin` 不依赖 `Spec2Backend`。Spec2IR agent 是通过加载 `Spec2IRHarness` 形成的组合，
+不是 LLMPlugin 的内置业务逻辑。
 
 ## SemanticSpecIR v6 数据模型
 
@@ -824,34 +845,37 @@ file-bundle fallback，但它不提供 IR-level formal proof。
 - `require_reviewed=True` 时，`review.status` 必须是 `accepted`。
 - blocking open question 必须被关闭、解决、接受，或在 `review.human_answers` 中回答。
 
-## Repair loop
+## Spec2IR agent loop
 
-`repair_semantic_spec_ir_with_review()` 的行为：
+推荐的 LLM 入口是 `run_spec2ir_agent()`。它组合 `Spec2IRHarness` 与
+`LLMPlugin.LLMAgentRunner`：
 
-1. 对当前 IR 先运行 deterministic repair pass，刷新机械 traceability 字段。
-2. 对修复后的 IR 运行 review。
-3. 如果 review 已 `passed`，返回 `valid`。
-4. 使用 `classify_review_for_automation()` 对 review findings 做路由。
-5. 如果 review 为 `failed` 且提供 LLM backend，则构造 validation-feedback repair prompt。
-6. 如果 review 为 `needs_human_input` 但路由为 `llm_formalize`，则构造 auto-formalization
-   prompt，让 LLM 只解决可由现有上下文支持的 typed AST / claim coverage 缺口。
-7. 如果路由为 `human_required`，或没有可用 LLM backend，则返回 `needs_human_input`。
-8. LLM 返回完整修复后的 `SemanticSpecIR`。
-9. 归一化后再次运行 deterministic repair pass，避免 LLM 破坏机械 traceability 字段。
-10. 重新 review，并按 `max_attempts` 重试。
-11. 成功返回 `repaired`；LLM 不可用返回 `llm_unavailable`；响应不可解析返回
+1. harness 加载初始 IR 或生成 rule-based draft。
+2. harness 运行 deterministic repair、review 和 automation routing。
+3. 如果 review 已 `passed`，直接返回 `valid`。
+4. 如果路由为 human-only，直接返回 `needs_human_input`。
+5. agent 读取 `harness.observe()`，把当前 IR、review、automation decision 和 attempt
+   history 放入 messages。
+6. LLM 返回一个 JSON action：`submit_semantic_spec_ir`、`mark_human_required` 或
+   `request_finalize`。
+7. harness 对 submitted candidate 运行 normalize、deterministic repair 和 review。
+8. agent 将无效 JSON、无效 action、harness result 和 provider provenance 记录到下一轮
+   attempt history。
+9. 成功返回 `repaired`；LLM 不可用返回 `llm_unavailable`；响应不可解析返回
    `llm_invalid_response`；耗尽尝试返回 `repair_failed`。
 
-repair result 会包含：
+agent result 会包含：
 
 - `automation_decisions`: 每轮 review 的 policy graph 路由结果，包括 rule name、route、
   affected claims 和 issue codes。
 - `deterministic_repairs`: 每次规则修复的 action 列表，例如 `refresh_sources`、
   `repair_claim_metadata` 和 `repair_evidence_traceability`。
+- `attempts`: LLMPlugin agent 维护的 provider response、action、错误和 harness result 摘要。
+- `llm_provenance`: backend、model、run name、tags 和 attempt count。
 
-repair prompt 的核心约束：
+harness action 的核心约束：
 
-- 返回完整 IR，不返回 patch fragment。
+- `submit_semantic_spec_ir` 必须返回完整 IR，不返回 patch fragment。
 - 保留或修复所有 source-derived normative claims。
 - 不伪造 source quote。
 - 不发明 manifest fields、DesignIR bindings 或 source files。
@@ -869,12 +893,21 @@ auto-formalization prompt 额外约束：
 
 ## LLM backend 插件化
 
-Spec2IR 不直接依赖某个 provider。所有 LLM 调用经过 `LLMPlugin`：
+Spec2IR 不直接依赖某个 provider。推荐 LLM 调用路径是 `LLMPlugin` agent + Spec2IR harness：
 
 ```python
 from LLMPlugin import create_backend
+from Spec2Backend.Spec2IR import run_spec2ir_agent
 
 backend = create_backend("langgraph", model="...")
+result = run_spec2ir_agent(
+    manifest_path="targets/demo.toml",
+    spec_paths=("specs/demo.md",),
+    target="demo",
+    llm_backend=backend,
+    model="...",
+    max_attempts=2,
+)
 ```
 
 当前内置 backend：
@@ -905,10 +938,20 @@ from LLMPlugin import create_backend
 from Spec2Backend.BackendReadiness import analyze_backend_readiness
 from Spec2Backend.RefModelPlan import build_ref_model_plan
 from Spec2Backend.FeedbackCodegen import generate_ref_model_with_feedback
+from Spec2Backend.Spec2IR import run_spec2ir_agent
 
+backend = create_backend("langgraph", model="...")
+spec2ir_result = run_spec2ir_agent(
+    manifest_path="targets/demo.toml",
+    spec_paths=("specs/demo.md",),
+    target="demo",
+    llm_backend=backend,
+    model="...",
+)
+semantic_ir = spec2ir_result["semantic_ir"]
+review = spec2ir_result["review"]
 readiness = analyze_backend_readiness(semantic_ir, review=review, require_review_passed=True)
 plan = build_ref_model_plan(semantic_ir, readiness=readiness)
-backend = create_backend("langgraph", model="...")
 result = generate_ref_model_with_feedback(
     plan,
     manifest_path="targets/demo.toml",

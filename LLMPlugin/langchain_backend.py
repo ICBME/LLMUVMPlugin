@@ -47,6 +47,10 @@ class LangChainLLMBackend:
 
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
+            try:
+                from langchain_core.messages import AIMessage
+            except ImportError:
+                AIMessage = HumanMessage
             from langchain_openai import ChatOpenAI
         except ModuleNotFoundError as exc:
             raise LLMBackendError(
@@ -69,10 +73,7 @@ class LangChainLLMBackend:
         )
         try:
             response = llm.invoke(
-                [
-                    SystemMessage(content=request.system_prompt),
-                    HumanMessage(content=json.dumps(request.prompt, sort_keys=True)),
-                ],
+                request_messages(request, SystemMessage=SystemMessage, HumanMessage=HumanMessage, AIMessage=AIMessage),
                 config={
                     "run_name": request.run_name,
                     "tags": list(request.tags),
@@ -124,6 +125,29 @@ def create_langchain_backend(
             max_retries=max_retries,
         )
     )
+
+
+def request_messages(request: LLMRequest, *, SystemMessage: Any, HumanMessage: Any, AIMessage: Any) -> list[Any]:
+    messages = request.metadata.get("messages")
+    if isinstance(messages, list) and messages:
+        result = []
+        for item in messages:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "user")
+            content = str(item.get("content") or "")
+            if role == "system":
+                result.append(SystemMessage(content=content))
+            elif role == "assistant":
+                result.append(AIMessage(content=content))
+            else:
+                result.append(HumanMessage(content=content))
+        if result:
+            return result
+    return [
+        SystemMessage(content=request.system_prompt),
+        HumanMessage(content=json.dumps(request.prompt, sort_keys=True)),
+    ]
 
 
 def load_local_dotenv(path: str | Path = ".env") -> None:

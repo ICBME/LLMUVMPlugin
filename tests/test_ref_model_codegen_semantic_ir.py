@@ -32,6 +32,8 @@ from Spec2Backend.Spec2IR import (
     generate_semantic_spec_ir,
     normalize_semantic_spec_ir_response,
     repair_semantic_spec_ir_with_review,
+    run_spec2ir_agent,
+    Spec2IRHarness,
     review_semantic_spec_ir,
     validate_semantic_spec_ir,
 )
@@ -2087,14 +2089,20 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 def invoke(self, request):
                     testcase.assertEqual(
                         request.prompt["workflow"],
-                        "semantic_spec_ir_validation_feedback_repair",
+                        "spec2ir_agent_harness",
                     )
+                    testcase.assertIn("current_semantic_spec_ir", request.prompt["observation"])
                     return LLMResponse(
-                        content=json.dumps({"semantic_spec_ir": fixed_ir}),
+                        content=json.dumps(
+                            {
+                                "action": "submit_semantic_spec_ir",
+                                "semantic_spec_ir": fixed_ir,
+                            }
+                        ),
                     )
 
-            result = repair_semantic_spec_ir_with_review(
-                broken_ir,
+            result = run_spec2ir_agent(
+                initial_semantic_ir=broken_ir,
                 manifest_path=manifest,
                 spec_paths=[spec],
                 target="demo_sha",
@@ -2106,6 +2114,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(result["attempt_count"], 1)
             self.assertEqual(result["review"]["status"], "passed")
             self.assertEqual(result["semantic_ir"], fixed_ir)
+            self.assertEqual(result["attempts"][0]["action"]["action"], "submit_semantic_spec_ir")
 
     def test_semantic_repair_loop_applies_deterministic_traceability_repair(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2146,6 +2155,53 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 target="demo_sha",
             )
 
+    def test_spec2ir_harness_start_reviews_and_repairs_deterministic_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["sources"][0]["content_hash"] = "0" * 64
+            semantic_ir["evidence"][0]["quote"] = "missing quote"
+
+            harness = Spec2IRHarness(
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+                initial_semantic_ir=semantic_ir,
+            )
+            observation = harness.start()
+
+            self.assertEqual(observation["status"], "valid")
+            self.assertTrue(harness.is_done())
+            self.assertTrue(harness.result()["deterministic_repairs"])
+            self.assertEqual(harness.result()["review"]["status"], "passed")
+
+    def test_spec2ir_harness_observation_includes_harness_attempt_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            semantic_ir["semantic_elements"][0].pop("representation")
+            harness = Spec2IRHarness(
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+                initial_semantic_ir=semantic_ir,
+            )
+            harness.start()
+            harness.apply({"action": "submit_semantic_spec_ir", "semantic_spec_ir": {"not": "semantic ir"}})
+
+            observation = harness.observe()
+
+            self.assertEqual(observation["harness_attempts"][0]["status"], "llm_invalid_response")
+            self.assertEqual(observation["last_error"]["type"], "ValueError")
+
     def test_semantic_repair_loop_auto_formalizes_machine_resolvable_gap(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2164,18 +2220,23 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 def invoke(self, request):
                     testcase.assertEqual(
                         request.prompt["workflow"],
-                        "semantic_spec_ir_auto_formalization",
+                        "spec2ir_agent_harness",
                     )
                     testcase.assertEqual(
-                        request.prompt["automation_decision"]["route"],
+                        request.prompt["observation"]["automation_decision"]["route"],
                         "llm_formalize",
                     )
                     return LLMResponse(
-                        content=json.dumps({"semantic_spec_ir": fixed_ir}),
+                        content=json.dumps(
+                            {
+                                "action": "submit_semantic_spec_ir",
+                                "semantic_spec_ir": fixed_ir,
+                            }
+                        ),
                     )
 
-            result = repair_semantic_spec_ir_with_review(
-                broken_ir,
+            result = run_spec2ir_agent(
+                initial_semantic_ir=broken_ir,
                 manifest_path=manifest,
                 spec_paths=[spec],
                 target="demo_sha",
@@ -2211,10 +2272,10 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 name = "unexpected"
 
                 def invoke(self, request):
-                    raise AssertionError("custom human policy must not invoke LLM repair")
+                    raise AssertionError("custom human policy must not invoke Spec2IR agent LLM")
 
-            result = repair_semantic_spec_ir_with_review(
-                semantic_ir,
+            result = run_spec2ir_agent(
+                initial_semantic_ir=semantic_ir,
                 manifest_path=manifest,
                 spec_paths=[spec],
                 target="demo_sha",
@@ -2251,10 +2312,10 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 name = "unexpected"
 
                 def invoke(self, request):
-                    raise AssertionError("human-only questions must not invoke LLM repair")
+                    raise AssertionError("human-only questions must not invoke Spec2IR agent LLM")
 
-            result = repair_semantic_spec_ir_with_review(
-                semantic_ir,
+            result = run_spec2ir_agent(
+                initial_semantic_ir=semantic_ir,
                 manifest_path=manifest,
                 spec_paths=[spec],
                 target="demo_sha",
@@ -2282,8 +2343,8 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 def invoke(self, request):
                     raise LLMBackendError("provider is unavailable")
 
-            result = repair_semantic_spec_ir_with_review(
-                broken_ir,
+            result = run_spec2ir_agent(
+                initial_semantic_ir=broken_ir,
                 manifest_path=manifest,
                 spec_paths=[spec],
                 target="demo_sha",
@@ -2292,9 +2353,9 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             )
 
             self.assertEqual(result["status"], "llm_unavailable")
-            self.assertEqual(result["attempt_count"], 1)
-            self.assertEqual(result["llm_responses"][0]["backend"], "error-backend")
-            self.assertIn("provider is unavailable", result["llm_responses"][0]["message"])
+            self.assertEqual(result["llm_provenance"]["attempt_count"], 1)
+            self.assertEqual(result["llm_provenance"]["backend"], "error-backend")
+            self.assertIn("provider is unavailable", result["attempts"][0]["error"]["message"])
 
     def test_semantic_repair_cli_writes_prompt_and_review_without_llm(self):
         _require_legacy_codegen_cli()
