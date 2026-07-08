@@ -1,9 +1,13 @@
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
+import sys
 import tempfile
+import types
 import unittest
+from unittest.mock import patch
 
 try:
     from rtlagent_bfm.codegen.cli import main as codegen_cli_main
@@ -692,6 +696,92 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(semantic_ir, expected)
             self.assertEqual(normalize_semantic_spec_ir_response({"semantic_spec_ir": expected}), expected)
 
+    def test_llm_response_normalization_converts_prompt_inputs_container(self):
+        payload = {
+            "semantic_spec_ir": {
+                "schema_version": 6,
+                "target": "demo_sha",
+                "sources": [],
+                "spec_claims": [],
+                "inputs": {
+                    "target_manifest": {
+                        "summary": {
+                            "fields": [
+                                {"name": "mode", "kind": "enum", "choices": ["sha224", "sha256"]}
+                            ]
+                        }
+                    },
+                    "specs": [],
+                    "design_ir": None,
+                },
+                "semantic_context": {"version": 1, "symbols": [], "constraints": []},
+                "semantic_elements": [],
+                "evidence": [],
+                "open_questions": [],
+                "assumptions": [],
+                "semantic_gaps": [],
+                "review": {"status": "draft", "human_answers": [], "reviewed_items": []},
+            }
+        }
+
+        normalized = normalize_semantic_spec_ir_response(payload)
+
+        self.assertEqual(
+            normalized["inputs"],
+            [{"name": "mode", "kind": "enum", "choices": ["sha224", "sha256"]}],
+        )
+
+    def test_llm_response_normalization_removes_ast_noise_fields(self):
+        payload = {
+            "semantic_spec_ir": {
+                "schema_version": 6,
+                "target": "demo_sha",
+                "sources": [],
+                "spec_claims": [],
+                "inputs": [],
+                "semantic_context": {"version": 1, "symbols": [], "constraints": []},
+                "semantic_elements": [
+                    {
+                        "id": "elem1",
+                        "kind": "functional_behavior",
+                        "claim_ids": [],
+                        "evidence_ids": [],
+                        "subjects": ["out", ""],
+                        "formalization_status": "needs_human_review",
+                        "representation": {
+                            "ast_version": 2,
+                            "kind": "textual_formalization",
+                            "text": "Output is low.",
+                            "ast": {
+                                "node": "semantic_claim",
+                                "claim_id": "claim1",
+                                "claim_kind": "behavior",
+                                "subjects": ["out", ""],
+                                "statement": "Output is low.",
+                                "blocking_issues": ["not formalized"],
+                                "intended_formalization": "constant relation",
+                            },
+                        },
+                    }
+                ],
+                "evidence": [],
+                "open_questions": [],
+                "assumptions": [],
+                "semantic_gaps": [],
+                "review": {"status": "draft", "human_answers": [], "reviewed_items": []},
+            }
+        }
+
+        normalized = normalize_semantic_spec_ir_response(payload)
+        ast = normalized["semantic_elements"][0]["representation"]["ast"]
+
+        self.assertNotIn("blocking_issues", ast)
+        self.assertNotIn("intended_formalization", ast)
+        self.assertNotIn("statement", ast)
+        self.assertEqual(ast["text"], "Output is low.")
+        self.assertEqual(ast["subjects"], ["out"])
+        self.assertEqual(normalized["semantic_elements"][0]["subjects"], ["out"])
+
     def test_semantic_spec_ir_cli_extracts_and_validates(self):
         _require_legacy_codegen_cli()
         with tempfile.TemporaryDirectory() as tmp:
@@ -805,6 +895,126 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
         response = backend.invoke(LLMRequest(prompt={"target": "demo"}))
 
         self.assertEqual(response.parsed_json["semantic_spec_ir"]["target"], "demo")
+
+    def test_langchain_backend_uses_env_without_langsmith_probe(self):
+        from LLMPlugin.langchain_backend import LangChainBackendConfig, LangChainLLMBackend
+
+        calls = {"headers": None, "config": None}
+
+        class FakeMessage:
+            def __init__(self, content):
+                self.content = content
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                calls["headers"] = kwargs.get("default_headers")
+
+            def invoke(self, messages, config):
+                calls["config"] = config
+                return types.SimpleNamespace(content='{"ok": true}')
+
+        messages_module = types.ModuleType("langchain_core.messages")
+        messages_module.HumanMessage = FakeMessage
+        messages_module.SystemMessage = FakeMessage
+        openai_module = types.ModuleType("langchain_openai")
+        openai_module.ChatOpenAI = FakeChatOpenAI
+        langsmith_module = types.ModuleType("langsmith")
+
+        def unexpected_client():
+            raise AssertionError("LangSmith Client should not be created by the backend")
+
+        langsmith_module.Client = unexpected_client
+
+        with patch.dict(
+            sys.modules,
+            {
+                "langchain_core.messages": messages_module,
+                "langchain_openai": openai_module,
+                "langsmith": langsmith_module,
+            },
+        ), patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_KEY": "test-key",
+                "LANGSMITH_API_KEY": "test-langsmith-key",
+                "LANGSMITH_TRACING": "true",
+                "LANGSMITH_PROJECT": "UnitSpec2IR",
+            },
+            clear=False,
+        ):
+            backend = LangChainLLMBackend(
+                LangChainBackendConfig(
+                    model="test-model",
+                    base_url="https://example.test/v1",
+                    user_agent="UnitAgent/1",
+                )
+            )
+            response = backend.invoke(
+                LLMRequest(
+                    prompt={"target": "demo"},
+                    run_name="unit_trace",
+                    tags=("unit",),
+                    metadata={"target": "demo"},
+                )
+            )
+
+        self.assertEqual(response.content, '{"ok": true}')
+        self.assertEqual(calls["headers"], {"User-Agent": "UnitAgent/1"})
+        self.assertEqual(calls["config"]["run_name"], "unit_trace")
+
+    def test_langchain_backend_loads_local_dotenv_before_backend_creation(self):
+        import LLMPlugin.langchain_backend as langchain_backend
+
+        old_cwd = Path.cwd()
+        original_loaded = langchain_backend._DOTENV_LOADED
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / ".env").write_text(
+                    "\n".join(
+                        [
+                            "OPENAI_API_KEY=dotenv-key",
+                            "OPENAI_MODEL=dotenv-model",
+                            "OPENAI_BASE_URL=https://dotenv.example/v1",
+                            "LANGSMITH_TRACING=true",
+                            "LANGSMITH_PROJECT=DotenvSpec2IR",
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                os.chdir(root)
+                langchain_backend._DOTENV_LOADED = False
+                with patch.dict(
+                    os.environ,
+                    {
+                        "OPENAI_API_KEY": "",
+                        "OPENAI_MODEL": "",
+                        "OPENAI_BASE_URL": "",
+                        "LANGSMITH_TRACING": "",
+                        "LANGSMITH_PROJECT": "",
+                    },
+                    clear=False,
+                ):
+                    for key in (
+                        "OPENAI_API_KEY",
+                        "OPENAI_MODEL",
+                        "OPENAI_BASE_URL",
+                        "LANGSMITH_TRACING",
+                        "LANGSMITH_PROJECT",
+                    ):
+                        os.environ.pop(key, None)
+
+                    backend = langchain_backend.create_langchain_backend()
+
+                    self.assertIsNotNone(backend)
+                    self.assertEqual(os.environ["OPENAI_API_KEY"], "dotenv-key")
+                    self.assertEqual(os.environ["OPENAI_MODEL"], "dotenv-model")
+                    self.assertEqual(os.environ["OPENAI_BASE_URL"], "https://dotenv.example/v1")
+                    self.assertEqual(os.environ["LANGSMITH_PROJECT"], "DotenvSpec2IR")
+        finally:
+            os.chdir(old_cwd)
+            langchain_backend._DOTENV_LOADED = original_loaded
 
     def test_semantic_validation_review_reports_complete_claim_coverage(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -22,6 +22,12 @@ def aggregate_results(results: Iterable[RealDataCaseResult]) -> dict[str, Any]:
         result.repair_result.get("status", "not_run") if result.repair_result else "not_run"
         for result in processed
     )
+    stage_status_counts = Counter(
+        f"{stage.name}:{stage.status}"
+        for result in processed
+        for stage in result.stages
+    )
+    llm_effective_count = stage_status_counts.get("llm_generation:passed", 0)
     readiness_status_counts = Counter(
         result.readiness.get("status", "not_run") if result.readiness else "not_run"
         for result in processed
@@ -70,6 +76,10 @@ def aggregate_results(results: Iterable[RealDataCaseResult]) -> dict[str, Any]:
         "review_status_counts": dict(sorted(review_status_counts.items())),
         "repair_status_counts": dict(sorted(repair_status_counts.items())),
         "readiness_status_counts": dict(sorted(readiness_status_counts.items())),
+        "stage_status_counts": dict(sorted(stage_status_counts.items())),
+        "llm_effective_count": llm_effective_count,
+        "llm_generation_passed_count": llm_effective_count,
+        "llm_generation_failed_count": stage_status_counts.get("llm_generation:failed", 0),
         "automation_route_counts": dict(sorted(automation_route_counts.items())),
         "deterministic_repair_count": deterministic_repair_count,
     }

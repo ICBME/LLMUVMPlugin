@@ -14,6 +14,7 @@ class LangGraphBackendConfig:
     model: str | None = None
     api_key: str | None = None
     base_url: str | None = None
+    user_agent: str | None = None
     temperature: float = 0.1
     timeout: int = 60
     max_retries: int = 2
@@ -68,6 +69,7 @@ def create_langgraph_backend(
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
+    user_agent: str | None = None,
     temperature: float = 0.1,
     timeout: int = 60,
     max_retries: int = 2,
@@ -78,6 +80,7 @@ def create_langgraph_backend(
         model=model,
         api_key=api_key,
         base_url=base_url,
+        user_agent=user_agent,
         temperature=temperature,
         timeout=timeout,
         max_retries=max_retries,

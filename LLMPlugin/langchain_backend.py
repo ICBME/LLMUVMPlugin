@@ -5,9 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 from .base import LLMBackendError, LLMRequest, LLMResponse, message_content_to_text
+
+_DOTENV_LOADED = False
 
 
 @dataclass(frozen=True)
@@ -15,6 +18,7 @@ class LangChainBackendConfig:
     model: str | None = None
     api_key: str | None = None
     base_url: str | None = None
+    user_agent: str | None = None
     temperature: float = 0.1
     timeout: int = 60
     max_retries: int = 2
@@ -29,6 +33,7 @@ class LangChainLLMBackend:
         self.config = config or LangChainBackendConfig()
 
     def invoke(self, request: LLMRequest) -> LLMResponse | None:
+        load_local_dotenv()
         api_key = self.config.api_key or os.getenv("OPENAI_API_KEY")
         if not api_key:
             return None
@@ -38,6 +43,7 @@ class LangChainLLMBackend:
             or os.getenv("OPENAI_BASE_URL")
             or "https://api.openai.com/v1"
         ).rstrip("/")
+        user_agent = self.config.user_agent or os.getenv("OPENAI_USER_AGENT") or "RTLAgent/Spec2IR"
 
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
@@ -59,6 +65,7 @@ class LangChainLLMBackend:
             timeout=self.config.timeout,
             max_retries=self.config.max_retries,
             model_kwargs=model_kwargs,
+            default_headers={"User-Agent": user_agent},
         )
         try:
             response = llm.invoke(
@@ -87,6 +94,7 @@ class LangChainLLMBackend:
                 "backend": self.name,
                 "model": model,
                 "base_url": base_url,
+                "user_agent": user_agent,
             },
         )
 
@@ -96,11 +104,13 @@ def create_langchain_backend(
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
+    user_agent: str | None = None,
     temperature: float = 0.1,
     timeout: int = 60,
     max_retries: int = 2,
     **_kwargs,
 ) -> LangChainLLMBackend | None:
+    load_local_dotenv()
     if api_key is None and not os.getenv("OPENAI_API_KEY"):
         return None
     return LangChainLLMBackend(
@@ -108,8 +118,41 @@ def create_langchain_backend(
             model=model,
             api_key=api_key,
             base_url=base_url,
+            user_agent=user_agent,
             temperature=temperature,
             timeout=timeout,
             max_retries=max_retries,
         )
     )
+
+
+def load_local_dotenv(path: str | Path = ".env") -> None:
+    global _DOTENV_LOADED
+    if _DOTENV_LOADED:
+        return
+    _DOTENV_LOADED = True
+    dotenv_path = resolve_dotenv_path(path)
+    if not dotenv_path.exists():
+        return
+    for raw_line in dotenv_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        value = value.strip().strip("\"'")
+        os.environ[key] = value
+
+
+def resolve_dotenv_path(path: str | Path = ".env") -> Path:
+    dotenv_path = Path(path)
+    if dotenv_path.is_absolute():
+        return dotenv_path
+    cwd_path = Path.cwd() / dotenv_path
+    if cwd_path.exists():
+        return cwd_path
+    return Path(__file__).resolve().parent.parent / dotenv_path

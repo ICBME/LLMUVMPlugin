@@ -9,7 +9,7 @@ import pytest
 from .adapters import materialize_verilogeval_case
 from .datasets import RealDataCase, load_verilogeval_cases, verilogeval_root_from_env
 from .metrics import aggregate_results
-from .runner import run_verilogeval_case, run_verilogeval_cases
+from .runner import RealDataLLMRuntimeError, run_verilogeval_case, run_verilogeval_cases
 
 
 pytestmark = pytest.mark.real_data
@@ -127,16 +127,31 @@ def test_verilogeval_aggregate_metrics_are_reported(spec2ir_real_data_limit: int
 def test_verilogeval_llm_mode_reports_missing_backend() -> None:
     case = _available_cases(limit=1)[0]
     with tempfile.TemporaryDirectory() as tmp:
-        result = run_verilogeval_case(
-            case,
-            work_root=tmp,
-            with_llm=True,
-            backend_name="missing_spec2ir_real_data_backend",
-        )
+        with pytest.raises(RealDataLLMRuntimeError, match="backend setup failed"):
+            run_verilogeval_case(
+                case,
+                work_root=tmp,
+                with_llm=True,
+                backend_name="missing_spec2ir_real_data_backend",
+            )
 
-    assert result.status == "llm_unavailable"
-    assert result.schema_valid is False
-    assert result.stages[-1].name == "llm_backend"
+
+def test_verilogeval_llm_mode_rejects_backend_without_response() -> None:
+    class EmptyBackend:
+        name = "empty"
+
+        def invoke(self, request):  # noqa: ANN001 - protocol-shaped test double
+            return None
+
+    case = _available_cases(limit=1)[0]
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(RealDataLLMRuntimeError, match="returned no response"):
+            run_verilogeval_case(
+                case,
+                work_root=tmp,
+                with_llm=True,
+                llm_backend=EmptyBackend(),
+            )
 
 
 @pytest.mark.llm
@@ -144,9 +159,14 @@ def test_verilogeval_llm_mode_reports_missing_backend() -> None:
 def test_verilogeval_optional_llm_smoke() -> None:
     if os.environ.get("SPEC2IR_REALDATA_ENABLE_LLM", "0") != "1":
         pytest.skip("set SPEC2IR_REALDATA_ENABLE_LLM=1 to enable real LLM smoke testing")
+    model = os.environ.get("SPEC2IR_REALDATA_LLM_MODEL")
     cases = _available_cases(limit=1)
     with tempfile.TemporaryDirectory() as tmp:
-        result = run_verilogeval_case(cases[0], work_root=tmp, with_llm=True)
+        result = run_verilogeval_case(cases[0], work_root=tmp, with_llm=True, model=model)
 
-    assert result.status != "crashed"
+    assert result.status == "passed"
     assert result.schema_valid
+    assert any(
+        stage.name == "llm_generation" and stage.status == "passed"
+        for stage in result.stages
+    )

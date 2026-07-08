@@ -32,6 +32,31 @@ Run optional LLM smoke tests explicitly:
 SPEC2IR_REALDATA_ENABLE_LLM=1 uv run pytest tests_real/spec2ir -m "real_data and llm" -q
 ```
 
+The LangChain backend automatically loads `.env` from the repository root. It
+uses `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`; `OPENAI_USER_AGENT`
+can override the default `RTLAgent/Spec2IR` header for OpenAI-compatible
+gateways that filter SDK default user agents.
+
+When `LANGSMITH_TRACING=true`, the backend relies on LangChain/LangSmith's normal
+environment-variable based tracing. It does not proactively query or create
+LangSmith projects before invoking the model.
+
+Real-data LLM tests default to no SDK retries so availability failures surface
+quickly. Tune them with:
+
+```bash
+SPEC2IR_REALDATA_LLM_MODEL=gpt-5.5 \
+SPEC2IR_REALDATA_LLM_TIMEOUT=120 \
+SPEC2IR_REALDATA_LLM_MAX_RETRIES=0 \
+SPEC2IR_REALDATA_ENABLE_LLM=1 \
+uv run pytest tests_real/spec2ir -m "real_data and llm" -q
+```
+
+LLM-enabled real-data runs are strict. If the backend cannot be created, the LLM
+request fails, or the backend returns no response and would otherwise fall back
+to offline rule-based generation, the runner raises `RealDataLLMRuntimeError`.
+This keeps real LLM smoke tests from passing when the LLM was not actually used.
+
 ## Batch Evaluation
 
 Write a JSON report:
@@ -51,10 +76,12 @@ dataset -> adapter -> generation -> automation_repair -> review -> readiness -> 
 ```
 
 Default runs are offline and do not call an LLM. Add `--with-llm` only for manual
-capability testing with a configured backend.
+capability testing with a configured backend; LLM availability failures abort the
+run instead of being recorded as successful offline fallbacks.
 
 ## Metrics
 
 Reports include schema-valid rate, claim extraction rate, covered-claim rate,
 review status counts, repair status counts, automation route counts, backend
-readiness counts, deterministic repair count, and crash count.
+readiness counts, deterministic repair count, crash count, and LLM-effective
+case count.

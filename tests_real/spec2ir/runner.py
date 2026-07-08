@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import traceback
+import os
 from pathlib import Path
+import traceback
 from typing import Any
 
 from LLMPlugin import LLMBackend, create_backend
@@ -18,6 +19,10 @@ from Spec2Backend.Spec2IR import (
 
 from .adapters import MaterializedSpec2IRInput, materialize_verilogeval_case
 from .datasets import RealDataCase
+
+
+class RealDataLLMRuntimeError(RuntimeError):
+    """Raised when an explicit real-LLM evaluation cannot use the LLM."""
 
 
 @dataclass(frozen=True)
@@ -80,6 +85,28 @@ class RealDataCaseResult:
         return payload
 
 
+def _is_rule_based_semantic_ir(semantic_ir: dict[str, Any]) -> bool:
+    metadata = semantic_ir.get("metadata", {})
+    return metadata.get("source") == "rule_based_semantic_spec_ir_generator"
+
+
+def _env_int(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value in (None, ""):
+        return default
+    try:
+        return int(raw_value)
+    except ValueError as exc:
+        raise RealDataLLMRuntimeError(f"{name} must be an integer, got {raw_value!r}") from exc
+
+
+def _llm_backend_kwargs_from_env() -> dict[str, int]:
+    return {
+        "timeout": _env_int("SPEC2IR_REALDATA_LLM_TIMEOUT", 60),
+        "max_retries": _env_int("SPEC2IR_REALDATA_LLM_MAX_RETRIES", 0),
+    }
+
+
 def run_verilogeval_case(
     case: RealDataCase,
     *,
@@ -99,25 +126,49 @@ def run_verilogeval_case(
         backend = llm_backend
         if with_llm and backend is None:
             try:
-                backend = create_backend(backend_name, model=model)
+                backend = create_backend(
+                    backend_name,
+                    model=model,
+                    **_llm_backend_kwargs_from_env(),
+                )
             except Exception as exc:  # noqa: BLE001 - report backend setup as availability
-                result.status = "llm_unavailable"
                 result.error = f"{type(exc).__name__}: {exc}"
                 result.add_stage("llm_backend", "failed", result.error)
-                return result
+                raise RealDataLLMRuntimeError(
+                    f"LLM mode was requested, but backend setup failed: {result.error}"
+                ) from exc
         if with_llm and backend is None:
-            result.status = "llm_unavailable"
             result.error = "LLM mode was requested, but no LLM backend is configured"
             result.add_stage("llm_backend", "failed", result.error)
-            return result
+            raise RealDataLLMRuntimeError(result.error)
 
-        semantic_ir = generate_semantic_spec_ir(
-            manifest_path=materialized.manifest_path,
-            spec_paths=[materialized.spec_path],
-            target=materialized.target,
-            llm_backend=backend,
-            model=model,
-        )
+        semantic_ir = None
+        if with_llm and backend is not None:
+            try:
+                semantic_ir = generate_semantic_spec_ir(
+                    manifest_path=materialized.manifest_path,
+                    spec_paths=[materialized.spec_path],
+                    target=materialized.target,
+                    llm_backend=backend,
+                    model=model,
+                )
+            except Exception as exc:  # noqa: BLE001 - normalize provider/setup errors
+                result.error = f"{type(exc).__name__}: {exc}"
+                result.add_stage("llm_generation", "failed", result.error)
+                raise RealDataLLMRuntimeError(
+                    f"Spec2IR LLM generation failed: {result.error}"
+                ) from exc
+            if _is_rule_based_semantic_ir(semantic_ir):
+                result.error = "LLM backend returned no response; generation fell back to rule-based IR"
+                result.add_stage("llm_generation", "failed", result.error)
+                raise RealDataLLMRuntimeError(result.error)
+            result.add_stage("llm_generation", "passed")
+        else:
+            semantic_ir = generate_semantic_spec_ir(
+                manifest_path=materialized.manifest_path,
+                spec_paths=[materialized.spec_path],
+                target=materialized.target,
+            )
         result.semantic_ir = semantic_ir
         result.add_stage("generation", "passed")
 
@@ -142,6 +193,9 @@ def run_verilogeval_case(
         result.repair_result = repair
         result.semantic_ir = repair["semantic_ir"]
         result.add_stage("automation_repair", repair["status"])
+        if with_llm and repair["status"] in {"llm_unavailable", "llm_invalid_response"}:
+            result.error = f"Spec2IR LLM repair failed with status {repair['status']}"
+            raise RealDataLLMRuntimeError(result.error)
 
         review = review_semantic_spec_ir(
             result.semantic_ir,
@@ -161,6 +215,8 @@ def run_verilogeval_case(
         result.add_stage("readiness", readiness["status"])
         result.status = "passed"
         return result
+    except RealDataLLMRuntimeError:
+        raise
     except Exception as exc:  # noqa: BLE001 - real-data reports should keep going
         result.status = "crashed"
         result.error = f"{type(exc).__name__}: {exc}"

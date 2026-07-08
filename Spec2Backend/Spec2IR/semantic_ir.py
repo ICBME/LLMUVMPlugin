@@ -32,6 +32,7 @@ from .claim_extraction import (
 )
 from .manifest import ManifestSummary, input_from_manifest_field, load_manifest_summary
 from .representation_ast import REPRESENTATION_AST_VERSION, representation_ast_contract
+from .representation_ast import NODE_ALLOWED_KEYS
 from .schema import (
     ALLOWED_CLAIM_OBLIGATION_KINDS,
     ALLOWED_CLAIM_KINDS,
@@ -347,17 +348,102 @@ def normalize_semantic_spec_ir_response(value: dict[str, Any]) -> dict[str, Any]
     if not isinstance(value, dict):
         raise ValueError(f"LLM response JSON must be an object, got {type(value).__name__}")
     if looks_like_semantic_spec_ir(value):
-        return json_round_trip(value)
+        return normalize_semantic_spec_ir_artifact(value)
     for key in ("semantic_spec_ir", "semantic_ir", "ir", "result", "output", "response"):
         nested = value.get(key)
         if isinstance(nested, dict):
             if looks_like_semantic_spec_ir(nested):
-                return json_round_trip(nested)
+                return normalize_semantic_spec_ir_artifact(nested)
             try:
                 return normalize_semantic_spec_ir_response(nested)
             except ValueError:
                 continue
     raise ValueError("LLM response did not contain a SemanticSpecIR object")
+
+
+def normalize_semantic_spec_ir_artifact(ir: dict[str, Any]) -> dict[str, Any]:
+    normalized = json_round_trip(ir)
+    normalized["inputs"] = normalize_semantic_spec_ir_inputs(normalized.get("inputs"))
+    normalize_semantic_spec_ir_representations(normalized)
+    return normalized
+
+
+def normalize_semantic_spec_ir_inputs(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return json_round_trip(value)
+    if not isinstance(value, dict):
+        return []
+    if "target_manifest" in value:
+        target_manifest = value.get("target_manifest")
+        if isinstance(target_manifest, dict):
+            summary = target_manifest.get("summary")
+            if isinstance(summary, dict):
+                fields = summary.get("fields")
+                if isinstance(fields, list):
+                    return [
+                        json_round_trip(field)
+                        for field in fields
+                        if isinstance(field, dict) and isinstance(field.get("name"), str)
+                    ]
+    fields = value.get("fields")
+    if isinstance(fields, list):
+        return [
+            json_round_trip(field)
+            for field in fields
+            if isinstance(field, dict) and isinstance(field.get("name"), str)
+        ]
+    return []
+
+
+def normalize_semantic_spec_ir_representations(ir: dict[str, Any]) -> None:
+    for element in ir.get("semantic_elements", []):
+        if not isinstance(element, dict):
+            continue
+        clean_string_list(element, "subjects")
+        representation = element.get("representation")
+        if not isinstance(representation, dict):
+            continue
+        clean_string_list(representation, "subjects")
+        ast = representation.get("ast")
+        if isinstance(ast, dict):
+            normalize_representation_ast_node(ast, fallback_text=representation.get("text"))
+
+
+def normalize_representation_ast_node(node: dict[str, Any], *, fallback_text: Any = None) -> None:
+    node_name = node.get("node")
+    text_candidate = first_non_empty_string(
+        node.get("text"),
+        node.get("statement"),
+        fallback_text,
+    )
+    if isinstance(node_name, str) and node_name in NODE_ALLOWED_KEYS:
+        for key in list(node):
+            if key not in NODE_ALLOWED_KEYS[node_name]:
+                node.pop(key, None)
+    if node_name == "semantic_claim" and not str(node.get("text") or "").strip():
+        node["text"] = text_candidate or "Unformalized semantic claim."
+    clean_string_list(node, "subjects")
+    clean_string_list(node, "participants")
+    for value in list(node.values()):
+        if isinstance(value, dict):
+            normalize_representation_ast_node(value)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    normalize_representation_ast_node(item)
+
+
+def clean_string_list(container: dict[str, Any], key: str) -> None:
+    value = container.get(key)
+    if isinstance(value, list):
+        container[key] = [item for item in value if isinstance(item, str) and item.strip()]
+
+
+def first_non_empty_string(*values: Any) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
 
 
 def semantic_spec_ir_contract() -> dict[str, Any]:
