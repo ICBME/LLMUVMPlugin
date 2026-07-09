@@ -46,8 +46,9 @@ Spec2IRHarness
         +--> review_semantic_spec_ir()
         |
         v
-LLMPlugin Agent observes harness state and submits JSON actions
+LLMPlugin LangGraph agent observes harness state, calls tools, and submits actions
         |
+        +--> tool_call (inspect / validate / diff)
         +--> submit_semantic_spec_ir
         +--> mark_human_required
         +--> request_finalize
@@ -84,10 +85,10 @@ Spec2Backend/
     harness.py            # agent-callable Spec2IR harness and run_spec2ir_agent assembly
 LLMPlugin/
   base.py                 # provider-neutral request/response/backend protocol
-  agent.py                # reusable LLM agent loop over JSON-action harnesses
+  agent.py                # reusable LangGraph agent runtime over harnesses and tools
   registry.py             # backend registry
   langchain_backend.py    # OpenAI-compatible LangChain backend
-  langgraph_backend.py    # LangGraph wrapper
+  langgraph_backend.py    # LangGraph-backed backend wrapper for provider invocation
 Spec2Backend/FeedbackCodegen/
   loop.py                 # feedback-driven LLM artifact generation loop
   ref_model.py            # RefModelPlan -> reference model adapter
@@ -130,7 +131,7 @@ Spec2Backend/FeedbackCodegen/
   evidence traceability 这类机械字段，并在结果中记录 `deterministic_repairs` 供审计。
 
 该模块中的直接 LLM repair loop 是迁移前接口，保留给兼容调用和 prompt helper。新的推荐
-LLM 入口是 `run_spec2ir_agent()`，由 `LLMPlugin.agent` 维护多轮上下文并调用
+LLM 入口是 `run_spec2ir_agent()`，由 `LLMPlugin.agent` 的 LangGraph runtime 维护多轮上下文并调用
 `Spec2IRHarness`。
 
 ### `harness.py`
@@ -140,9 +141,11 @@ LLM 入口是 `run_spec2ir_agent()`，由 `LLMPlugin.agent` 维护多轮上下�
 - 提供 `Spec2IRHarness`，把 Spec2IR 暴露为 agent 可调用的 JSON action harness。
 - `start()` 加载或接收初始 `SemanticSpecIR`，运行 deterministic repair 和 review。
 - `observe()` 返回当前 IR、review report、automation decision、schema/response contract、
-  输入上下文、deterministic repair 和 harness attempt history。
+  输入上下文、tool specs、deterministic repair 和 harness attempt history。
 - `apply()` 只接受 `submit_semantic_spec_ir`、`mark_human_required` 和 `request_finalize`。
   `submit_semantic_spec_ir` 会归一化完整 candidate IR，重新 deterministic repair 并 review。
+- `tool_specs()` / `call_tool()` 暴露 Spec2IR 专用工具，例如读取当前 IR、读取 review findings、
+  normalize/validate candidate 和 diff candidate；工具不改变 harness 状态，除非 agent 后续提交 action。
 - harness 不调用 LLM、不持有 backend、不构造 provider message；LLM 上下文和 provider
   provenance 由 `LLMPlugin.agent` 管理。
 
@@ -219,12 +222,14 @@ imports 或 definitions。proof metadata 会记录 `semantic_ir_sha256`、`sourc
 主要职责：
 
 - 提供 provider-neutral `LLMRequest` / `LLMResponse` / `LLMBackend` 协议。
-- 提供 provider-neutral `LLMAgentRunner` / `LLMAgentHarness` 协议，用 JSON action loop
-  驱动任意 harness。
+- 提供 provider-neutral `LLMAgentRunner` / `LLMAgentHarness` 协议，用 LangGraph `StateGraph`
+  驱动任意 harness，并使用内存 checkpoint 保留本次 agent state。
+- 提供可选 `LLMAgentToolHarness` 能力，允许 harness 暴露工具；runtime 负责 JSON tool-call
+  解析、执行、错误归一化和 tool result 进入下一轮上下文。
 - 通过 registry 支持插件化 backend 创建。
 - 当前内置 `langchain` 和 `langgraph` backend。
-- `langgraph` 当前是单节点 wrapper，后续可以扩展为 retry、repair、review routing 或
-  human handoff graph，而不改变 Spec2IR 调用接口。
+- `langgraph_backend.py` 是 backend wrapper，用于 provider invocation；通用 agent 编排在
+  `LLMPlugin.agent` 中，不依赖 Spec2IR。
 
 `LLMPlugin` 不依赖 `Spec2Backend`。Spec2IR agent 是通过加载 `Spec2IRHarness` 形成的组合，
 不是 LLMPlugin 的内置业务逻辑。
@@ -854,14 +859,15 @@ file-bundle fallback，但它不提供 IR-level formal proof。
 2. harness 运行 deterministic repair、review 和 automation routing。
 3. 如果 review 已 `passed`，直接返回 `valid`。
 4. 如果路由为 human-only，直接返回 `needs_human_input`。
-5. agent 读取 `harness.observe()`，把当前 IR、review、automation decision 和 attempt
-   history 放入 messages。
-6. LLM 返回一个 JSON action：`submit_semantic_spec_ir`、`mark_human_required` 或
-   `request_finalize`。
-7. harness 对 submitted candidate 运行 normalize、deterministic repair 和 review。
-8. agent 将无效 JSON、无效 action、harness result 和 provider provenance 记录到下一轮
-   attempt history。
-9. 成功返回 `repaired`；LLM 不可用返回 `llm_unavailable`；响应不可解析返回
+5. LangGraph agent 读取 `harness.observe()`，把当前 IR、review、automation decision、
+   tool specs、attempt history 和 recent events 放入 messages。
+6. LLM 可以返回 legacy action，或返回现代 step：`type="harness_action"`、
+   `type="tool_call"` 或 `type="final"`。
+7. tool call 由 `LLMPlugin` runtime 校验并调用 harness 工具，tool result 写入下一轮上下文。
+8. harness 对 submitted candidate 运行 normalize、deterministic repair 和 review。
+9. agent 将无效 JSON、无效 step、无效 action、tool result、harness result 和 provider
+   provenance 记录到 state/events/attempt history。
+10. 成功返回 `repaired`；LLM 不可用返回 `llm_unavailable`；响应不可解析返回
    `llm_invalid_response`；耗尽尝试返回 `repair_failed`。
 
 agent result 会包含：
@@ -871,7 +877,10 @@ agent result 会包含：
 - `deterministic_repairs`: 每次规则修复的 action 列表，例如 `refresh_sources`、
   `repair_claim_metadata` 和 `repair_evidence_traceability`。
 - `attempts`: LLMPlugin agent 维护的 provider response、action、错误和 harness result 摘要。
-- `llm_provenance`: backend、model、run name、tags 和 attempt count。
+- `events`: LangGraph agent state 中的 observation、assistant message、tool result、harness
+  action 和 final result 摘要，用于审计上下文流。
+- `llm_provenance`: backend、model、run name、tags、attempt count、runtime 和内存 checkpoint
+  thread id。
 
 harness action 的核心约束：
 
@@ -914,8 +923,12 @@ result = run_spec2ir_agent(
 
 - `langchain`: OpenAI-compatible LangChain backend，使用 `OPENAI_API_KEY`、
   `OPENAI_BASE_URL`、`OPENAI_MODEL` 等环境变量。
-- `langgraph`: 默认 backend，当前包装 `langchain` delegate，为后续多节点 graph 保留扩展点。
+- `langgraph`: backend wrapper，包装 `langchain` delegate 进行 provider invocation。
 - `CallableLLMBackend`: 测试和 legacy callable adapter。
+
+注意：`langgraph` backend 名称表示 provider 调用经过 `LangGraphLLMBackend` wrapper；真正的
+agent runtime 始终由 `LLMPlugin.LLMAgentRunner` 管理。v1 不使用 provider-native function
+calling，也不写文件/数据库 checkpoint；工具调用通过 JSON step envelope 表示。
 
 `.env` 中的 LangSmith tracing 环境变量可由测试或命令运行前加载：
 

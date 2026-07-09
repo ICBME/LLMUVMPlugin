@@ -38,11 +38,11 @@ class LangChainLLMBackend:
         if not api_key:
             return None
         model = request.model or self.config.model or os.getenv("OPENAI_MODEL") or "gpt-4.1-mini"
-        base_url = (
+        base_url = normalize_openai_base_url(
             self.config.base_url
             or os.getenv("OPENAI_BASE_URL")
             or "https://api.openai.com/v1"
-        ).rstrip("/")
+        )
         user_agent = self.config.user_agent or os.getenv("OPENAI_USER_AGENT") or "RTLAgent/Spec2IR"
 
         try:
@@ -180,3 +180,12 @@ def resolve_dotenv_path(path: str | Path = ".env") -> Path:
     if cwd_path.exists():
         return cwd_path
     return Path(__file__).resolve().parent.parent / dotenv_path
+
+
+def normalize_openai_base_url(value: str) -> str:
+    base_url = str(value).rstrip("/")
+    if base_url.endswith(("/v1", "/v1/")):
+        return base_url.rstrip("/")
+    if base_url.endswith(("/chat/completions", "/models")):
+        return base_url.rsplit("/", 2)[0]
+    return f"{base_url}/v1"

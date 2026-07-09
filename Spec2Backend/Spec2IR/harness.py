@@ -18,17 +18,20 @@ from .semantic_ir import (
     generate_semantic_spec_ir,
     normalize_semantic_spec_ir_response,
     semantic_spec_ir_contract,
+    validate_semantic_spec_ir,
 )
 from .semantic_repair import design_ir_payload, manifest_payload, spec_payloads
 from .validation_review import review_semantic_spec_ir
 
 
 AGENT_INSTRUCTIONS = (
-    "You are a Spec2IR repair agent. Return one strict JSON action object. "
-    "Use action='submit_semantic_spec_ir' with a complete semantic_spec_ir when "
-    "the provided sources support an automated repair. Use action='mark_human_required' "
-    "when the review requires external design intent. Use action='request_finalize' "
-    "only when the current review is already acceptable."
+    "You are a Spec2IR repair agent. Return one strict JSON object. "
+    "Use legacy action='submit_semantic_spec_ir' or modern "
+    "type='harness_action' with action='submit_semantic_spec_ir' and a complete "
+    "semantic_spec_ir when the provided sources support an automated repair. "
+    "Use type='tool_call' to inspect or validate a candidate before submitting it. "
+    "Use action='mark_human_required' when the review requires external design intent. "
+    "Use action='request_finalize' only when the current review is already acceptable."
 )
 
 
@@ -112,12 +115,97 @@ class Spec2IRHarness:
                     "description": "Finalize only if the current review is already passed.",
                 },
             ],
+            "tool_specs": self.tool_specs(),
             "inputs": {
                 "target_manifest": manifest_payload(self.manifest_path) if self.manifest_path is not None else None,
                 "design_ir": design_ir_payload(self.design_ir_path) if self.design_ir_path is not None else None,
                 "specs": spec_payloads(self.spec_paths),
             },
         }
+
+    def tool_specs(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "get_current_semantic_ir",
+                "description": "Return the current complete SemanticSpecIR held by the harness.",
+                "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
+                "name": "get_review_findings",
+                "description": "Return the current review report and automation decision.",
+                "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
+                "name": "normalize_semantic_ir_candidate",
+                "description": "Normalize a candidate SemanticSpecIR payload without applying it.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"semantic_spec_ir": {"type": "object"}},
+                    "required": ["semantic_spec_ir"],
+                    "additionalProperties": True,
+                },
+            },
+            {
+                "name": "validate_semantic_ir_candidate",
+                "description": "Normalize and schema-validate a candidate SemanticSpecIR without applying it.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"semantic_spec_ir": {"type": "object"}},
+                    "required": ["semantic_spec_ir"],
+                    "additionalProperties": True,
+                },
+            },
+            {
+                "name": "diff_semantic_ir",
+                "description": "Return a small structural diff between the current IR and a candidate IR.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"semantic_spec_ir": {"type": "object"}},
+                    "required": ["semantic_spec_ir"],
+                    "additionalProperties": True,
+                },
+            },
+        ]
+
+    def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if name == "get_current_semantic_ir":
+            return {"status": "tool_result", "semantic_ir": self.current or {}}
+        if name == "get_review_findings":
+            return {
+                "status": "tool_result",
+                "review": self.review,
+                "automation_decision": self.automation_decisions[-1] if self.automation_decisions else {},
+                "last_error": self.last_error,
+            }
+        if name == "normalize_semantic_ir_candidate":
+            candidate = self._normalize_tool_candidate(arguments)
+            return {"status": "tool_result", "normalized_semantic_ir": candidate}
+        if name == "validate_semantic_ir_candidate":
+            candidate = self._normalize_tool_candidate(arguments)
+            validate_semantic_spec_ir(
+                candidate,
+                manifest_path=self.manifest_path,
+                spec_paths=self.spec_paths,
+                target=self.target,
+            )
+            review = review_semantic_spec_ir(
+                candidate,
+                manifest_path=self.manifest_path,
+                spec_paths=self.spec_paths,
+                design_ir_path=self.design_ir_path,
+                target=self.target,
+                require_reviewed=self.require_reviewed,
+            )
+            return {
+                "status": "tool_result",
+                "valid": True,
+                "review_status": review.get("status"),
+                "review": review,
+            }
+        if name == "diff_semantic_ir":
+            candidate = self._normalize_tool_candidate(arguments)
+            return {"status": "tool_result", "diff": semantic_ir_diff(self.current or {}, candidate)}
+        return {"status": "tool_error", "error": {"type": "UnknownTool", "message": f"unsupported tool {name!r}"}}
 
     def apply(self, action: dict[str, Any]) -> dict[str, Any]:
         if not self.started:
@@ -145,6 +233,14 @@ class Spec2IRHarness:
         result = {"status": "llm_invalid_response", "action": name, "error": self.last_error}
         self.harness_attempts.append(result)
         return result
+
+    def _normalize_tool_candidate(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        candidate_payload = arguments.get("semantic_spec_ir")
+        if candidate_payload is None and isinstance(arguments.get("candidate"), dict):
+            candidate_payload = arguments["candidate"]
+        return normalize_semantic_spec_ir_response(
+            {"semantic_spec_ir": candidate_payload} if isinstance(candidate_payload, dict) else arguments
+        )
 
     def is_done(self) -> bool:
         return self.done
@@ -279,6 +375,41 @@ def run_spec2ir_agent(
 
 def json_round_trip(value: dict[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(value, sort_keys=True))
+
+
+def semantic_ir_diff(current: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    current_keys = set(current)
+    candidate_keys = set(candidate)
+    current_ids = semantic_element_ids(current)
+    candidate_ids = semantic_element_ids(candidate)
+    return {
+        "top_level_added": sorted(candidate_keys - current_keys),
+        "top_level_removed": sorted(current_keys - candidate_keys),
+        "top_level_changed": sorted(
+            key for key in current_keys & candidate_keys if current.get(key) != candidate.get(key)
+        ),
+        "semantic_elements": {
+            "current_count": len(current.get("semantic_elements", []))
+            if isinstance(current.get("semantic_elements"), list)
+            else None,
+            "candidate_count": len(candidate.get("semantic_elements", []))
+            if isinstance(candidate.get("semantic_elements"), list)
+            else None,
+            "added_ids": sorted(candidate_ids - current_ids),
+            "removed_ids": sorted(current_ids - candidate_ids),
+        },
+    }
+
+
+def semantic_element_ids(semantic_ir: dict[str, Any]) -> set[str]:
+    elements = semantic_ir.get("semantic_elements")
+    if not isinstance(elements, list):
+        return set()
+    return {
+        str(item.get("id"))
+        for item in elements
+        if isinstance(item, dict) and item.get("id") is not None
+    }
 
 
 __all__ = ["Spec2IRHarness", "run_spec2ir_agent"]

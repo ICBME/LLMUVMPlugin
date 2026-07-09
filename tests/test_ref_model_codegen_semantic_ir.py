@@ -1018,6 +1018,16 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             os.chdir(old_cwd)
             langchain_backend._DOTENV_LOADED = original_loaded
 
+    def test_langchain_backend_normalizes_openai_root_base_url(self):
+        from LLMPlugin.langchain_backend import normalize_openai_base_url
+
+        self.assertEqual(normalize_openai_base_url("http://127.0.0.1:18080"), "http://127.0.0.1:18080/v1")
+        self.assertEqual(normalize_openai_base_url("https://example.test/v1"), "https://example.test/v1")
+        self.assertEqual(
+            normalize_openai_base_url("https://example.test/cpa/v1"),
+            "https://example.test/cpa/v1",
+        )
+
     def test_semantic_validation_review_reports_complete_claim_coverage(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2201,6 +2211,94 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
 
             self.assertEqual(observation["harness_attempts"][0]["status"], "llm_invalid_response")
             self.assertEqual(observation["last_error"]["type"], "ValueError")
+
+    def test_spec2ir_harness_exposes_agent_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            harness = Spec2IRHarness(
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+                initial_semantic_ir=semantic_ir,
+            )
+            harness.start()
+
+            tool_names = {tool["name"] for tool in harness.tool_specs()}
+            validation = harness.call_tool(
+                "validate_semantic_ir_candidate",
+                {"semantic_spec_ir": semantic_ir},
+            )
+            diff = harness.call_tool("diff_semantic_ir", {"semantic_spec_ir": semantic_ir})
+
+            self.assertIn("validate_semantic_ir_candidate", tool_names)
+            self.assertIn("diff_semantic_ir", tool_names)
+            self.assertTrue(validation["valid"])
+            self.assertEqual(diff["diff"]["semantic_elements"]["added_ids"], [])
+
+    def test_spec2ir_agent_uses_tool_result_before_modern_harness_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            fixed_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            broken_ir = json.loads(json.dumps(fixed_ir))
+            broken_ir["semantic_elements"][0].pop("representation")
+            testcase = self
+
+            class ToolAssistedBackend:
+                name = "tool-assisted"
+
+                def __init__(self):
+                    self.prompts = []
+
+                def invoke(self, request):
+                    self.prompts.append(request.prompt)
+                    if len(self.prompts) == 1:
+                        testcase.assertIn("tool_specs", request.prompt["observation"])
+                        return LLMResponse(
+                            content=json.dumps(
+                                {
+                                    "type": "tool_call",
+                                    "tool": "validate_semantic_ir_candidate",
+                                    "arguments": {"semantic_spec_ir": fixed_ir},
+                                }
+                            )
+                        )
+                    history = request.prompt["attempt_history"]
+                    testcase.assertEqual(history[0]["status"], "tool_result")
+                    testcase.assertTrue(history[0]["tool_result"]["valid"])
+                    return LLMResponse(
+                        content=json.dumps(
+                            {
+                                "type": "harness_action",
+                                "action": "submit_semantic_spec_ir",
+                                "semantic_spec_ir": fixed_ir,
+                            }
+                        )
+                    )
+
+            backend = ToolAssistedBackend()
+            result = run_spec2ir_agent(
+                initial_semantic_ir=broken_ir,
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+                llm_backend=backend,
+                max_attempts=2,
+            )
+
+            self.assertEqual(result["status"], "repaired")
+            self.assertEqual(result["review"]["status"], "passed")
+            self.assertEqual([attempt["status"] for attempt in result["attempts"]], ["tool_result", "repaired"])
+            self.assertEqual(result["llm_provenance"]["runtime"], "langgraph")
+            self.assertEqual(len(backend.prompts), 2)
 
     def test_semantic_repair_loop_auto_formalizes_machine_resolvable_gap(self):
         with tempfile.TemporaryDirectory() as tmp:
