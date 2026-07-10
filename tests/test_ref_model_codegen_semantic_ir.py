@@ -9,10 +9,6 @@ import types
 import unittest
 from unittest.mock import patch
 
-try:
-    from rtlagent_bfm.codegen.cli import main as codegen_cli_main
-except ModuleNotFoundError:
-    codegen_cli_main = None
 from LLMPlugin import (
     CallableLLMBackend,
     LLMAgentRuntime,
@@ -27,14 +23,10 @@ from Spec2Backend.RefModelPlan import build_ref_model_plan
 from Spec2Backend.Spec2IR import (
     AutomationPolicyGraph,
     AutomationPolicyRule,
-    build_semantic_spec_ir_repair_prompt,
-    build_semantic_spec_ir_prompt,
     collect_semantic_spec_ir_issues,
     generate_semantic_spec_ir,
-    normalize_semantic_spec_ir_response,
-    repair_semantic_spec_ir_with_review,
+    normalize_semantic_spec_ir,
     run_spec2ir_agent,
-    semantic_ir_patch_from_candidate,
     semantic_ir_sha256,
     Spec2IRHarness,
     review_semantic_spec_ir,
@@ -44,11 +36,23 @@ from Spec2Backend.Spec2IR.claim_extraction import extract_spec_claims
 from Spec2Backend.Spec2IR.schema import SourceDocument
 
 
-def _require_legacy_codegen_cli():
-    if codegen_cli_main is None:
-        raise unittest.SkipTest(
-            "legacy rtlagent_bfm.codegen CLI was removed; use Spec2Backend Python APIs"
-        )
+def _replace_semantic_element_patch(current: dict, candidate: dict) -> dict:
+    replacement = candidate["semantic_elements"][0]
+    return {
+        "schema_version": 1,
+        "base_revision": 0,
+        "base_sha256": semantic_ir_sha256(current),
+        "operations": [
+            {
+                "op": "replace",
+                "target": {
+                    "collection": "semantic_elements",
+                    "id": replacement["id"],
+                },
+                "value": replacement,
+            }
+        ],
+    }
 
 
 class TestSemanticSpecIRGeneration(unittest.TestCase):
@@ -667,76 +671,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
 
             self.assertTrue(any("referenced source line range" in issue.message for issue in issues))
 
-    def test_semantic_spec_ir_generation_accepts_llm_response(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manifest = root / "sha.toml"
-            spec = root / "sha_spec.md"
-            manifest.write_text(_sha_manifest())
-            spec.write_text("The block computes SHA-256 over the input message.\n")
-            expected = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
-            testcase = self
-
-            class FakeBackend:
-                name = "fake"
-
-                def invoke(self, request):
-                    testcase.assertEqual(request.model, "test-model")
-                    testcase.assertEqual(
-                        request.prompt["workflow"],
-                        "natural_language_spec_to_traceable_semantic_ir",
-                    )
-                    testcase.assertIn("semantic_spec_ir", request.prompt["response_contract"])
-                    return LLMResponse(
-                        content=json.dumps({"result": {"semantic_spec_ir": expected}}),
-                    )
-
-            semantic_ir = generate_semantic_spec_ir(
-                manifest_path=manifest,
-                spec_paths=[spec],
-                llm_backend=FakeBackend(),
-                model="test-model",
-            )
-
-            self.assertEqual(semantic_ir, expected)
-            self.assertEqual(normalize_semantic_spec_ir_response({"semantic_spec_ir": expected}), expected)
-
-    def test_llm_response_normalization_converts_prompt_inputs_container(self):
-        payload = {
-            "semantic_spec_ir": {
-                "schema_version": 6,
-                "target": "demo_sha",
-                "sources": [],
-                "spec_claims": [],
-                "inputs": {
-                    "target_manifest": {
-                        "summary": {
-                            "fields": [
-                                {"name": "mode", "kind": "enum", "choices": ["sha224", "sha256"]}
-                            ]
-                        }
-                    },
-                    "specs": [],
-                    "design_ir": None,
-                },
-                "semantic_context": {"version": 1, "symbols": [], "constraints": []},
-                "semantic_elements": [],
-                "evidence": [],
-                "open_questions": [],
-                "assumptions": [],
-                "semantic_gaps": [],
-                "review": {"status": "draft", "human_answers": [], "reviewed_items": []},
-            }
-        }
-
-        normalized = normalize_semantic_spec_ir_response(payload)
-
-        self.assertEqual(
-            normalized["inputs"],
-            [{"name": "mode", "kind": "enum", "choices": ["sha224", "sha256"]}],
-        )
-
-    def test_llm_response_normalization_removes_ast_noise_fields(self):
+    def test_semantic_ir_normalization_removes_ast_noise_fields(self):
         payload = {
             "semantic_spec_ir": {
                 "schema_version": 6,
@@ -777,7 +712,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             }
         }
 
-        normalized = normalize_semantic_spec_ir_response(payload)
+        normalized = normalize_semantic_spec_ir(payload["semantic_spec_ir"])
         ast = normalized["semantic_elements"][0]["representation"]["ast"]
 
         self.assertNotIn("blocking_issues", ast)
@@ -787,7 +722,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
         self.assertEqual(ast["subjects"], ["out"])
         self.assertEqual(normalized["semantic_elements"][0]["subjects"], ["out"])
 
-    def test_llm_response_normalization_canonicalizes_compare_operator(self):
+    def test_semantic_ir_normalization_canonicalizes_compare_operator(self):
         payload = {
             "schema_version": 6,
             "target": "demo",
@@ -817,97 +752,10 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             "review": {"status": "draft", "human_answers": [], "reviewed_items": []},
         }
 
-        normalized = normalize_semantic_spec_ir_response(payload)
+        normalized = normalize_semantic_spec_ir(payload)
 
         compare = normalized["semantic_elements"][0]["representation"]["ast"]["expr"]
         self.assertEqual(compare["op"], "eq")
-
-    def test_semantic_spec_ir_cli_extracts_and_validates(self):
-        _require_legacy_codegen_cli()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manifest = root / "sha.toml"
-            spec = root / "sha_spec.md"
-            out = root / "semantic_ir.json"
-            prompt_out = root / "prompt.json"
-            review_out = root / "semantic_review.json"
-            manifest.write_text(_sha_manifest())
-            spec.write_text("The block computes SHA-256 over the input message.\n")
-
-            extract_status = codegen_cli_main(
-                [
-                    "extract-semantic-ir",
-                    "--manifest",
-                    str(manifest),
-                    "--spec",
-                    str(spec),
-                    "--out",
-                    str(out),
-                    "--prompt-out",
-                    str(prompt_out),
-                ]
-            )
-            validate_status = codegen_cli_main(
-                [
-                    "validate-semantic-ir",
-                    "--semantic-ir",
-                    str(out),
-                    "--manifest",
-                    str(manifest),
-                    "--spec",
-                    str(spec),
-                    "--target",
-                    "demo_sha",
-                ]
-            )
-            review_status = codegen_cli_main(
-                [
-                    "review-semantic-ir",
-                    "--semantic-ir",
-                    str(out),
-                    "--manifest",
-                    str(manifest),
-                    "--spec",
-                    str(spec),
-                    "--target",
-                    "demo_sha",
-                    "--out",
-                    str(review_out),
-                ]
-            )
-
-            self.assertEqual(extract_status, 0)
-            self.assertEqual(validate_status, 0)
-            self.assertEqual(review_status, 0)
-            self.assertTrue(out.exists())
-            self.assertTrue(review_out.exists())
-            self.assertEqual(json.loads(prompt_out.read_text())["workflow"], "natural_language_spec_to_traceable_semantic_ir")
-            self.assertEqual(json.loads(review_out.read_text())["status"], "passed")
-
-    def test_semantic_prompt_includes_manifest_and_spec_payloads(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manifest = root / "sha.toml"
-            spec = root / "sha_spec.md"
-            manifest.write_text(_sha_manifest())
-            spec.write_text("The block computes SHA-256 over the input message.\n")
-
-            prompt = build_semantic_spec_ir_prompt(
-                manifest_path=manifest,
-                spec_paths=[spec],
-            )
-
-            self.assertEqual(prompt["target"], "demo_sha")
-            self.assertEqual(prompt["inputs"]["specs"][0]["id"], "src1")
-            constraints = " ".join(prompt["constraints"])
-            self.assertIn("Every semantic element", constraints)
-            self.assertIn("Every normative spec_claim", constraints)
-            self.assertIn("independent of backend support", constraints)
-            self.assertIn("RepresentationAST", constraints)
-            self.assertIn("spec_claim_schema", prompt["semantic_spec_ir_contract"])
-            self.assertIn("semantic_element_schema", prompt["semantic_spec_ir_contract"])
-            self.assertIn("representation_ast_schema", prompt["semantic_spec_ir_contract"])
-            self.assertIn("semantic_gap_schema", prompt["semantic_spec_ir_contract"])
 
     def test_llmplugin_callable_backend_and_registry_are_available(self):
         def fake_llm(prompt, model):
@@ -1670,53 +1518,6 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
         self.assertEqual(readiness["summary"]["semantic_element_count"], 0)
         self.assertFalse(readiness["elements"])
 
-    def test_codegen_cli_writes_backend_readiness(self):
-        _require_legacy_codegen_cli()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manifest = root / "notgate.toml"
-            spec = root / "notgate_spec.md"
-            semantic_ir_path = root / "semantic_ir.json"
-            readiness_path = root / "readiness.json"
-            manifest.write_text(_notgate_manifest())
-            spec.write_text(
-                "\n".join(
-                    [
-                        "The module should implement a NOT gate.",
-                        "When in=0, out=1. When in=1, out=0.",
-                    ]
-                )
-                + "\n"
-            )
-            semantic_ir = generate_semantic_spec_ir(
-                manifest_path=manifest,
-                spec_paths=[spec],
-                target="demo_notgate",
-            )
-            semantic_ir_path.write_text(json.dumps(semantic_ir), encoding="utf-8")
-
-            status = codegen_cli_main(
-                [
-                    "analyze-backend-readiness",
-                    "--semantic-ir",
-                    str(semantic_ir_path),
-                    "--manifest",
-                    str(manifest),
-                    "--spec",
-                    str(spec),
-                    "--target",
-                    "demo_notgate",
-                    "--require-review-passed",
-                    "--out",
-                    str(readiness_path),
-                ]
-            )
-
-            self.assertEqual(status, 0)
-            readiness = json.loads(readiness_path.read_text(encoding="utf-8"))
-            self.assertEqual(readiness["status"], "ready")
-            self.assertGreaterEqual(readiness["summary"]["ref_model_ready_count"], 1)
-
     def test_ref_model_plan_lowers_notgate_comb_logic(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1840,91 +1641,6 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
 
             self.assertEqual(plan["status"], "blocked")
             self.assertEqual(plan["blocked_items"][0]["reason"], "backend readiness is missing this semantic element")
-
-    def test_codegen_cli_writes_ref_model_plan(self):
-        _require_legacy_codegen_cli()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manifest = root / "notgate.toml"
-            spec = root / "notgate_spec.md"
-            semantic_ir_path = root / "semantic_ir.json"
-            plan_path = root / "ref_model_plan.json"
-            manifest.write_text(_notgate_manifest())
-            spec.write_text(
-                "\n".join(
-                    [
-                        "The module should implement a NOT gate.",
-                        "When in=0, out=1. When in=1, out=0.",
-                    ]
-                )
-                + "\n"
-            )
-            semantic_ir = generate_semantic_spec_ir(
-                manifest_path=manifest,
-                spec_paths=[spec],
-                target="demo_notgate",
-            )
-            semantic_ir_path.write_text(json.dumps(semantic_ir), encoding="utf-8")
-
-            status = codegen_cli_main(
-                [
-                    "build-ref-model-plan",
-                    "--semantic-ir",
-                    str(semantic_ir_path),
-                    "--manifest",
-                    str(manifest),
-                    "--spec",
-                    str(spec),
-                    "--target",
-                    "demo_notgate",
-                    "--require-review-passed",
-                    "--out",
-                    str(plan_path),
-                ]
-            )
-
-            self.assertEqual(status, 0)
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
-            self.assertEqual(plan["status"], "ready")
-            self.assertEqual(plan["summary"]["rule_count"], 3)
-
-    def test_codegen_cli_ref_model_plan_blocks_when_review_required(self):
-        _require_legacy_codegen_cli()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manifest = root / "sha.toml"
-            spec = root / "sha_spec.md"
-            semantic_ir_path = root / "semantic_ir.json"
-            plan_path = root / "ref_model_plan.json"
-            manifest.write_text(_sha_manifest())
-            spec.write_text("This block has documented behavior.\n")
-            semantic_ir = generate_semantic_spec_ir(
-                manifest_path=manifest,
-                spec_paths=[spec],
-                target="demo_sha",
-            )
-            semantic_ir_path.write_text(json.dumps(semantic_ir), encoding="utf-8")
-
-            status = codegen_cli_main(
-                [
-                    "build-ref-model-plan",
-                    "--semantic-ir",
-                    str(semantic_ir_path),
-                    "--manifest",
-                    str(manifest),
-                    "--spec",
-                    str(spec),
-                    "--target",
-                    "demo_sha",
-                    "--require-review-passed",
-                    "--out",
-                    str(plan_path),
-                ]
-            )
-
-            self.assertEqual(status, 2)
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
-            self.assertEqual(plan["status"], "blocked_by_readiness")
 
     def test_semantic_completeness_review_recomputes_source_claims(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2074,96 +1790,6 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 any(finding["stage"] == "human_review_gate" for finding in review["findings"])
             )
 
-    def test_semantic_repair_prompt_includes_review_findings(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manifest = root / "sha.toml"
-            spec = root / "sha_spec.md"
-            manifest.write_text(_sha_manifest())
-            spec.write_text("The block computes SHA-256 over the input message.\n")
-            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
-            semantic_ir["evidence"][0]["quote"] = "missing quote"
-
-            prompt = build_semantic_spec_ir_repair_prompt(
-                semantic_ir,
-                manifest_path=manifest,
-                spec_paths=[spec],
-                target="demo_sha",
-            )
-
-            self.assertEqual(prompt["workflow"], "semantic_spec_ir_validation_feedback_repair")
-            self.assertEqual(prompt["review_report"]["status"], "failed")
-            self.assertTrue(prompt["review_report"]["findings"])
-            self.assertIn("semantic_spec_ir", prompt["response_contract"])
-            self.assertIn("semantic_elements", " ".join(prompt["constraints"]))
-            self.assertIn("independent of backend support", " ".join(prompt["constraints"]))
-            self.assertEqual(prompt["inputs"]["specs"][0]["path"], str(spec))
-
-    def test_semantic_repair_prompt_accepts_generator_spec_paths(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manifest = root / "sha.toml"
-            spec = root / "sha_spec.md"
-            manifest.write_text(_sha_manifest())
-            spec.write_text("The block computes SHA-256 over the input message.\n")
-            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
-            semantic_ir["evidence"][0]["quote"] = "missing quote"
-
-            prompt = build_semantic_spec_ir_repair_prompt(
-                semantic_ir,
-                manifest_path=manifest,
-                spec_paths=(path for path in [spec]),
-                target="demo_sha",
-            )
-
-            self.assertEqual(prompt["inputs"]["specs"][0]["path"], str(spec))
-            self.assertEqual(prompt["review_report"]["status"], "failed")
-
-    def test_semantic_repair_loop_accepts_fixed_llm_output(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manifest = root / "sha.toml"
-            spec = root / "sha_spec.md"
-            manifest.write_text(_sha_manifest())
-            spec.write_text("The block computes SHA-256 over the input message.\n")
-            fixed_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
-            broken_ir = json.loads(json.dumps(fixed_ir))
-            broken_ir["semantic_elements"][0].pop("representation")
-            testcase = self
-
-            class FakeRepairBackend:
-                name = "fake-repair"
-
-                def invoke(self, request):
-                    testcase.assertEqual(
-                        request.prompt["workflow"],
-                        "spec2ir_agent_harness",
-                    )
-                    testcase.assertIn("current_semantic_spec_ir", request.prompt["observation"])
-                    return LLMResponse(
-                        content=json.dumps(
-                            {
-                                "action": "submit_semantic_spec_ir",
-                                "semantic_spec_ir": fixed_ir,
-                            }
-                        ),
-                    )
-
-            result = run_spec2ir_agent(
-                initial_semantic_ir=broken_ir,
-                manifest_path=manifest,
-                spec_paths=[spec],
-                target="demo_sha",
-                llm_backend=FakeRepairBackend(),
-                max_attempts=1,
-            )
-
-            self.assertEqual(result["status"], "repaired")
-            self.assertEqual(result["attempt_count"], 1)
-            self.assertEqual(result["review"]["status"], "passed")
-            self.assertEqual(result["semantic_ir"], fixed_ir)
-            self.assertEqual(result["attempts"][0]["action"]["action"], "submit_semantic_spec_ir")
-
     def test_spec2ir_agent_resumes_thread_with_delta_context_and_patch(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2174,7 +1800,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             fixed_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
             broken_ir = copy.deepcopy(fixed_ir)
             broken_ir["semantic_elements"][0].pop("representation")
-            valid_patch = semantic_ir_patch_from_candidate(broken_ir, fixed_ir, revision=0)
+            valid_patch = _replace_semantic_element_patch(broken_ir, fixed_ir)
             runtime = LLMAgentRuntime()
 
             class ResumingPatchBackend:
@@ -2225,45 +1851,6 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(backend.observations[1]["context_mode"], "delta")
             self.assertNotIn("current_semantic_spec_ir", backend.observations[1])
 
-    def test_semantic_repair_loop_applies_deterministic_traceability_repair(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manifest = root / "sha.toml"
-            spec = root / "sha_spec.md"
-            manifest.write_text(_sha_manifest())
-            spec.write_text("The block computes SHA-256 over the input message.\n")
-            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
-            semantic_ir["sources"][0]["content_hash"] = "0" * 64
-            semantic_ir["spec_claims"][0].pop("fingerprint")
-            semantic_ir["spec_claims"][0].pop("decomposition")
-            semantic_ir["evidence"][0]["quote"] = "missing quote"
-
-            result = repair_semantic_spec_ir_with_review(
-                semantic_ir,
-                manifest_path=manifest,
-                spec_paths=[spec],
-                target="demo_sha",
-                max_attempts=0,
-            )
-
-            self.assertEqual(result["status"], "valid")
-            self.assertEqual(result["attempt_count"], 0)
-            self.assertTrue(result["deterministic_repairs"])
-            actions = {
-                action["kind"]
-                for repair in result["deterministic_repairs"]
-                for action in repair["actions"]
-            }
-            self.assertIn("refresh_sources", actions)
-            self.assertIn("repair_claim_metadata", actions)
-            self.assertIn("repair_evidence_traceability", actions)
-            validate_semantic_spec_ir(
-                result["semantic_ir"],
-                manifest_path=manifest,
-                spec_paths=[spec],
-                target="demo_sha",
-            )
-
     def test_spec2ir_harness_start_reviews_and_repairs_deterministic_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2288,7 +1875,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertTrue(harness.result()["deterministic_repairs"])
             self.assertEqual(harness.result()["review"]["status"], "passed")
 
-    def test_spec2ir_harness_observation_includes_harness_attempt_history(self):
+    def test_spec2ir_harness_observation_includes_invalid_action_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "sha.toml"
@@ -2304,12 +1891,12 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                 initial_semantic_ir=semantic_ir,
             )
             harness.start()
-            harness.apply({"action": "submit_semantic_spec_ir", "semantic_spec_ir": {"not": "semantic ir"}})
+            harness.apply({"action": "submit_semantic_spec_ir"})
 
             observation = harness.observe()
 
             self.assertEqual(observation["last_transition"]["status"], "llm_invalid_response")
-            self.assertEqual(observation["last_error"]["type"], "ValueError")
+            self.assertEqual(observation["last_error"]["type"], "InvalidAction")
 
     def test_spec2ir_harness_rejects_invalid_patch_without_committing_revision(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2372,47 +1959,18 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             harness.start()
 
             tool_names = {tool["name"] for tool in harness.tool_specs()}
-            validation = harness.call_tool(
-                "validate_semantic_ir_candidate",
-                {"semantic_spec_ir": semantic_ir},
+            unknown = harness.call_tool("get_current_semantic_ir", {})
+
+            self.assertEqual(
+                tool_names,
+                {
+                    "get_review_findings",
+                    "get_semantic_ir_fragment",
+                    "validate_semantic_ir_patch",
+                },
             )
-            diff = harness.call_tool("diff_semantic_ir", {"semantic_spec_ir": semantic_ir})
-
-            self.assertIn("validate_semantic_ir_patch", tool_names)
-            self.assertIn("get_semantic_ir_fragment", tool_names)
-            self.assertNotIn("validate_semantic_ir_candidate", tool_names)
-            self.assertTrue(validation["valid"])
-            self.assertEqual(diff["diff"]["semantic_elements"]["added_ids"], [])
-
-    def test_spec2ir_harness_rejects_premature_human_escalation(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manifest = root / "sha.toml"
-            spec = root / "sha_spec.md"
-            manifest.write_text(_sha_manifest())
-            spec.write_text("The block computes SHA-256 over the input message.\n")
-            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
-            semantic_ir["semantic_elements"][0].pop("representation")
-            harness = Spec2IRHarness(
-                manifest_path=manifest,
-                spec_paths=[spec],
-                target="demo_sha",
-                initial_semantic_ir=semantic_ir,
-            )
-            harness.start()
-
-            result = harness.apply(
-                {"action": "mark_human_required", "rationale": "model gives up"}
-            )
-
-            self.assertEqual(result["status"], "action_rejected")
-            self.assertFalse(harness.is_done())
-            self.assertEqual(result["error"]["type"], "HumanEscalationRejected")
-
-            finalize = harness.apply({"action": "request_finalize"})
-            self.assertEqual(finalize["status"], "action_rejected")
-            self.assertFalse(harness.is_done())
-            self.assertEqual(finalize["error"]["type"], "FinalizeRejected")
+            self.assertEqual(unknown["status"], "tool_error")
+            self.assertEqual(unknown["error"]["type"], "UnknownTool")
 
     def test_spec2ir_agent_uses_tool_result_before_modern_harness_action(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2424,7 +1982,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             fixed_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
             broken_ir = json.loads(json.dumps(fixed_ir))
             broken_ir["semantic_elements"][0].pop("representation")
-            semantic_patch = semantic_ir_patch_from_candidate(broken_ir, fixed_ir, revision=0)
+            semantic_patch = _replace_semantic_element_patch(broken_ir, fixed_ir)
             testcase = self
 
             class ToolAssistedBackend:
@@ -2475,7 +2033,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(result["llm_provenance"]["runtime"], "langgraph")
             self.assertEqual(len(backend.prompts), 2)
 
-    def test_semantic_repair_loop_auto_formalizes_machine_resolvable_gap(self):
+    def test_spec2ir_agent_auto_formalizes_machine_resolvable_gap(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "sha.toml"
@@ -2485,6 +2043,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             broken_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
             fixed_ir = copy.deepcopy(broken_ir)
             _mark_first_latency_element_complete(fixed_ir)
+            semantic_patch = _replace_semantic_element_patch(broken_ir, fixed_ir)
             testcase = self
 
             class FakeFormalizeBackend:
@@ -2502,8 +2061,8 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
                     return LLMResponse(
                         content=json.dumps(
                             {
-                                "action": "submit_semantic_spec_ir",
-                                "semantic_spec_ir": fixed_ir,
+                                "action": "apply_semantic_ir_patch",
+                                "patch": semantic_patch,
                             }
                         ),
                     )
@@ -2522,7 +2081,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(result["review"]["status"], "passed")
             self.assertEqual(result["automation_decisions"][0]["route"], "llm_formalize")
 
-    def test_semantic_repair_loop_accepts_custom_automation_policy_graph(self):
+    def test_spec2ir_agent_accepts_custom_automation_policy_graph(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "sha.toml"
@@ -2561,7 +2120,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(result["attempt_count"], 0)
             self.assertEqual(result["automation_decisions"][0]["policy_rule"], "local_policy_requires_human")
 
-    def test_semantic_repair_loop_keeps_true_human_question_blocking(self):
+    def test_spec2ir_agent_keeps_true_human_question_blocking(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "sha.toml"
@@ -2600,7 +2159,7 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(result["attempt_count"], 0)
             self.assertEqual(result["automation_decisions"][0]["route"], "human_required")
 
-    def test_semantic_repair_loop_reports_backend_error(self):
+    def test_spec2ir_agent_reports_backend_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "sha.toml"
@@ -2629,46 +2188,6 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(result["llm_provenance"]["attempt_count"], 1)
             self.assertEqual(result["llm_provenance"]["backend"], "error-backend")
             self.assertIn("provider is unavailable", result["attempts"][0]["error"]["message"])
-
-    def test_semantic_repair_cli_writes_prompt_and_review_without_llm(self):
-        _require_legacy_codegen_cli()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manifest = root / "sha.toml"
-            spec = root / "sha_spec.md"
-            semantic_ir_path = root / "semantic_ir.json"
-            prompt_out = root / "repair_prompt.json"
-            review_out = root / "repair_review.json"
-            manifest.write_text(_sha_manifest())
-            spec.write_text("The block computes SHA-256 over the input message.\n")
-            semantic_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
-            semantic_ir["semantic_elements"][0].pop("representation")
-            semantic_ir_path.write_text(json.dumps(semantic_ir))
-
-            status = codegen_cli_main(
-                [
-                    "repair-semantic-ir",
-                    "--semantic-ir",
-                    str(semantic_ir_path),
-                    "--manifest",
-                    str(manifest),
-                    "--spec",
-                    str(spec),
-                    "--target",
-                    "demo_sha",
-                    "--prompt-out",
-                    str(prompt_out),
-                    "--review-out",
-                    str(review_out),
-                ]
-            )
-
-            self.assertEqual(status, 1)
-            self.assertTrue(prompt_out.exists())
-            self.assertTrue(review_out.exists())
-            self.assertEqual(json.loads(review_out.read_text())["status"], "failed")
-
-
 def _mark_first_latency_element_complete(semantic_ir):
     element = semantic_ir["semantic_elements"][0]
     element["formalization_status"] = "candidate"

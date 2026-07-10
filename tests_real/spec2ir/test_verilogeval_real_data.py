@@ -9,7 +9,7 @@ import pytest
 
 from LLMPlugin import LLMResponse
 
-from Spec2Backend.Spec2IR import generate_semantic_spec_ir, semantic_ir_patch_from_candidate
+from Spec2Backend.Spec2IR import generate_semantic_spec_ir, semantic_ir_sha256
 
 from .adapters import augment_semantic_ir_interface_context, materialize_verilogeval_case
 from .datasets import RealDataCase, load_verilogeval_cases, verilogeval_root_from_env
@@ -18,6 +18,25 @@ from .runner import RealDataLLMRuntimeError, run_verilogeval_case, run_verilogev
 
 
 pytestmark = pytest.mark.real_data
+
+
+def _replace_semantic_element_patch(current: dict, candidate: dict) -> dict:
+    replacement = candidate["semantic_elements"][0]
+    return {
+        "schema_version": 1,
+        "base_revision": 0,
+        "base_sha256": semantic_ir_sha256(current),
+        "operations": [
+            {
+                "op": "replace",
+                "target": {
+                    "collection": "semantic_elements",
+                    "id": replacement["id"],
+                },
+                "value": replacement,
+            }
+        ],
+    }
 
 
 def _available_cases(*, limit: int | None = None, case_ids: set[str] | None = None) -> list[RealDataCase]:
@@ -197,13 +216,11 @@ def test_verilogeval_llm_agent_uses_previous_attempt_context_for_repair() -> Non
         def invoke(self, request):  # noqa: ANN001 - protocol-shaped test double
             self.prompts.append(request.prompt)
             if len(self.prompts) == 1:
-                return LLMResponse(
-                    content='{"action": "submit_semantic_spec_ir", "semantic_spec_ir": {"not": "semantic ir"}}'
-                )
+                return LLMResponse(content='{"action": "submit_semantic_spec_ir"}')
             history = request.prompt["attempt_history"]
             assert history
             assert history[0]["status"] == "llm_invalid_response"
-            assert history[0]["harness_result"]["error"]["type"] == "ValueError"
+            assert history[0]["harness_result"]["error"]["type"] == "InvalidAction"
             current_patch = json.loads(json.dumps(self.semantic_patch))
             current_patch["base_revision"] = request.prompt["observation"]["artifact"]["revision"]
             current_patch["base_sha256"] = request.prompt["observation"]["artifact"]["sha256"]
@@ -243,7 +260,7 @@ def test_verilogeval_llm_agent_uses_previous_attempt_context_for_repair() -> Non
             }
         )
         fixed_ir["review"]["status"] = "draft"
-        semantic_patch = semantic_ir_patch_from_candidate(semantic_ir, fixed_ir, revision=0)
+        semantic_patch = _replace_semantic_element_patch(semantic_ir, fixed_ir)
         backend = ContextAwareBackend(semantic_patch)
         result = run_verilogeval_case(
             case,

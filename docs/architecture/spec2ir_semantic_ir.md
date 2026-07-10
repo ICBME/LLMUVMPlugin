@@ -14,7 +14,7 @@ ref model、SVA、OracleIR 或其他 backend artifact 的可信语义来源。
   ref model、SVA、OracleIR 或其他 backend 是否可支持。
 - 对缺失、歧义、冲突和未完成形式化的语义显式建模为 `open_questions` 或
   `semantic_gaps`。
-- 支持 LLM 抽取、结构化 review、repair loop 和 human-in-loop 语义补全。
+- 支持 deterministic draft、结构化 review、patch-based agent repair 和 human-in-loop 语义补全。
 - 在没有 LLM 或 LLM 不可用时，提供保守的 rule-based draft，保持测试和审查链路可运行。
 - 通过 `semantic_context` 提供符号表、类型上下文和局部约束，让后续检查器可以执行
   类似 Sail 的强类型和局部形式检查。
@@ -49,10 +49,8 @@ Spec2IRHarness
         v
 LLMPlugin LangGraph agent observes harness state, calls tools, and submits actions
         |
-        +--> tool_call (inspect fragment / validate patch / diff)
+        +--> tool_call (inspect review/fragment or validate patch)
         +--> apply_semantic_ir_patch
-        +--> mark_human_required
-        +--> request_finalize
         |
         v
 passed / accepted SemanticSpecIR or human input handoff
@@ -79,10 +77,10 @@ Spec2Backend/
     engine.py             # reusable pass runner for schema/reference/type/extern/SMT checks
     adapters.py           # SemanticSpecIR and RefModelIR adapters
   Spec2IR/
-    semantic_ir.py        # prompt、生成、rule-based draft、schema validation、IO
+    semantic_ir.py        # deterministic draft、normalization、schema validation、IO
+    context.py            # read-only manifest/spec/DesignIR observation payloads
     validation_review.py  # structured review、completeness、traceability、human gate
     automation.py         # review finding routing: LLM retry vs human-required
-    semantic_repair.py    # validation-feedback repair loop
     patch.py              # revisioned SemanticIRPatch validation and atomic application
     harness.py            # agent-callable Spec2IR harness and run_spec2ir_agent assembly
 LLMPlugin/
@@ -100,14 +98,14 @@ Spec2Backend/FeedbackCodegen/
 
 主要职责：
 
-- 加载 manifest、spec 文档和可选 DesignIR。
-- 构造 strict JSON prompt。
-- 调用插件化 LLM backend 或 legacy callable adapter。
-- 归一化 LLM response，支持 `semantic_spec_ir`、`result`、`output` 等常见包裹形式。
-- 生成 rule-based conservative draft。
+- 加载 manifest 和 spec 文档，生成 rule-based conservative draft。
+- 归一化 patch 应用后的 `SemanticSpecIR` artifact，包括 AST keys 和操作符枚举。
 - 校验 schema v6、source hash、quote、claim/evidence/element 引用关系、manifest 字段引用
   以及 `semantic_context` 符号/类型一致性。
 - 读写 `SemanticSpecIR` JSON。
+
+该模块不依赖 `LLMPlugin`，也不构造 prompt。`generate_semantic_spec_ir()` 只有 deterministic
+generation 参数；LLM 入口统一为 `run_spec2ir_agent()`。
 
 ### `validation_review.py`
 
@@ -118,23 +116,13 @@ Spec2Backend/FeedbackCodegen/
 - 检查 source traceability、claim coverage、semantic consistency 和 human review gate。
 - 将 review status 归一为 `passed`、`failed` 或 `needs_human_input`。
 
-### `semantic_repair.py`
+### `context.py`
 
 主要职责：
 
-- 根据当前 IR 和 review report 构造 repair prompt。
-- 调用 LLM 修复 schema、traceability、coverage 或 consistency 问题。
-- 对可由现有 source/manifest/DesignIR 推断的 blocking formalization gap 构造 auto-formalization
-  prompt，让 LLM 在进入 human-in-loop 前先尝试补全 typed `RepresentationAST`。
-- 对每次修复结果重新 review。
-- 对缺少外部设计意图、存在真实歧义或冲突的 human-blocking 情况停止自动 repair，并返回
-  `needs_human_input`。
-- 在 LLM 调用前后运行 deterministic repair pass，修复 source payload、claim metadata 和
-  evidence traceability 这类机械字段，并在结果中记录 `deterministic_repairs` 供审计。
-
-该模块中的直接 LLM repair loop 是迁移前接口，保留给兼容调用和 prompt helper。新的推荐
-LLM 入口是 `run_spec2ir_agent()`，由 `LLMPlugin.agent` 的 LangGraph runtime 维护多轮上下文并调用
-`Spec2IRHarness`。
+- 将 manifest、spec 和可选 DesignIR 序列化为只读 observation context。
+- 不做 generation、review、repair 或 LLM 调用。
+- source context 只在首轮 session snapshot 中建立，后续 observation 使用 reference/hash。
 
 ### `harness.py`
 
@@ -144,12 +132,10 @@ LLM 入口是 `run_spec2ir_agent()`，由 `LLMPlugin.agent` 的 LangGraph runtim
 - `start()` 加载或接收初始 `SemanticSpecIR`，运行 deterministic repair 和 review。
 - `observe()` 首轮返回完整 snapshot，后续返回 artifact revision、相关语义片段、review delta、
   context references 和 tool specs。
-- `apply()` 主路径接受 `apply_semantic_ir_patch`、`mark_human_required` 和 `request_finalize`。
-  patch 在 working copy 上 normalize/validate/review，只有验证进展为 improved/passed 才提交。
-- legacy `submit_semantic_spec_ir` 会转换为 editable-plane patch，不再覆盖完整 artifact。
+- `apply()` 只接受 `apply_semantic_ir_patch`。patch 在 working copy 上
+  normalize/validate/review，只有验证进展为 improved/passed 才提交。
 - `tool_specs()` / `call_tool()` 暴露 Spec2IR 专用工具：读取 review findings、读取 fragment 和
-  transactionally validate patch；工具不改变 harness 状态。完整 IR、legacy candidate
-  normalize/diff 只保留为兼容实现，不对新 agent 暴露。
+  transactionally validate patch；工具不改变 harness 状态。
 - harness 不调用 LLM、不持有 backend、不构造 provider message；LLM 上下文和 provider
   provenance 由 `LLMPlugin.agent` 管理。
 
@@ -247,13 +233,24 @@ imports 或 definitions。proof metadata 会记录 `semantic_ir_sha256`、`sourc
 `LLMPlugin` 不依赖 `Spec2Backend`。Spec2IR agent 是通过加载 `Spec2IRHarness` 形成的组合，
 不是 LLMPlugin 的内置业务逻辑。
 
+### Public API boundary
+
+当前 public API 分为四组：deterministic generation/IO、validation/review、patch、agent assembly。
+直接 LLM extraction/repair prompt、完整 candidate conversion 和 repair-file orchestration API 已删除，
+不保留双轨兼容入口。调用方迁移规则如下：
+
+- 初始 draft 使用 `generate_semantic_spec_ir()`。
+- artifact normalization 使用 `normalize_semantic_spec_ir()`。
+- 非 LLM review 使用 `Spec2IRHarness.start()` / `result()` 或 `review_semantic_spec_ir()`。
+- LLM repair 使用 `run_spec2ir_agent()`，模型只能提交 `SemanticIRPatch`。
+
 ## SemanticSpecIR v6 数据模型
 
 顶层对象必须是 JSON object，并包含以下关键字段。
 
 ### `schema_version`
 
-当前固定为 `6`。schema 升级时必须同时更新 validator、prompt contract、tests 和本文档。
+当前固定为 `6`。schema 升级时必须同时更新 validator、Harness observation contract、tests 和本文档。
 
 ### `target`
 
@@ -878,7 +875,7 @@ file-bundle fallback，但它不提供 IR-level formal proof。
    `assistant`、step feedback `user` 和当前 observation `user` 的对话结构，并显式给出剩余
    模型调用预算。
 7. LLM 返回 `apply_semantic_ir_patch`，patch 通过稳定 collection item id 和相对 JSON Pointer
-   修改局部语义。legacy 完整 candidate 只作为兼容输入并在 harness 内转换为 patch。
+   修改局部语义。Harness 不接受完整 candidate。
 8. LLM 也可以返回现代 step：`type="harness_action"`、
    `type="tool_call"` 或 `type="final"`。
 9. tool call 由 `LLMPlugin` runtime 校验并调用 harness 工具，tool result 写入下一轮上下文。
@@ -948,7 +945,7 @@ harness patch 的核心约束：
 patch 是原子事务。schema/type/review 失败、protected-field 修改、stale revision/hash 和无净改进
 都不会覆盖 best revision；失败 candidate 的 review 仍写入 history 供下一轮使用。
 
-auto-formalization prompt 额外约束：
+agent formalization 额外约束：
 
 - 只能解决 `automation_decision` 指向的局部问题。
 - 只有当 source、manifest 或 DesignIR 已提供足够证据时，才能把 `semantic_claim`、`text_expr`
@@ -977,7 +974,7 @@ result = run_spec2ir_agent(
 )
 ```
 
-`max_attempts` 保留为兼容名称，语义是本次运行的模型调用资源预算，tool call 同样消耗一次调用。
+`max_attempts` 的语义是本次运行的模型调用资源预算，tool call 同样消耗一次调用。
 预算耗尽不会结束 harness；使用同一 `LLMAgentRuntime` 和 `thread_id` 再次调用会从 checkpoint、
 best revision 和 review ledger 继续。默认 runtime 在当前进程内共享 `MemorySaver`；跨进程持久化
 需要调用方注入数据库 checkpointer。
@@ -1086,7 +1083,7 @@ tests/test_generated_plugin_integration.py
 覆盖能力包括：
 
 - rule-based SemanticSpecIR 生成。
-- LLM response normalization。
+- patch 后 SemanticSpecIR normalization。
 - LLMPlugin registry、Callable backend 和 LangGraph delegate。
 - FeedbackCodegen strict bundle validation、static validation、subprocess contract/golden
   evaluation 和 retry feedback。
@@ -1096,8 +1093,8 @@ tests/test_generated_plugin_integration.py
 - `representation` 必须是 strict `RepresentationAST v2`。
 - legacy `representation.type` / `representation.fields[]` 会被拒绝。
 - `field_ref` AST 节点必须引用 manifest fields。
-- repair loop 成功、backend error 和无 LLM 情况。
-- automation routing：可机器解决的 `needs_human_input` 会进入 auto-formalization prompt；
+- patch agent repair、backend error 和无 LLM Harness review。
+- automation routing：可机器解决的 `needs_human_input` 会进入 agent formalization；
   blocking open question 不会调用 LLM。
 - custom automation policy graph 可以覆盖默认路由。
 - deterministic repair 可以在无 LLM 时修复机械 traceability/claim metadata 问题。

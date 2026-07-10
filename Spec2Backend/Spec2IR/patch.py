@@ -6,7 +6,7 @@ import copy
 from dataclasses import dataclass
 import hashlib
 import json
-from typing import Any, Iterable
+from typing import Any
 
 
 PATCH_SCHEMA_VERSION = 1
@@ -160,30 +160,6 @@ def normalize_patch_operation(value: Any) -> dict[str, Any]:
     return operation
 
 
-def semantic_ir_patch_from_candidate(
-    current: dict[str, Any],
-    candidate: dict[str, Any],
-    *,
-    revision: int,
-) -> dict[str, Any]:
-    operations: list[dict[str, Any]] = []
-    for collection in sorted(EDITABLE_COLLECTIONS):
-        before = current.get(collection, [])
-        after = candidate.get(collection, [])
-        if not isinstance(before, list) or not isinstance(after, list):
-            continue
-        operations.extend(_collection_diff(collection, before, after))
-    if not operations:
-        raise SemanticIRPatchError("candidate has no changes in the LLM-editable semantic plane")
-    return {
-        "schema_version": PATCH_SCHEMA_VERSION,
-        "base_revision": revision,
-        "base_sha256": semantic_ir_sha256(current),
-        "operations": operations,
-        "rationale": "legacy complete candidate converted to SemanticIRPatch",
-    }
-
-
 def semantic_ir_patch_contract() -> dict[str, Any]:
     return {
         "schema_version": PATCH_SCHEMA_VERSION,
@@ -202,51 +178,6 @@ def semantic_ir_patch_contract() -> dict[str, Any]:
         ],
         "protected_fields": sorted(IMMUTABLE_ITEM_FIELDS),
     }
-
-
-def _collection_diff(
-    collection: str,
-    before: list[Any],
-    after: list[Any],
-) -> list[dict[str, Any]]:
-    before_by_id = _items_by_id(before)
-    after_by_id = _items_by_id(after)
-    operations: list[dict[str, Any]] = []
-    for item_id in sorted(before_by_id.keys() - after_by_id.keys()):
-        operations.append(
-            {"op": "remove", "target": {"collection": collection, "id": item_id}}
-        )
-    for item_id in sorted(after_by_id.keys() - before_by_id.keys()):
-        operations.append(
-            {
-                "op": "add",
-                "target": {"collection": collection},
-                "value": copy.deepcopy(after_by_id[item_id]),
-            }
-        )
-    for item_id in sorted(before_by_id.keys() & after_by_id.keys()):
-        before_item = before_by_id[item_id]
-        after_item = after_by_id[item_id]
-        for key in sorted(set(before_item) | set(after_item)):
-            if key in IMMUTABLE_ITEM_FIELDS or before_item.get(key) == after_item.get(key):
-                continue
-            target = {"collection": collection, "id": item_id, "path": f"/{escape_pointer_token(key)}"}
-            if key not in after_item:
-                operations.append({"op": "remove", "target": target})
-            elif key not in before_item:
-                operations.append({"op": "add", "target": target, "value": copy.deepcopy(after_item[key])})
-            else:
-                operations.append({"op": "replace", "target": target, "value": copy.deepcopy(after_item[key])})
-    return operations
-
-
-def _items_by_id(items: Iterable[Any]) -> dict[str, dict[str, Any]]:
-    result: dict[str, dict[str, Any]] = {}
-    for item in items:
-        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
-            continue
-        result[item["id"]] = item
-    return result
 
 
 def _apply_operation(document: dict[str, Any], operation: dict[str, Any]) -> None:
@@ -374,6 +305,5 @@ __all__ = [
     "apply_semantic_ir_patch",
     "normalize_semantic_ir_patch",
     "semantic_ir_patch_contract",
-    "semantic_ir_patch_from_candidate",
     "semantic_ir_sha256",
 ]

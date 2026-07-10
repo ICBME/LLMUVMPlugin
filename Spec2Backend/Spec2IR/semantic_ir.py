@@ -13,15 +13,6 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
-from LLMPlugin import (
-    CallableLLMBackend,
-    LLMBackend,
-    LLMRequest,
-    LLMResponse,
-    create_backend,
-)
-from rtlagent_bfm.loader import load_ir
-
 from .claim_extraction import (
     build_open_questions,
     evidence_from_spec_claims,
@@ -44,15 +35,12 @@ from .schema import (
     BLOCKING_FORMALIZATION_STATUSES,
     SEMANTIC_SPEC_IR_SCHEMA_VERSION,
     TRACEABLE_SOURCE_KIND,
-    SemanticSpecIRCallable,
     SemanticSpecIRIssue,
     SemanticSpecIRValidationError,
     SourceDocument,
-    extract_json,
     json_round_trip,
     load_source_documents,
     looks_like_semantic_spec_ir,
-    sha256_text,
 )
 from .semantic_validation import (
     collect_semantic_spec_ir_issues,
@@ -66,17 +54,8 @@ def generate_semantic_spec_ir(
     spec_paths: Iterable[str | Path] = (),
     design_ir_path: str | Path | None = None,
     target: str | None = None,
-    llm_backend: LLMBackend | None = None,
-    llm_callable: SemanticSpecIRCallable | None = None,
-    model: str | None = None,
 ) -> dict[str, Any]:
-    """Generate a draft SemanticSpecIR from target docs.
-
-    If ``llm_backend`` is provided and returns a value, that response is
-    normalized and validated as the primary extraction.  Without an LLM, this
-    function still returns a deterministic first-pass IR for supported
-    algorithmic behaviors so the pipeline remains testable and reviewable.
-    """
+    """Generate and validate a deterministic SemanticSpecIR draft."""
 
     manifest = load_manifest_summary(manifest_path)
     target_name = target or manifest.target
@@ -85,32 +64,6 @@ def generate_semantic_spec_ir(
             f"manifest target {manifest.target!r} does not match requested target {target_name!r}"
         )
     documents = load_source_documents(spec_paths)
-    prompt = build_semantic_spec_ir_prompt(
-        manifest_path=manifest.path,
-        spec_paths=tuple(document.path for document in documents),
-        design_ir_path=design_ir_path,
-        target=target_name,
-    )
-    backend = llm_backend
-    if backend is None and llm_callable is not None:
-        backend = CallableLLMBackend(llm_callable)
-    if backend is not None:
-        response = invoke_semantic_spec_ir_backend(
-            backend,
-            prompt,
-            target=target_name,
-            model=model,
-        )
-        if response is not None:
-            ir = normalize_semantic_spec_ir_response(response)
-            validate_semantic_spec_ir(
-                ir,
-                manifest_path=manifest.path,
-                spec_paths=tuple(document.path for document in documents),
-                target=target_name,
-            )
-            return ir
-
     ir = generate_rule_based_semantic_spec_ir(
         manifest=manifest,
         documents=documents,
@@ -202,89 +155,6 @@ def generate_rule_based_semantic_spec_ir(
     }
 
 
-def build_semantic_spec_ir_prompt(
-    *,
-    manifest_path: str | Path,
-    spec_paths: Iterable[str | Path] = (),
-    design_ir_path: str | Path | None = None,
-    target: str | None = None,
-) -> dict[str, Any]:
-    """Build the strict JSON prompt used for LLM semantic extraction."""
-
-    manifest = load_manifest_summary(manifest_path)
-    target_name = target or manifest.target
-    if manifest.target != target_name:
-        raise SemanticSpecIRValidationError(
-            f"manifest target {manifest.target!r} does not match requested target {target_name!r}"
-        )
-    documents = load_source_documents(spec_paths)
-    design_ir_payload = None
-    if design_ir_path is not None:
-        path = Path(design_ir_path)
-        design_ir = load_ir(path)
-        design_ir_payload = {
-            "path": str(path),
-            "content": path.read_text(encoding="utf-8"),
-            "summary": {
-                "top": design_ir.top,
-                "interfaces": sorted(design_ir.interfaces),
-                "bindings": sorted(design_ir.bindings),
-                "registers": sorted(design_ir.registers),
-            },
-        }
-
-    return {
-        "task": (
-            "Extract a traceable SemanticSpecIR from natural-language hardware "
-            "specifications. Return strict JSON only."
-        ),
-        "workflow": "natural_language_spec_to_traceable_semantic_ir",
-        "target": target_name,
-        "constraints": [
-            "Return one complete SemanticSpecIR object under the top-level key semantic_spec_ir.",
-            "Extract atomic spec_claims for every normative or behavior-relevant statement in the specs.",
-            "Every source fragment with normative or behavior semantics must be represented by at least one spec_claim with correct source line provenance.",
-            "For every spec_claim include a stable fingerprint and decomposition.atomic_obligations for condition, trigger, response, timing, clock/reset, protocol, interface, operation, state transition, truth-table row, or fallback behavior semantics.",
-            "Every normative spec_claim must be covered by semantic_elements[].claim_ids, open_questions[].claim_ids, or semantic_gaps[].claim_ids.",
-            "Every semantic element must cite at least one evidence id from the original spec text.",
-            "Evidence must include source_id, line_start, line_end, and a short quote copied from those lines.",
-            "Represent spec semantics independent of backend support; do not decide whether refmodel, SVA, or OracleIR can lower it.",
-            "Return SemanticSpecIR schema v6 with semantic_context.version=1, semantic_context.symbols, and semantic_context.constraints.",
-            "Every manifest field and every inputs[] entry must have one semantic_context.symbols[] entry with name, kind, type, direction, roles, and source.",
-            "Use type kinds bool, int, uint, bitvector, enum, string, bytes, or any; use any only when the spec truly lacks enough information and mark dependent candidate semantics for review.",
-            "Use strict RepresentationAST v2 in semantic_elements[].representation; text is only review aid, ast is the semantic source of truth.",
-            "RepresentationAST must include ast_version, kind, text, and ast; do not use legacy free-form type/fields representation.",
-            "Prefer typed clock_reset_context, latency_rule, handshake_rule, and signal_binding nodes over text_expr for temporal and protocol semantics.",
-            "If representation.ast is semantic_claim, text_expr-only temporal/protocol/constraint roots, latency endpoints with text_expr, handshake rules without clock context, or contains placeholder targets/conditions, formalization_status must be needs_human_review, incomplete, ambiguous, or conflict.",
-            "Use open_questions for missing, ambiguous, or conflicting semantics.",
-            "Use semantic_gaps for source claims that are not yet formalized, ambiguous, incomplete, or conflicting.",
-            "Do not generate Python code, OracleIR, or plugin artifacts in this stage.",
-            "Do not invent manifest fields; field references must come from inputs, manifest fields, or be marked as open questions.",
-        ],
-        "semantic_spec_ir_contract": semantic_spec_ir_contract(),
-        "response_contract": {
-            "semantic_spec_ir": "complete SemanticSpecIR JSON object",
-            "notes": ["optional extraction notes"],
-        },
-        "inputs": {
-            "target_manifest": {
-                "path": str(manifest.path),
-                "content": manifest.path.read_text(encoding="utf-8"),
-                "summary": manifest_summary_payload(manifest),
-            },
-            "design_ir": design_ir_payload,
-            "specs": [
-                {
-                    "id": document.id,
-                    "path": str(document.path),
-                    "content_hash": sha256_text(document.text),
-                    "content": document.text,
-                }
-                for document in documents
-            ],
-        },
-    }
-
 def load_semantic_spec_ir(path: str | Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
@@ -295,104 +165,14 @@ def write_semantic_spec_ir(path: str | Path, ir: dict[str, Any]) -> None:
     output.write_text(json.dumps(ir, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def invoke_semantic_spec_ir_backend(
-    backend: LLMBackend,
-    prompt: dict[str, Any],
-    *,
-    target: str,
-    model: str | None = None,
-) -> dict[str, Any] | None:
-    response = backend.invoke(
-        LLMRequest(
-            prompt=prompt,
-            model=model,
-            system_prompt=(
-                "You extract traceable hardware specification semantics. "
-                "Return strict JSON satisfying the response_contract."
-            ),
-            run_name="semantic_spec_ir_extraction",
-            tags=("semantic-spec-ir", target),
-            metadata={"target": target},
-            response_format="json_object",
-        )
-    )
-    if response is None:
-        return None
-    return llm_response_to_json(response)
+def normalize_semantic_spec_ir(ir: dict[str, Any]) -> dict[str, Any]:
+    """Normalize one SemanticSpecIR artifact after a patch is applied."""
 
-
-def maybe_call_semantic_spec_ir_llm(
-    prompt: dict[str, Any],
-    model: str | None = None,
-    *,
-    backend_name: str | None = None,
-) -> dict[str, Any] | None:
-    backend = create_backend(backend_name, model=model)
-    if backend is None:
-        return None
-    return invoke_semantic_spec_ir_backend(
-        backend,
-        prompt,
-        target=str(prompt.get("target") or "unknown"),
-        model=model,
-    )
-
-
-def llm_response_to_json(response: LLMResponse) -> dict[str, Any]:
-    if response.parsed_json is not None:
-        return response.parsed_json
-    return json.loads(extract_json(response.content))
-
-
-def normalize_semantic_spec_ir_response(value: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError(f"LLM response JSON must be an object, got {type(value).__name__}")
-    if looks_like_semantic_spec_ir(value):
-        return normalize_semantic_spec_ir_artifact(value)
-    for key in ("semantic_spec_ir", "semantic_ir", "ir", "result", "output", "response"):
-        nested = value.get(key)
-        if isinstance(nested, dict):
-            if looks_like_semantic_spec_ir(nested):
-                return normalize_semantic_spec_ir_artifact(nested)
-            try:
-                return normalize_semantic_spec_ir_response(nested)
-            except ValueError:
-                continue
-    raise ValueError("LLM response did not contain a SemanticSpecIR object")
-
-
-def normalize_semantic_spec_ir_artifact(ir: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(ir, dict) or not looks_like_semantic_spec_ir(ir):
+        raise ValueError("value is not a SemanticSpecIR object")
     normalized = json_round_trip(ir)
-    normalized["inputs"] = normalize_semantic_spec_ir_inputs(normalized.get("inputs"))
     normalize_semantic_spec_ir_representations(normalized)
     return normalized
-
-
-def normalize_semantic_spec_ir_inputs(value: Any) -> list[dict[str, Any]]:
-    if isinstance(value, list):
-        return json_round_trip(value)
-    if not isinstance(value, dict):
-        return []
-    if "target_manifest" in value:
-        target_manifest = value.get("target_manifest")
-        if isinstance(target_manifest, dict):
-            summary = target_manifest.get("summary")
-            if isinstance(summary, dict):
-                fields = summary.get("fields")
-                if isinstance(fields, list):
-                    return [
-                        json_round_trip(field)
-                        for field in fields
-                        if isinstance(field, dict) and isinstance(field.get("name"), str)
-                    ]
-    fields = value.get("fields")
-    if isinstance(fields, list):
-        return [
-            json_round_trip(field)
-            for field in fields
-            if isinstance(field, dict) and isinstance(field.get("name"), str)
-        ]
-    return []
 
 
 def normalize_semantic_spec_ir_representations(ir: dict[str, Any]) -> None:
@@ -555,23 +335,6 @@ def semantic_spec_ir_contract() -> dict[str, Any]:
             "claim_ids": ["claim ids covered by this gap"],
         },
         "allowed_review_statuses": sorted(ALLOWED_REVIEW_STATUSES),
-    }
-
-def manifest_summary_payload(manifest: ManifestSummary) -> dict[str, Any]:
-    return {
-        "target": manifest.target,
-        "fields": [
-            {
-                "name": field.name,
-                "kind": field.kind,
-                "choices": list(field.choices),
-                "min": field.minimum,
-                "max": field.maximum,
-                "hex_len": field.hex_len,
-                "hex_len_by": field.hex_len_by,
-            }
-            for field in manifest.fields
-        ],
     }
 
 

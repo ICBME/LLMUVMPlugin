@@ -8,7 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 
 
 SEMANTIC_SPEC_IR_SCHEMA_VERSION = 6
@@ -91,9 +91,6 @@ ALLOWED_SEMANTIC_GAP_KINDS = {
     "missing_context",
     "unformalized",
 }
-
-
-SemanticSpecIRCallable = Callable[[dict[str, Any], str | None], dict[str, Any] | None]
 
 
 class SemanticSpecIRValidationError(ValueError):

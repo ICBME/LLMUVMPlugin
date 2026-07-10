@@ -9,22 +9,25 @@ from typing import Any, Iterable
 
 from rtlagent_bfm.loader import load_ir
 
-from .claim_extraction import collect_source_claim_coverage, gap_requires_human_input
+from .claim_extraction import (
+    collect_source_claim_coverage,
+    extract_spec_claims,
+    gap_requires_human_input,
+)
 from .manifest import load_manifest_summary
 from .representation_ast import (
     collect_representation_completeness_issues,
     iter_ast_field_refs,
 )
-from .semantic_ir import (
+from .schema import (
     BLOCKING_FORMALIZATION_STATUSES,
     SemanticSpecIRIssue,
-    collect_semantic_spec_ir_issues,
-    extract_spec_claims,
     load_source_documents,
-    load_semantic_spec_ir,
     sha256_text,
 )
+from .semantic_ir import load_semantic_spec_ir
 from .semantic_obligation_coverage import collect_obligation_coverage
+from .semantic_validation import collect_semantic_spec_ir_issues
 
 
 REVIEW_SCHEMA_VERSION = 1

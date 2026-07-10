@@ -22,22 +22,21 @@ from .automation import (
     classify_review_for_automation,
     deterministic_repair_semantic_spec_ir,
 )
-from .semantic_ir import (
-    augment_semantic_context_from_elements,
-    generate_semantic_spec_ir,
-    normalize_semantic_spec_ir_response,
-    semantic_spec_ir_contract,
-    validate_semantic_spec_ir,
-)
+from .context import design_ir_context, manifest_context, spec_contexts
 from .patch import (
     SemanticIRPatchError,
     apply_semantic_ir_patch,
     normalize_semantic_ir_patch,
     semantic_ir_patch_contract,
-    semantic_ir_patch_from_candidate,
     semantic_ir_sha256,
 )
-from .semantic_repair import design_ir_payload, manifest_payload, spec_payloads
+from .semantic_ir import (
+    augment_semantic_context_from_elements,
+    generate_semantic_spec_ir,
+    normalize_semantic_spec_ir,
+    semantic_spec_ir_contract,
+)
+from .semantic_validation import validate_semantic_spec_ir
 from .validation_review import review_semantic_spec_ir
 
 
@@ -51,8 +50,8 @@ AGENT_INSTRUCTIONS = (
     "revisioned patch over the LLM-editable semantic plane; never regenerate the complete IR. "
     "Use stable collection item ids and the patch contract from the observation. "
     "Use type='tool_call' only when a patch needs inspection before applying it. "
-    "Use action='mark_human_required' when the review requires external design intent. "
-    "Use action='request_finalize' only when the current review is already acceptable."
+    "If the source remains ambiguous, patch an explicit open question or semantic gap; "
+    "the harness will route it to human review."
 )
 
 
@@ -134,7 +133,7 @@ class Spec2IRHarness:
             "automation_decision": self.automation_decisions[-1] if self.automation_decisions else {},
             "last_error": self.last_error or {},
             "response_contract": {
-                "action": "apply_semantic_ir_patch | mark_human_required | request_finalize",
+                "action": "apply_semantic_ir_patch",
                 "patch": "required SemanticIRPatch when action is apply_semantic_ir_patch",
                 "rationale": "optional concise rationale",
             },
@@ -142,14 +141,6 @@ class Spec2IRHarness:
                 {
                     "action": "apply_semantic_ir_patch",
                     "description": "Atomically apply a small revisioned patch to editable semantic items.",
-                },
-                {
-                    "action": "mark_human_required",
-                    "description": "Stop when the remaining issue needs external human design intent.",
-                },
-                {
-                    "action": "request_finalize",
-                    "description": "Finalize only if the current review is already passed.",
                 },
             ],
             "semantic_ir_patch_contract": {
@@ -164,9 +155,9 @@ class Spec2IRHarness:
             observation["current_semantic_spec_ir"] = self.current
             observation["semantic_spec_ir_contract"] = semantic_spec_ir_contract()
             inputs = {
-                "target_manifest": manifest_payload(self.manifest_path) if self.manifest_path is not None else None,
-                "design_ir": design_ir_payload(self.design_ir_path) if self.design_ir_path is not None else None,
-                "specs": spec_payloads(self.spec_paths),
+                "target_manifest": manifest_context(self.manifest_path),
+                "design_ir": design_ir_context(self.design_ir_path),
+                "specs": spec_contexts(self.spec_paths),
             }
             observation["inputs"] = inputs
             observation["session_context"] = {
@@ -237,8 +228,6 @@ class Spec2IRHarness:
         ]
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if name == "get_current_semantic_ir":
-            return {"status": "tool_result", "semantic_ir": self.current or {}}
         if name == "get_review_findings":
             return {
                 "status": "tool_result",
@@ -286,94 +275,25 @@ class Spec2IRHarness:
             if review.get("status") != "passed":
                 result["repair_focus"] = build_repair_focus(review, progress=progress)
             return result
-        if name == "normalize_semantic_ir_candidate":
-            candidate = self._normalize_tool_candidate(arguments)
-            return {"status": "tool_result", "normalized_semantic_ir": candidate}
-        if name == "validate_semantic_ir_candidate":
-            candidate = self._normalize_tool_candidate(arguments)
-            validate_semantic_spec_ir(
-                candidate,
-                manifest_path=self.manifest_path,
-                spec_paths=self.spec_paths,
-                target=self.target,
-            )
-            review = review_semantic_spec_ir(
-                candidate,
-                manifest_path=self.manifest_path,
-                spec_paths=self.spec_paths,
-                design_ir_path=self.design_ir_path,
-                target=self.target,
-                require_reviewed=self.require_reviewed,
-            )
-            return {
-                "status": "tool_result",
-                "schema_valid": True,
-                "valid": True,
-                "review_status": review.get("status"),
-                "review": review,
-                "repair_focus": build_repair_focus(
-                    review,
-                    progress=review_progress(self.review, review),
-                ),
-            }
-        if name == "diff_semantic_ir":
-            candidate = self._normalize_tool_candidate(arguments)
-            return {"status": "tool_result", "diff": semantic_ir_diff(self.current or {}, candidate)}
         return {"status": "tool_error", "error": {"type": "UnknownTool", "message": f"unsupported tool {name!r}"}}
 
     def apply(self, action: dict[str, Any]) -> dict[str, Any]:
         if not self.started:
             self.start()
-        name = str(action.get("action") or "")
         attempt_index = len(self.harness_attempts) + 1
-        if name == "apply_semantic_ir_patch":
+        if action.get("action") == "apply_semantic_ir_patch":
             return self._apply_patch(action, attempt_index=attempt_index)
-        if name == "submit_semantic_spec_ir":
-            return self._apply_candidate(action, attempt_index=attempt_index)
-        if name == "mark_human_required":
-            decision = self.automation_decisions[-1] if self.automation_decisions else {}
-            if decision.get("route") in {"llm_repair", "llm_formalize"}:
-                self.last_error = {
-                    "type": "HumanEscalationRejected",
-                    "message": "automation policy still classifies the remaining findings as machine-resolvable",
-                }
-                result = {
-                    "status": "action_rejected",
-                    "action": name,
-                    "error": self.last_error,
-                }
-                self.harness_attempts.append(result)
-                return result
-            self.done = True
-            self.status = "needs_human_input"
-            result = {
-                "status": self.status,
-                "action": name,
-                "rationale": action.get("rationale"),
-            }
-            self.harness_attempts.append(result)
-            return result
-        if name == "request_finalize":
-            self._finalize_from_review()
-            result = {
-                "status": self.status if self.done else "action_rejected",
-                "action": name,
-                **({"error": self.last_error} if not self.done else {}),
-            }
-            self.harness_attempts.append(result)
-            return result
-        self.last_error = {"type": "InvalidAction", "message": f"unsupported action {name!r}"}
-        result = {"status": "llm_invalid_response", "action": name, "error": self.last_error}
+        self.last_error = {
+            "type": "InvalidAction",
+            "message": "Spec2IRHarness only accepts apply_semantic_ir_patch",
+        }
+        result = {
+            "status": "llm_invalid_response",
+            "action": action.get("action"),
+            "error": self.last_error,
+        }
         self.harness_attempts.append(result)
         return result
-
-    def _normalize_tool_candidate(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        candidate_payload = arguments.get("semantic_spec_ir")
-        if candidate_payload is None and isinstance(arguments.get("candidate"), dict):
-            candidate_payload = arguments["candidate"]
-        return normalize_semantic_spec_ir_response(
-            {"semantic_spec_ir": candidate_payload} if isinstance(candidate_payload, dict) else arguments
-        )
 
     def is_done(self) -> bool:
         return self.done
@@ -396,37 +316,6 @@ class Spec2IRHarness:
             "attempt_count": len(self.harness_attempts),
             "last_error": self.last_error,
         }
-
-    def _apply_candidate(self, action: dict[str, Any], *, attempt_index: int) -> dict[str, Any]:
-        try:
-            candidate_payload = action.get("semantic_spec_ir")
-            if candidate_payload is None and isinstance(action.get("candidate"), dict):
-                candidate_payload = action["candidate"]
-            candidate = normalize_semantic_spec_ir_response(
-                {"semantic_spec_ir": candidate_payload} if isinstance(candidate_payload, dict) else action
-            )
-            patch = semantic_ir_patch_from_candidate(
-                self.current or {},
-                candidate,
-                revision=self.revision,
-            )
-        except (SemanticIRPatchError, TypeError, ValueError) as exc:
-            self.last_error = {"type": type(exc).__name__, "message": str(exc)}
-            result = {
-                "attempt": attempt_index,
-                "status": "llm_invalid_response",
-                "action": "submit_semantic_spec_ir",
-                "error": self.last_error,
-            }
-            self.harness_attempts.append(result)
-            return result
-        compatibility_action = {
-            "action": "apply_semantic_ir_patch",
-            "patch": patch,
-            "rationale": action.get("rationale"),
-            "compatibility_source": "submit_semantic_spec_ir",
-        }
-        return self._apply_patch(compatibility_action, attempt_index=attempt_index)
 
     def _apply_patch(self, action: dict[str, Any], *, attempt_index: int) -> dict[str, Any]:
         patch_payload = action.get("patch") if isinstance(action.get("patch"), dict) else action
@@ -545,9 +434,7 @@ class Spec2IRHarness:
         )
         if not patch_application.changed:
             raise SemanticIRPatchError("patch does not change the SemanticSpecIR")
-        candidate = normalize_semantic_spec_ir_response(
-            {"semantic_spec_ir": patch_application.semantic_ir}
-        )
+        candidate = normalize_semantic_spec_ir(patch_application.semantic_ir)
         semantic_context = candidate.get("semantic_context")
         semantic_elements = candidate.get("semantic_elements")
         if isinstance(semantic_context, dict) and isinstance(semantic_elements, list):
@@ -623,25 +510,6 @@ class Spec2IRHarness:
             return
         self.status = "running"
         self.done = False
-
-    def _finalize_from_review(self) -> None:
-        if self.review.get("status") == "passed":
-            self.status = "valid" if not self.harness_attempts else "repaired"
-            self.done = True
-        elif (
-            self.review.get("status") == "needs_human_input"
-            and (self.automation_decisions[-1] if self.automation_decisions else {}).get("route")
-            not in {"llm_repair", "llm_formalize"}
-        ):
-            self.status = "needs_human_input"
-            self.done = True
-        else:
-            self.status = "running"
-            self.done = False
-            self.last_error = {
-                "type": "FinalizeRejected",
-                "message": "current review has not passed and is not classified as human-only",
-            }
 
     def _repair_focus(self) -> dict[str, Any]:
         return build_repair_focus(
@@ -772,41 +640,6 @@ def spec2ir_session_signature(
 
 def json_round_trip(value: dict[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(value, sort_keys=True))
-
-
-def semantic_ir_diff(current: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
-    current_keys = set(current)
-    candidate_keys = set(candidate)
-    current_ids = semantic_element_ids(current)
-    candidate_ids = semantic_element_ids(candidate)
-    return {
-        "top_level_added": sorted(candidate_keys - current_keys),
-        "top_level_removed": sorted(current_keys - candidate_keys),
-        "top_level_changed": sorted(
-            key for key in current_keys & candidate_keys if current.get(key) != candidate.get(key)
-        ),
-        "semantic_elements": {
-            "current_count": len(current.get("semantic_elements", []))
-            if isinstance(current.get("semantic_elements"), list)
-            else None,
-            "candidate_count": len(candidate.get("semantic_elements", []))
-            if isinstance(candidate.get("semantic_elements"), list)
-            else None,
-            "added_ids": sorted(candidate_ids - current_ids),
-            "removed_ids": sorted(current_ids - candidate_ids),
-        },
-    }
-
-
-def semantic_element_ids(semantic_ir: dict[str, Any]) -> set[str]:
-    elements = semantic_ir.get("semantic_elements")
-    if not isinstance(elements, list):
-        return set()
-    return {
-        str(item.get("id"))
-        for item in elements
-        if isinstance(item, dict) and item.get("id") is not None
-    }
 
 
 def review_snapshot(review: dict[str, Any]) -> dict[str, Any]:

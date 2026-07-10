@@ -11,8 +11,8 @@ from typing import Any
 from LLMPlugin import LLMBackend, create_backend
 from Spec2Backend.BackendReadiness import analyze_backend_readiness
 from Spec2Backend.Spec2IR import (
+    Spec2IRHarness,
     generate_semantic_spec_ir,
-    repair_semantic_spec_ir_with_review,
     review_semantic_spec_ir,
     run_spec2ir_agent,
     validate_semantic_spec_ir,
@@ -193,13 +193,14 @@ def run_verilogeval_case(
                 raise RealDataLLMRuntimeError(result.error)
             result.add_stage("llm_agent", "passed")
         else:
-            repair = repair_semantic_spec_ir_with_review(
-                semantic_ir,
+            harness = Spec2IRHarness(
+                initial_semantic_ir=semantic_ir,
                 manifest_path=materialized.manifest_path,
                 spec_paths=[materialized.spec_path],
                 target=materialized.target,
-                max_attempts=2,
             )
+            harness.start()
+            repair = harness.result()
         result.repair_result = repair
         result.semantic_ir = repair["semantic_ir"]
         result.add_stage("automation_repair", repair["status"])

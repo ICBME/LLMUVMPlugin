@@ -5,7 +5,6 @@ import pytest
 from Spec2Backend.Spec2IR import (
     SemanticIRPatchError,
     apply_semantic_ir_patch,
-    semantic_ir_patch_from_candidate,
     semantic_ir_sha256,
 )
 from Spec2Backend.Spec2IR.harness import review_progress
@@ -124,19 +123,6 @@ def test_semantic_ir_patch_is_atomic_and_protects_identity_fields() -> None:
     with pytest.raises(SemanticIRPatchError, match="immutable"):
         apply_semantic_ir_patch(ir, patch, revision=0)
     assert ir == original
-
-
-def test_complete_candidate_compatibility_converts_only_editable_changes() -> None:
-    ir = sample_ir()
-    candidate = copy.deepcopy(ir)
-    candidate["sources"][0]["content_hash"] = "model tried to rewrite trusted source"
-    candidate["semantic_elements"][0]["formalization_status"] = "formalized"
-
-    patch = semantic_ir_patch_from_candidate(ir, candidate, revision=0)
-    result = apply_semantic_ir_patch(ir, patch, revision=0)
-
-    assert result.semantic_ir["sources"] == ir["sources"]
-    assert result.semantic_ir["semantic_elements"][0]["formalization_status"] == "formalized"
 
 
 def test_review_progress_uses_stable_finding_code_instead_of_message_literals() -> None:
