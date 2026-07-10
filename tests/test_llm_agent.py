@@ -70,6 +70,14 @@ def test_llm_agent_runner_invokes_harness_and_preserves_history() -> None:
     assert len(result["attempts"]) == 2
     assert prompts[1]["attempt_history"][0]["status"] == "accepted"
     assert prompts[1]["messages"][1]["content"]
+    assert [message["role"] for message in prompts[1]["messages"]] == [
+        "system",
+        "assistant",
+        "user",
+        "user",
+    ]
+    assert '"value": 1' in prompts[1]["messages"][1]["content"]
+    assert '"remaining_model_calls_including_this_one": 1' in prompts[1]["messages"][-1]["content"]
     assert result["llm_provenance"]["runtime"] == "langgraph"
     assert result["llm_provenance"]["checkpoint"]["type"] == "memory"
 
@@ -194,3 +202,30 @@ def test_llm_agent_runner_exposes_langgraph_state_events_for_checkpoint_audit() 
         "type": "memory",
         "thread_id": "audit-thread",
     }
+
+
+def test_llm_agent_runner_limits_conversation_history_window() -> None:
+    prompts = []
+
+    def llm(prompt, _model):
+        prompts.append(prompt)
+        return {"action": "finish", "value": len(prompts)}
+
+    result = LLMAgentRunner(
+        FakeHarness(done_after=3),
+        backend=CallableLLMBackend(llm),
+        config=LLMAgentConfig(max_attempts=3, history_window=1, event_window=0),
+    ).run()
+
+    assert result["status"] == "done"
+    assert len(prompts[2]["attempt_history"]) == 1
+    assert [message["role"] for message in prompts[2]["messages"]] == [
+        "system",
+        "assistant",
+        "user",
+        "user",
+    ]
+    assert '"value": 2' in prompts[2]["messages"][1]["content"]
+    assert '"value": 1' not in prompts[2]["messages"][1]["content"]
+    assert '"recent_events": []' in prompts[2]["messages"][-1]["content"]
+    assert result["llm_provenance"]["context_window"] == {"attempts": 1, "events": 0}

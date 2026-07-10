@@ -224,6 +224,8 @@ imports 或 definitions。proof metadata 会记录 `semantic_ir_sha256`、`sourc
 - 提供 provider-neutral `LLMRequest` / `LLMResponse` / `LLMBackend` 协议。
 - 提供 provider-neutral `LLMAgentRunner` / `LLMAgentHarness` 协议，用 LangGraph `StateGraph`
   驱动任意 harness，并使用内存 checkpoint 保留本次 agent state。
+- runtime 把历史模型响应、tool/harness feedback 和最新 observation 组装成有界的多角色消息窗口；
+  `history_window` / `event_window` 控制进入 provider context 的历史量，完整事件仍保留在 result。
 - 提供可选 `LLMAgentToolHarness` 能力，允许 harness 暴露工具；runtime 负责 JSON tool-call
   解析、执行、错误归一化和 tool result 进入下一轮上下文。
 - 通过 registry 支持插件化 backend 创建。
@@ -860,11 +862,15 @@ file-bundle fallback，但它不提供 IR-level formal proof。
 3. 如果 review 已 `passed`，直接返回 `valid`。
 4. 如果路由为 human-only，直接返回 `needs_human_input`。
 5. LangGraph agent 读取 `harness.observe()`，把当前 IR、review、automation decision、
-   tool specs、attempt history 和 recent events 放入 messages。
+   tool specs、attempt history 和 recent events 放入 messages。messages 使用 `system`、历史
+   `assistant`、step feedback `user` 和当前 observation `user` 的对话结构，并显式给出剩余
+   模型调用预算。
 6. LLM 可以返回 legacy action，或返回现代 step：`type="harness_action"`、
    `type="tool_call"` 或 `type="final"`。
 7. tool call 由 `LLMPlugin` runtime 校验并调用 harness 工具，tool result 写入下一轮上下文。
-8. harness 对 submitted candidate 运行 normalize、deterministic repair 和 review。
+8. harness 对 submitted candidate 运行 normalize、deterministic repair 和 review，并计算相对
+   上一轮的 resolved、introduced、persistent finding delta；`repair_focus` 把 blocking findings、
+   missing claim obligations 和进展摘要放入下一轮 observation。
 9. agent 将无效 JSON、无效 step、无效 action、tool result、harness result 和 provider
    provenance 记录到 state/events/attempt history。
 10. 成功返回 `repaired`；LLM 不可用返回 `llm_unavailable`；响应不可解析返回
@@ -879,6 +885,7 @@ agent result 会包含：
 - `attempts`: LLMPlugin agent 维护的 provider response、action、错误和 harness result 摘要。
 - `events`: LangGraph agent state 中的 observation、assistant message、tool result、harness
   action 和 final result 摘要，用于审计上下文流。
+- `review_history`: harness 每轮 review 的结构化快照，用于检查模型是否取得进展或重复提交。
 - `llm_provenance`: backend、model、run name、tags、attempt count、runtime 和内存 checkpoint
   thread id。
 
@@ -915,9 +922,30 @@ result = run_spec2ir_agent(
     target="demo",
     llm_backend=backend,
     model="...",
-    max_attempts=2,
+    max_attempts=3,
 )
 ```
+
+`max_attempts` 是最大模型调用次数，tool call 也消耗一次调用。默认值 3 为一次初始提交和最多
+两次基于结构化 review feedback 的修复留出预算。通用 runtime 默认只把最近 4 个 attempts 和
+8 个 events 组装进 provider messages；该窗口不影响 result 中保存的完整审计事件。
+
+真实 VerilogEval 评测可保存完整 agent trace：
+
+```sh
+uv run python -m tests_real.spec2ir.run_eval \
+  --dataset verilogeval \
+  --root example/verilog-eval/dataset_spec-to-rtl \
+  --limit 10 \
+  --with-llm \
+  --agent-max-attempts 3 \
+  --include-ir \
+  --include-agent-trace \
+  --out runs/spec2ir_real/verilogeval_agent.json
+```
+
+`agent_trace` 包含 attempts、events、harness attempts、review history 和 LLM provenance，适合
+复核跨轮上下文、工具调用和 finding delta；默认不写 trace，避免普通汇总文件过大。
 
 当前内置 backend：
 

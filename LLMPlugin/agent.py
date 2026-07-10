@@ -47,10 +47,14 @@ class LLMAgentConfig:
     run_name: str = "llm_agent"
     tags: tuple[str, ...] = ()
     response_format: str = "json_object"
+    history_window: int = 4
+    event_window: int = 8
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "max_attempts", max(0, int(self.max_attempts)))
+        object.__setattr__(self, "history_window", max(0, int(self.history_window)))
+        object.__setattr__(self, "event_window", max(0, int(self.event_window)))
         object.__setattr__(self, "tags", tuple(str(item) for item in self.tags))
         object.__setattr__(self, "metadata", dict(self.metadata))
 
@@ -170,6 +174,10 @@ class LLMAgentRunner:
             events=events,
             last_error=state.get("last_error"),
             tool_specs=self._tool_specs(),
+            history_window=self.config.history_window,
+            event_window=self.config.event_window,
+            current_attempt=int(state.get("llm_attempt_count") or 0) + 1,
+            max_attempts=self.config.max_attempts,
         )
         return merge_state(state, messages=messages)
 
@@ -177,11 +185,17 @@ class LLMAgentRunner:
         attempt_index = int(state.get("llm_attempt_count") or 0) + 1
         observation = dict(state.get("observation") or {})
         messages = list(state.get("messages") or [])
+        attempts = list(state.get("attempts") or [])
+        attempt_history = (
+            attempts[-self.config.history_window :]
+            if self.config.history_window
+            else []
+        )
         request = LLMRequest(
             prompt={
                 "workflow": observation.get("workflow", self.config.run_name),
                 "observation": observation,
-                "attempt_history": list(state.get("attempts") or []),
+                "attempt_history": attempt_history,
                 "messages": messages,
             },
             model=self.config.model,
@@ -409,6 +423,10 @@ class LLMAgentRunner:
                 "attempt_count": len(attempts),
                 "runtime": "langgraph",
                 "checkpoint": {"type": "memory", "thread_id": self._thread_id},
+                "context_window": {
+                    "attempts": self.config.history_window,
+                    "events": self.config.event_window,
+                },
             },
         )
         result["llm_provenance"].setdefault("attempt_count", len(attempts))
@@ -418,6 +436,13 @@ class LLMAgentRunner:
         result["llm_provenance"].setdefault(
             "checkpoint",
             {"type": "memory", "thread_id": self._thread_id},
+        )
+        result["llm_provenance"].setdefault(
+            "context_window",
+            {
+                "attempts": self.config.history_window,
+                "events": self.config.event_window,
+            },
         )
         return result
 
@@ -471,14 +496,55 @@ def build_agent_messages(
     events: list[dict[str, Any]] | None = None,
     last_error: dict[str, Any] | None = None,
     tool_specs: list[dict[str, Any]] | None = None,
+    history_window: int = 4,
+    event_window: int = 8,
+    current_attempt: int = 1,
+    max_attempts: int | None = None,
 ) -> list[dict[str, str]]:
     instructions = str(observation.get("agent_instructions") or "Return one JSON action object.")
+    runtime_instructions = (
+        "Treat the latest observation and validator feedback as authoritative. "
+        "Use prior assistant steps only as history: do not repeat a failed step unchanged. "
+        "Return exactly one JSON step and no surrounding prose. Tool calls consume one model call, "
+        "so call a tool only when its result is needed to choose or validate the next action."
+    )
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": f"{instructions}\n\n{runtime_instructions}"}
+    ]
+    recent_attempts = attempts[-max(0, history_window) :] if history_window else []
+    for attempt in recent_attempts:
+        response = attempt.get("response")
+        if isinstance(response, dict) and isinstance(response.get("content"), str):
+            messages.append({"role": "assistant", "content": response["content"]})
+        messages.append(
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "kind": "agent_step_feedback",
+                        "attempt": attempt.get("attempt"),
+                        "feedback": attempt_feedback(attempt),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+            }
+        )
+
+    remaining_attempts = None
+    if max_attempts is not None:
+        remaining_attempts = max(0, int(max_attempts) - int(current_attempt) + 1)
     user_payload = {
+        "kind": "current_agent_observation",
         "observation": observation,
-        "attempt_history": attempts,
-        "recent_events": compact_events(events or []),
+        "recent_events": compact_events(events or [], limit=event_window),
         "last_error": last_error or {},
         "tool_specs": tool_specs or [],
+        "budget": {
+            "current_attempt": current_attempt,
+            "max_attempts": max_attempts,
+            "remaining_model_calls_including_this_one": remaining_attempts,
+        },
         "response_contract": {
             "legacy_harness_action": {"action": "submit_semantic_spec_ir | mark_human_required | request_finalize"},
             "modern_harness_action": {"type": "harness_action", "action": "action name"},
@@ -486,10 +552,18 @@ def build_agent_messages(
             "final": {"type": "final"},
         },
     }
-    return [
-        {"role": "system", "content": instructions},
-        {"role": "user", "content": json.dumps(user_payload, indent=2, sort_keys=True)},
-    ]
+    messages.append({"role": "user", "content": json.dumps(user_payload, indent=2, sort_keys=True)})
+    return messages
+
+
+def attempt_feedback(attempt: dict[str, Any]) -> dict[str, Any]:
+    """Return the actionable part of one prior step without duplicating its response."""
+
+    return {
+        key: value
+        for key, value in attempt.items()
+        if key not in {"attempt", "response"}
+    }
 
 
 def response_to_action(response: LLMResponse) -> tuple[dict[str, Any], dict[str, str] | None]:
@@ -555,6 +629,8 @@ def append_event(state: dict[str, Any], event_type: str, content: dict[str, Any]
 
 
 def compact_events(events: list[dict[str, Any]], *, limit: int = 8) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
     return [compact_event(event) for event in events[-limit:]]
 
 

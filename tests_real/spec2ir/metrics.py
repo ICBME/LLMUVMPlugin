@@ -36,6 +36,11 @@ def aggregate_results(results: Iterable[RealDataCaseResult]) -> dict[str, Any]:
     )
     automation_route_counts: Counter[str] = Counter()
     deterministic_repair_count = 0
+    agent_model_call_count = 0
+    agent_tool_call_count = 0
+    agent_progress_submission_count = 0
+    agent_no_progress_submission_count = 0
+    agent_regressive_submission_count = 0
     cases_with_claims = 0
     cases_needing_human = 0
     covered_claims = 0
@@ -43,6 +48,30 @@ def aggregate_results(results: Iterable[RealDataCaseResult]) -> dict[str, Any]:
     for result in processed:
         result_needs_human = False
         if result.repair_result:
+            provenance = result.repair_result.get("llm_provenance", {})
+            if isinstance(provenance, dict):
+                agent_model_call_count += int(provenance.get("attempt_count") or 0)
+            attempts = result.repair_result.get("attempts", [])
+            if isinstance(attempts, list):
+                agent_tool_call_count += sum(
+                    1 for attempt in attempts if isinstance(attempt, dict) and attempt.get("tool_call")
+                )
+                for attempt in attempts:
+                    if not isinstance(attempt, dict):
+                        continue
+                    progress = attempt.get("harness_result", {}).get("progress")
+                    if not isinstance(progress, dict):
+                        continue
+                    if progress.get("made_progress"):
+                        agent_progress_submission_count += 1
+                    if progress.get("no_progress"):
+                        agent_no_progress_submission_count += 1
+                    if (
+                        not progress.get("made_progress")
+                        and int(progress.get("introduced_count") or 0)
+                        > int(progress.get("resolved_count") or 0)
+                    ):
+                        agent_regressive_submission_count += 1
             for decision in result.repair_result.get("automation_decisions", []):
                 route = str(decision.get("route") or "unknown")
                 automation_route_counts[route] += 1
@@ -86,6 +115,11 @@ def aggregate_results(results: Iterable[RealDataCaseResult]) -> dict[str, Any]:
         "llm_generation_failed_count": stage_status_counts.get("llm_generation:failed", 0),
         "automation_route_counts": dict(sorted(automation_route_counts.items())),
         "deterministic_repair_count": deterministic_repair_count,
+        "agent_model_call_count": agent_model_call_count,
+        "agent_tool_call_count": agent_tool_call_count,
+        "agent_progress_submission_count": agent_progress_submission_count,
+        "agent_no_progress_submission_count": agent_no_progress_submission_count,
+        "agent_regressive_submission_count": agent_regressive_submission_count,
     }
 
 

@@ -125,6 +125,9 @@ def test_verilogeval_aggregate_metrics_are_reported(spec2ir_real_data_limit: int
     assert metrics["claim_extraction_rate"] > 0.0
     assert "review_status_counts" in metrics
     assert "readiness_status_counts" in metrics
+    assert "agent_model_call_count" in metrics
+    assert "agent_no_progress_submission_count" in metrics
+    assert "agent_regressive_submission_count" in metrics
     assert metrics["human_escalation_count"] <= metrics["processed_count"]
     assert metrics["stage_human_signal_count"] >= metrics["human_escalation_count"]
 
@@ -198,6 +201,7 @@ def test_verilogeval_llm_agent_uses_previous_attempt_context_for_repair() -> Non
             work_root=Path(tmp) / "run",
             with_llm=True,
             llm_backend=backend,
+            agent_max_attempts=2,
         )
 
     assert result.status == "passed"
@@ -210,6 +214,10 @@ def test_verilogeval_llm_agent_uses_previous_attempt_context_for_repair() -> Non
     assert result.repair_result["status"] == "repair_failed"
     assert len(backend.prompts) == 2
     assert backend.prompts[1]["attempt_history"][0]["status"] == "llm_invalid_response"
+    trace_payload = result.to_dict(include_agent_trace=True)
+    assert trace_payload["agent_trace"]["attempts"]
+    assert trace_payload["agent_trace"]["events"]
+    assert trace_payload["agent_trace"]["review_history"]
     assert any(stage.name == "llm_agent" and stage.status == "passed" for stage in result.stages)
 
 

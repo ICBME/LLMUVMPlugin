@@ -2212,6 +2212,36 @@ class TestSemanticSpecIRGeneration(unittest.TestCase):
             self.assertEqual(observation["harness_attempts"][0]["status"], "llm_invalid_response")
             self.assertEqual(observation["last_error"]["type"], "ValueError")
 
+    def test_spec2ir_harness_reports_review_progress_for_repeated_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sha.toml"
+            spec = root / "sha_spec.md"
+            manifest.write_text(_sha_manifest())
+            spec.write_text("The block computes SHA-256 over the input message.\n")
+            broken_ir = generate_semantic_spec_ir(manifest_path=manifest, spec_paths=[spec])
+            broken_ir["semantic_elements"][0].pop("representation")
+            harness = Spec2IRHarness(
+                manifest_path=manifest,
+                spec_paths=[spec],
+                target="demo_sha",
+                initial_semantic_ir=broken_ir,
+            )
+            harness.start()
+
+            apply_result = harness.apply(
+                {"action": "submit_semantic_spec_ir", "semantic_spec_ir": broken_ir}
+            )
+            observation = harness.observe()
+
+            self.assertEqual(apply_result["status"], "review_failed")
+            self.assertTrue(apply_result["progress"]["no_progress"])
+            self.assertEqual(observation["last_error"]["type"], "ReviewFailed")
+            self.assertTrue(
+                observation["repair_focus"]["progress_from_previous_submission"]["no_progress"]
+            )
+            self.assertEqual(len(harness.result()["review_history"]), 2)
+
     def test_spec2ir_harness_exposes_agent_tools(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

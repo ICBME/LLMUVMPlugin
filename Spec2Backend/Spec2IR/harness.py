@@ -26,6 +26,10 @@ from .validation_review import review_semantic_spec_ir
 
 AGENT_INSTRUCTIONS = (
     "You are a Spec2IR repair agent. Return one strict JSON object. "
+    "Treat review_report and repair_focus as authoritative. Resolve every blocking finding while "
+    "preserving all source-derived claims, evidence, identifiers, and already valid typed AST. "
+    "After a review_failed submission, use the finding delta to change the candidate; do not submit "
+    "the same semantic structure again. "
     "Use legacy action='submit_semantic_spec_ir' or modern "
     "type='harness_action' with action='submit_semantic_spec_ir' and a complete "
     "semantic_spec_ir when the provided sources support an automated repair. "
@@ -53,6 +57,8 @@ class Spec2IRHarness:
     automation_decisions: list[dict[str, Any]] = field(default_factory=list, init=False)
     deterministic_repairs: list[dict[str, Any]] = field(default_factory=list, init=False)
     harness_attempts: list[dict[str, Any]] = field(default_factory=list, init=False)
+    review_history: list[dict[str, Any]] = field(default_factory=list, init=False)
+    last_review_progress: dict[str, Any] | None = field(default=None, init=False)
     last_error: dict[str, Any] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
@@ -90,6 +96,7 @@ class Spec2IRHarness:
             "agent_instructions": AGENT_INSTRUCTIONS,
             "current_semantic_spec_ir": self.current,
             "review_report": self.review,
+            "repair_focus": self._repair_focus(),
             "automation_decision": self.automation_decisions[-1] if self.automation_decisions else {},
             "deterministic_repairs": list(self.deterministic_repairs),
             "harness_attempts": list(self.harness_attempts),
@@ -201,6 +208,10 @@ class Spec2IRHarness:
                 "valid": True,
                 "review_status": review.get("status"),
                 "review": review,
+                "repair_focus": build_repair_focus(
+                    review,
+                    progress=review_progress(self.review, review),
+                ),
             }
         if name == "diff_semantic_ir":
             candidate = self._normalize_tool_candidate(arguments)
@@ -253,6 +264,7 @@ class Spec2IRHarness:
             "automation_decisions": list(self.automation_decisions),
             "deterministic_repairs": list(self.deterministic_repairs),
             "harness_attempts": list(self.harness_attempts),
+            "review_history": list(self.review_history),
             "attempt_count": len(self.harness_attempts),
             "last_error": self.last_error,
         }
@@ -275,14 +287,27 @@ class Spec2IRHarness:
             }
             self.harness_attempts.append(result)
             return result
+        previous_review = self.review
         self.current = candidate
         self._repair_and_review()
+        self.last_review_progress = review_progress(previous_review, self.review)
         self._update_status_after_review(initial=False)
+        if self.done:
+            self.last_error = None
+        else:
+            finding_count = len(self.review.get("findings", [])) if isinstance(self.review.get("findings"), list) else 0
+            self.last_error = {
+                "type": "ReviewFailed",
+                "message": f"candidate still has {finding_count} review finding(s)",
+                "finding_count": finding_count,
+            }
         result = {
             "attempt": attempt_index,
             "status": self.status if self.done else "review_failed",
             "action": "submit_semantic_spec_ir",
             "review_status": self.review.get("status"),
+            "review_feedback": self._repair_focus(),
+            "progress": self.last_review_progress,
             "automation_decision": self.automation_decisions[-1] if self.automation_decisions else {},
         }
         self.harness_attempts.append(result)
@@ -306,6 +331,7 @@ class Spec2IRHarness:
             target=self.target,
             require_reviewed=self.require_reviewed,
         )
+        self.review_history.append(review_snapshot(self.review))
         decision = classify_review_for_automation(
             self.review,
             self.current,
@@ -336,6 +362,9 @@ class Spec2IRHarness:
             self.status = "repair_failed"
         self.done = True
 
+    def _repair_focus(self) -> dict[str, Any]:
+        return build_repair_focus(self.review, progress=self.last_review_progress)
+
 
 def run_spec2ir_agent(
     *,
@@ -348,7 +377,7 @@ def run_spec2ir_agent(
     automation_policy_graph: AutomationPolicyGraph | None = None,
     initial_semantic_ir: dict[str, Any] | None = None,
     model: str | None = None,
-    max_attempts: int = 2,
+    max_attempts: int = 3,
     run_name: str = "spec2ir_agent",
 ) -> dict[str, Any]:
     harness = Spec2IRHarness(
@@ -409,6 +438,88 @@ def semantic_element_ids(semantic_ir: dict[str, Any]) -> set[str]:
         str(item.get("id"))
         for item in elements
         if isinstance(item, dict) and item.get("id") is not None
+    }
+
+
+def review_snapshot(review: dict[str, Any]) -> dict[str, Any]:
+    findings = review.get("findings")
+    finding_list = [dict(item) for item in findings if isinstance(item, dict)] if isinstance(findings, list) else []
+    completeness = review.get("completeness") if isinstance(review.get("completeness"), dict) else {}
+    return {
+        "status": review.get("status"),
+        "finding_count": len(finding_list),
+        "blocking_finding_count": sum(1 for item in finding_list if item.get("blocking")),
+        "findings": finding_list,
+        "covered_claims": list(completeness.get("covered_claims") or []),
+        "partial_claims": list(completeness.get("partial_claims") or []),
+        "uncovered_claims": list(completeness.get("uncovered_claims") or []),
+    }
+
+
+def finding_identity(finding: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(finding.get("stage") or ""),
+        str(finding.get("path") or ""),
+        str(finding.get("message") or ""),
+    )
+
+
+def review_progress(previous: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    previous_findings = [
+        item for item in previous.get("findings", []) if isinstance(item, dict)
+    ] if isinstance(previous, dict) else []
+    current_findings = [
+        item for item in current.get("findings", []) if isinstance(item, dict)
+    ] if isinstance(current, dict) else []
+    previous_by_id = {finding_identity(item): item for item in previous_findings}
+    current_by_id = {finding_identity(item): item for item in current_findings}
+    resolved_ids = previous_by_id.keys() - current_by_id.keys()
+    introduced_ids = current_by_id.keys() - previous_by_id.keys()
+    persistent_ids = current_by_id.keys() & previous_by_id.keys()
+    return {
+        "previous_status": previous.get("status") if isinstance(previous, dict) else None,
+        "current_status": current.get("status") if isinstance(current, dict) else None,
+        "previous_finding_count": len(previous_findings),
+        "current_finding_count": len(current_findings),
+        "resolved_count": len(resolved_ids),
+        "introduced_count": len(introduced_ids),
+        "persistent_count": len(persistent_ids),
+        "made_progress": len(resolved_ids) > len(introduced_ids) or len(current_findings) < len(previous_findings),
+        "no_progress": bool(current_findings) and set(previous_by_id) == set(current_by_id),
+        "resolved_findings": [previous_by_id[key] for key in sorted(resolved_ids)],
+        "introduced_findings": [current_by_id[key] for key in sorted(introduced_ids)],
+    }
+
+
+def build_repair_focus(
+    review: dict[str, Any],
+    *,
+    progress: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    findings = review.get("findings")
+    finding_list = [dict(item) for item in findings if isinstance(item, dict)] if isinstance(findings, list) else []
+    finding_list.sort(key=lambda item: (not bool(item.get("blocking")), str(item.get("path") or "")))
+    completeness = review.get("completeness") if isinstance(review.get("completeness"), dict) else {}
+    obligations = completeness.get("claim_obligations")
+    missing_obligations = []
+    if isinstance(obligations, list):
+        missing_obligations = [
+            {
+                "claim_id": item.get("claim_id"),
+                "missing_obligations": item.get("missing_obligations"),
+            }
+            for item in obligations
+            if isinstance(item, dict) and item.get("missing_obligations")
+        ]
+    return {
+        "goal": "Resolve every blocking finding without dropping source claims or valid semantics.",
+        "review_status": review.get("status"),
+        "blocking_findings": [item for item in finding_list if item.get("blocking")],
+        "other_findings": [item for item in finding_list if not item.get("blocking")],
+        "missing_claim_obligations": missing_obligations,
+        "uncovered_claims": list(completeness.get("uncovered_claims") or []),
+        "partial_claims": list(completeness.get("partial_claims") or []),
+        "progress_from_previous_submission": progress or {},
     }
 
 

@@ -58,7 +58,12 @@ class RealDataCaseResult:
     def add_stage(self, name: str, status: str, error: str | None = None) -> None:
         self.stages.append(StageRecord(name=name, status=status, error=error))
 
-    def to_dict(self, *, include_ir: bool = False) -> dict[str, Any]:
+    def to_dict(
+        self,
+        *,
+        include_ir: bool = False,
+        include_agent_trace: bool = False,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "case": self.case.to_dict(),
             "materialized": self.materialized.to_dict() if self.materialized is not None else None,
@@ -79,6 +84,14 @@ class RealDataCaseResult:
             payload["automation_decisions"] = self.repair_result.get("automation_decisions", [])
             payload["deterministic_repairs"] = self.repair_result.get("deterministic_repairs", [])
             payload["attempt_count"] = self.repair_result.get("attempt_count", 0)
+            if include_agent_trace:
+                payload["agent_trace"] = {
+                    "attempts": self.repair_result.get("attempts", []),
+                    "events": self.repair_result.get("events", []),
+                    "harness_attempts": self.repair_result.get("harness_attempts", []),
+                    "review_history": self.repair_result.get("review_history", []),
+                    "llm_provenance": self.repair_result.get("llm_provenance", {}),
+                }
         if include_ir and self.semantic_ir is not None:
             payload["semantic_ir"] = self.semantic_ir
         if self.traceback_text:
@@ -111,6 +124,7 @@ def run_verilogeval_case(
     model: str | None = None,
     backend_name: str | None = None,
     llm_backend: LLMBackend | None = None,
+    agent_max_attempts: int = 3,
 ) -> RealDataCaseResult:
     result = RealDataCaseResult(case=case, llm_enabled=with_llm)
     try:
@@ -163,7 +177,7 @@ def run_verilogeval_case(
                 target=materialized.target,
                 llm_backend=backend,
                 model=model,
-                max_attempts=2,
+                max_attempts=agent_max_attempts,
                 run_name="spec2ir_real_data_agent",
             )
             if repair["status"] in {"llm_unavailable", "llm_invalid_response"}:
@@ -235,6 +249,7 @@ def run_verilogeval_cases(
     with_llm: bool = False,
     model: str | None = None,
     backend_name: str | None = None,
+    agent_max_attempts: int = 3,
 ) -> list[RealDataCaseResult]:
     return [
         run_verilogeval_case(
@@ -243,6 +258,7 @@ def run_verilogeval_cases(
             with_llm=with_llm,
             model=model,
             backend_name=backend_name,
+            agent_max_attempts=agent_max_attempts,
         )
         for case in cases
     ]

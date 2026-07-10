@@ -22,7 +22,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--with-llm", action="store_true")
     parser.add_argument("--model", default=None)
     parser.add_argument("--backend", default=None)
+    parser.add_argument("--agent-max-attempts", type=int, default=3)
     parser.add_argument("--include-ir", action="store_true")
+    parser.add_argument("--include-agent-trace", action="store_true")
     args = parser.parse_args(argv)
 
     root = args.root or verilogeval_root_from_env()
@@ -37,6 +39,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         with_llm=args.with_llm,
         model=args.model,
         backend_name=args.backend,
+        agent_max_attempts=args.agent_max_attempts,
     )
 
     payload = {
@@ -44,8 +47,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "root": str(root),
         "limit": args.limit,
         "with_llm": args.with_llm,
+        "agent_max_attempts": args.agent_max_attempts,
         "metrics": aggregate_results(results),
-        "cases": [result.to_dict(include_ir=args.include_ir) for result in results],
+        "cases": [
+            result.to_dict(
+                include_ir=args.include_ir,
+                include_agent_trace=args.include_agent_trace,
+            )
+            for result in results
+        ],
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
