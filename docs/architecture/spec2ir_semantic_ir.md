@@ -41,15 +41,16 @@ optional DesignIR
 Spec2IRHarness
         |
         +--> rule-based conservative draft
-        +--> normalize submitted candidate
+        +--> transactionally apply revisioned SemanticIRPatch
         +--> deterministic repair
         +--> review_semantic_spec_ir()
+        +--> progress classification / best-revision commit or rollback
         |
         v
 LLMPlugin LangGraph agent observes harness state, calls tools, and submits actions
         |
-        +--> tool_call (inspect / validate / diff)
-        +--> submit_semantic_spec_ir
+        +--> tool_call (inspect fragment / validate patch / diff)
+        +--> apply_semantic_ir_patch
         +--> mark_human_required
         +--> request_finalize
         |
@@ -82,6 +83,7 @@ Spec2Backend/
     validation_review.py  # structured review、completeness、traceability、human gate
     automation.py         # review finding routing: LLM retry vs human-required
     semantic_repair.py    # validation-feedback repair loop
+    patch.py              # revisioned SemanticIRPatch validation and atomic application
     harness.py            # agent-callable Spec2IR harness and run_spec2ir_agent assembly
 LLMPlugin/
   base.py                 # provider-neutral request/response/backend protocol
@@ -140,12 +142,14 @@ LLM 入口是 `run_spec2ir_agent()`，由 `LLMPlugin.agent` 的 LangGraph runtim
 
 - 提供 `Spec2IRHarness`，把 Spec2IR 暴露为 agent 可调用的 JSON action harness。
 - `start()` 加载或接收初始 `SemanticSpecIR`，运行 deterministic repair 和 review。
-- `observe()` 返回当前 IR、review report、automation decision、schema/response contract、
-  输入上下文、tool specs、deterministic repair 和 harness attempt history。
-- `apply()` 只接受 `submit_semantic_spec_ir`、`mark_human_required` 和 `request_finalize`。
-  `submit_semantic_spec_ir` 会归一化完整 candidate IR，重新 deterministic repair 并 review。
-- `tool_specs()` / `call_tool()` 暴露 Spec2IR 专用工具，例如读取当前 IR、读取 review findings、
-  normalize/validate candidate 和 diff candidate；工具不改变 harness 状态，除非 agent 后续提交 action。
+- `observe()` 首轮返回完整 snapshot，后续返回 artifact revision、相关语义片段、review delta、
+  context references 和 tool specs。
+- `apply()` 主路径接受 `apply_semantic_ir_patch`、`mark_human_required` 和 `request_finalize`。
+  patch 在 working copy 上 normalize/validate/review，只有验证进展为 improved/passed 才提交。
+- legacy `submit_semantic_spec_ir` 会转换为 editable-plane patch，不再覆盖完整 artifact。
+- `tool_specs()` / `call_tool()` 暴露 Spec2IR 专用工具：读取 review findings、读取 fragment 和
+  transactionally validate patch；工具不改变 harness 状态。完整 IR、legacy candidate
+  normalize/diff 只保留为兼容实现，不对新 agent 暴露。
 - harness 不调用 LLM、不持有 backend、不构造 provider message；LLM 上下文和 provider
   provenance 由 `LLMPlugin.agent` 管理。
 
@@ -202,6 +206,9 @@ checker 内部的临时 proof obligation pipeline 消费以下输入：
 第一版语义证明范围限定为组合逻辑和一步状态子集，覆盖 `assignment`、
 `constant_relation`、`conditional_assignment`、`compare`、`unary_op`、`binary_op`、`mux`、
 `concat`、`slice`、`reduce`、fixed-width BitVec、Bool、Int、UInt 和 choices 唯一的 enum。
+`slice` 使用 Verilog 风格闭区间并要求 `msb >= lsb >= 0`，因此 `[0:0]` 是合法的一位选择。
+LLM normalization 会把 compare 节点中的 `==`、`!=`、`<`、`<=`、`>`、`>=` 转换为
+`eq`、`ne`、`lt`、`le`、`gt`、`ge`；不会把四态 `===`/`!==` 静默降级为二态比较。
 temporal/protocol/SVA AST 仍只做结构和类型检查；如果被放入 Lean semantic proof scope，会返回
 blocking `proof` issue，而不会静默跳过或写入“已证明”状态。
 
@@ -226,6 +233,10 @@ imports 或 definitions。proof metadata 会记录 `semantic_ir_sha256`、`sourc
   驱动任意 harness，并使用内存 checkpoint 保留本次 agent state。
 - runtime 把历史模型响应、tool/harness feedback 和最新 observation 组装成有界的多角色消息窗口；
   `history_window` / `event_window` 控制进入 provider context 的历史量，完整事件仍保留在 result。
+- attempt feedback 是前轮模型输出和执行结果的权威对话记录；`recent_events` 只发送路由、状态、
+  error 和 progress 摘要，不重复注入完整 assistant/tool/harness payload。
+- `LLMAgentRuntime` 持有共享 checkpointer 和 thread session registry。runner 不再必须为每个任务
+  创建独立 `MemorySaver`；同一 artifact lineage 可以恢复 harness、attempt 和 checkpoint state。
 - 提供可选 `LLMAgentToolHarness` 能力，允许 harness 暴露工具；runtime 负责 JSON tool-call
   解析、执行、错误归一化和 tool result 进入下一轮上下文。
 - 通过 registry 支持插件化 backend 创建。
@@ -861,20 +872,25 @@ file-bundle fallback，但它不提供 IR-level formal proof。
 2. harness 运行 deterministic repair、review 和 automation routing。
 3. 如果 review 已 `passed`，直接返回 `valid`。
 4. 如果路由为 human-only，直接返回 `needs_human_input`。
-5. LangGraph agent 读取 `harness.observe()`，把当前 IR、review、automation decision、
-   tool specs、attempt history 和 recent events 放入 messages。messages 使用 `system`、历史
+5. 首轮 `harness.observe()` 返回完整 snapshot；后续只返回 artifact revision/hash、可编辑语义
+   片段、review delta 和 context references，不再重复完整 IR、manifest、spec 和 schema contract。
+6. LangGraph agent 把 observation、tool specs、attempt history 和 recent events 放入 messages。messages 使用 `system`、历史
    `assistant`、step feedback `user` 和当前 observation `user` 的对话结构，并显式给出剩余
    模型调用预算。
-6. LLM 可以返回 legacy action，或返回现代 step：`type="harness_action"`、
+7. LLM 返回 `apply_semantic_ir_patch`，patch 通过稳定 collection item id 和相对 JSON Pointer
+   修改局部语义。legacy 完整 candidate 只作为兼容输入并在 harness 内转换为 patch。
+8. LLM 也可以返回现代 step：`type="harness_action"`、
    `type="tool_call"` 或 `type="final"`。
-7. tool call 由 `LLMPlugin` runtime 校验并调用 harness 工具，tool result 写入下一轮上下文。
-8. harness 对 submitted candidate 运行 normalize、deterministic repair 和 review，并计算相对
-   上一轮的 resolved、introduced、persistent finding delta；`repair_focus` 把 blocking findings、
-   missing claim obligations 和进展摘要放入下一轮 observation。
-9. agent 将无效 JSON、无效 step、无效 action、tool result、harness result 和 provider
+9. tool call 由 `LLMPlugin` runtime 校验并调用 harness 工具，tool result 写入下一轮上下文。
+   patch 验证通过时只返回 candidate hash、review/progress 摘要和 automation route；仍有 finding
+   时才附带剩余 repair focus，避免回传整份 candidate/review/patch。
+10. harness 在 working copy 上原子应用 patch，运行 normalize、deterministic repair、schema validation
+    和 review。只有 `improved` 或 `passed` candidate 才提交为新的 best revision；`mixed`、
+    `regressed`、`equivalent` candidate 回滚但保留反馈。
+11. agent 将无效 JSON、无效 step、patch rejection、tool result、harness result 和 provider
    provenance 记录到 state/events/attempt history。
-10. 成功返回 `repaired`；LLM 不可用返回 `llm_unavailable`；响应不可解析返回
-   `llm_invalid_response`；耗尽尝试返回 `repair_failed`。
+12. 成功返回 `repaired`；human-only 返回 `needs_human_input`；重复 artifact/patch cycle 返回
+    `stalled`。模型调用预算耗尽只返回可恢复的 `resource_exhausted`，不推断语义不可修复。
 
 agent result 会包含：
 
@@ -886,17 +902,51 @@ agent result 会包含：
 - `events`: LangGraph agent state 中的 observation、assistant message、tool result、harness
   action 和 final result 摘要，用于审计上下文流。
 - `review_history`: harness 每轮 review 的结构化快照，用于检查模型是否取得进展或重复提交。
+- `patch_history`: patch 前后 hash、operation、接受/拒绝、progress classification 和 result revision。
+- `artifact`: 当前 best SemanticSpecIR 的稳定 id、revision 和 sha256。
 - `llm_provenance`: backend、model、run name、tags、attempt count、runtime 和内存 checkpoint
   thread id。
 
-harness action 的核心约束：
+harness patch 的核心约束：
 
-- `submit_semantic_spec_ir` 必须返回完整 IR，不返回 patch fragment。
+- patch 必须携带当前 `base_revision` 和 `base_sha256`，stale patch 原子拒绝。
+- 只能修改 `semantic_elements`、`open_questions`、`semantic_gaps`；item 通过稳定 id 定位。
+- `id`、`claim_ids`、`evidence`、`source_id` 以及 source/claim/review/context 顶层数据不可修改。
 - 保留或修复所有 source-derived normative claims。
 - 不伪造 source quote。
 - 不发明 manifest fields、DesignIR bindings 或 source files。
 - 不在 Spec2IR 阶段生成 Python、OracleIR、SVA 或 plugin artifact。
 - 无法安全形式化时，把语义留在 `semantic_gaps` 或 `open_questions`。
+
+典型 patch action：
+
+```json
+{
+  "action": "apply_semantic_ir_patch",
+  "patch": {
+    "base_revision": 2,
+    "base_sha256": "current artifact sha256",
+    "operations": [
+      {
+        "op": "replace",
+        "target": {
+          "collection": "semantic_elements",
+          "id": "sem1",
+          "path": "/representation/ast"
+        },
+        "value": {
+          "node": "assignment",
+          "target": {"node": "signal_ref", "name": "out"},
+          "value": {"node": "literal", "value": false, "width": 1}
+        }
+      }
+    ]
+  }
+}
+```
+
+patch 是原子事务。schema/type/review 失败、protected-field 修改、stale revision/hash 和无净改进
+都不会覆盖 best revision；失败 candidate 的 review 仍写入 history 供下一轮使用。
 
 auto-formalization prompt 额外约束：
 
@@ -923,12 +973,18 @@ result = run_spec2ir_agent(
     llm_backend=backend,
     model="...",
     max_attempts=3,
+    thread_id="spec2ir:demo",
 )
 ```
 
-`max_attempts` 是最大模型调用次数，tool call 也消耗一次调用。默认值 3 为一次初始提交和最多
-两次基于结构化 review feedback 的修复留出预算。通用 runtime 默认只把最近 4 个 attempts 和
-8 个 events 组装进 provider messages；该窗口不影响 result 中保存的完整审计事件。
+`max_attempts` 保留为兼容名称，语义是本次运行的模型调用资源预算，tool call 同样消耗一次调用。
+预算耗尽不会结束 harness；使用同一 `LLMAgentRuntime` 和 `thread_id` 再次调用会从 checkpoint、
+best revision 和 review ledger 继续。默认 runtime 在当前进程内共享 `MemorySaver`；跨进程持久化
+需要调用方注入数据库 checkpointer。
+
+复用 LangGraph thread 本身不会让 stateless provider 免费保留 token。当前 Spec2IR harness 通过
+首轮 snapshot、后续 delta/fragment 避免重复完整 IR；未来 backend 可通过 conversation cursor、
+previous-response id 或 provider prompt caching 进一步减少传输和计费 token。
 
 真实 VerilogEval 评测可保存完整 agent trace：
 
@@ -945,7 +1001,21 @@ uv run python -m tests_real.spec2ir.run_eval \
 ```
 
 `agent_trace` 包含 attempts、events、harness attempts、review history 和 LLM provenance，适合
-复核跨轮上下文、工具调用和 finding delta；默认不写 trace，避免普通汇总文件过大。
+复核跨轮上下文、工具调用和 finding delta；还会记录 patch history、context chars，以及 provider
+提供时的 input/output token usage。默认不写 trace，避免普通汇总文件过大。
+
+2026-07-10 的真实 VerilogEval 10-case patch-agent 运行结果保存在
+`runs/spec2ir_real/verilogeval_patch_agent_v2_limit10_20260710.json`：9/10 review passed，claim
+coverage 0.9，22 次模型调用，15 个 patch 中 8 个提交、7 个原子拒绝。与迁移前完整 IR candidate
+报告相比，含完整 trace 的报告大小从 5,326,660 bytes 降至 1,400,219 bytes（约 73.7%）。该运行
+暴露并促成了 interface bitvector typing、operation obligation coverage 和 bit-zero slice 修复。
+
+修复后的 `Prob006_vectorr` 针对性真实复测保存在
+`runs/spec2ir_real/verilogeval_patch_agent_v4_compact_prob006_20260710.json`：agent 先调用 patch
+validator，再提交相同 patch，2 次模型调用后 review passed；第二轮 context 为 32,966 chars / 7,579
+input tokens。前一次未压缩事件的运行在第 4 轮增长到 59,281 chars / 13,840 input tokens。调用轮数
+受模型采样影响，不能作为严格 A/B；事件和工具 payload 不再重复进入 message window 则由单元测试
+和 trace 结构共同验证。
 
 当前内置 backend：
 

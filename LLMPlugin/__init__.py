@@ -7,7 +7,14 @@ from .base import (
     LLMRequest,
     LLMResponse,
 )
-from .agent import LLMAgentConfig, LLMAgentHarness, LLMAgentRunner, LLMAgentToolHarness
+from .agent import (
+    LLMAgentConfig,
+    LLMAgentHarness,
+    LLMAgentRunner,
+    LLMAgentRuntime,
+    LLMAgentToolHarness,
+    default_agent_runtime,
+)
 from .langchain_backend import LangChainBackendConfig, LangChainLLMBackend
 from .langgraph_backend import LangGraphBackendConfig, LangGraphLLMBackend
 from .registry import (
@@ -25,7 +32,9 @@ __all__ = [
     "LLMAgentConfig",
     "LLMAgentHarness",
     "LLMAgentRunner",
+    "LLMAgentRuntime",
     "LLMAgentToolHarness",
+    "default_agent_runtime",
     "LangChainBackendConfig",
     "LangChainLLMBackend",
     "LangGraphBackendConfig",

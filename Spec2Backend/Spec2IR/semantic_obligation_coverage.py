@@ -354,6 +354,28 @@ def ast_covers_operation(ast: dict[str, Any], obligation: dict[str, Any]) -> dic
                 "operation operands must match source claim operand semantics",
             )
         return covered()
+    for node in iter_ast_nodes(ast):
+        if node.get("node") not in {
+            "assignment",
+            "conditional_assignment",
+            "constant_relation",
+        }:
+            continue
+        value = node.get("value", node.get("relation", node))
+        if contains_ast_node(value, "text_expr"):
+            return partial_coverage(
+                "representation.ast",
+                "operation_assignment_text_fallback",
+                "operation assignment must use typed AST expressions",
+            )
+        operands = [value] if isinstance(value, dict) else []
+        if expected_operands and not operand_refs_match_hints(operands, expected_operands):
+            return partial_coverage(
+                "representation.ast",
+                "operation_assignment_operand_mismatch",
+                "operation assignment must reference source claim operands",
+            )
+        return covered()
     return none()
 
 

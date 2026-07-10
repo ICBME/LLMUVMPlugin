@@ -1,4 +1,11 @@
-from LLMPlugin import CallableLLMBackend, LLMAgentConfig, LLMAgentRunner, LLMBackendError
+from LLMPlugin import (
+    CallableLLMBackend,
+    LLMAgentConfig,
+    LLMAgentRunner,
+    LLMAgentRuntime,
+    LLMBackendError,
+)
+from LLMPlugin.agent import compact_event
 
 
 class FakeHarness:
@@ -229,3 +236,48 @@ def test_llm_agent_runner_limits_conversation_history_window() -> None:
     assert '"value": 1' not in prompts[2]["messages"][1]["content"]
     assert '"recent_events": []' in prompts[2]["messages"][-1]["content"]
     assert result["llm_provenance"]["context_window"] == {"attempts": 1, "events": 0}
+
+
+def test_compact_event_drops_duplicate_response_and_result_payloads() -> None:
+    event = {
+        "index": 2,
+        "type": "harness_action",
+        "content": {
+            "response": {"content": "large model response", "truncated": False, "metadata": {}},
+            "result": {
+                "status": "improved",
+                "accepted": True,
+                "semantic_ir": {"large": [1, 2, 3]},
+                "progress": {"classification": "improved", "resolved_count": 2},
+            },
+        },
+    }
+
+    compact = compact_event(event)
+
+    assert "content" not in compact["content"]["response"]
+    assert "semantic_ir" not in compact["content"]["result"]
+    assert compact["content"]["result"]["progress"]["resolved_count"] == 2
+
+
+def test_llm_agent_runner_resumes_resource_exhausted_thread() -> None:
+    prompts = []
+    runtime = LLMAgentRuntime()
+    runner = LLMAgentRunner(
+        FakeHarness(done_after=2),
+        backend=CallableLLMBackend(
+            lambda prompt, _model: prompts.append(prompt) or {"action": "finish"}
+        ),
+        config=LLMAgentConfig(max_attempts=1, metadata={"thread_id": "resume-thread"}),
+        runtime=runtime,
+    )
+
+    first = runner.run()
+    second = runner.run()
+
+    assert first["status"] == "resource_exhausted"
+    assert first["llm_provenance"]["resumable"] is True
+    assert second["status"] == "done"
+    assert len(second["attempts"]) == 2
+    assert prompts[1]["attempt_history"][0]["status"] == "accepted"
+    assert second["llm_provenance"]["checkpoint"]["thread_id"] == "resume-thread"

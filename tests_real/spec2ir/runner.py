@@ -18,7 +18,11 @@ from Spec2Backend.Spec2IR import (
     validate_semantic_spec_ir,
 )
 
-from .adapters import MaterializedSpec2IRInput, materialize_verilogeval_case
+from .adapters import (
+    MaterializedSpec2IRInput,
+    augment_semantic_ir_interface_context,
+    materialize_verilogeval_case,
+)
 from .datasets import RealDataCase
 
 
@@ -90,6 +94,8 @@ class RealDataCaseResult:
                     "events": self.repair_result.get("events", []),
                     "harness_attempts": self.repair_result.get("harness_attempts", []),
                     "review_history": self.repair_result.get("review_history", []),
+                    "patch_history": self.repair_result.get("patch_history", []),
+                    "artifact": self.repair_result.get("artifact", {}),
                     "llm_provenance": self.repair_result.get("llm_provenance", {}),
                 }
         if include_ir and self.semantic_ir is not None:
@@ -157,6 +163,7 @@ def run_verilogeval_case(
             spec_paths=[materialized.spec_path],
             target=materialized.target,
         )
+        augment_semantic_ir_interface_context(semantic_ir, materialized.interface_ports)
         result.semantic_ir = semantic_ir
         result.add_stage("generation", "passed")
 
@@ -209,7 +216,7 @@ def run_verilogeval_case(
         readiness = analyze_backend_readiness(
             result.semantic_ir,
             review=review,
-            require_review_passed=False,
+            require_review_passed=True,
         )
         result.readiness = readiness
         result.add_stage("readiness", readiness["status"])

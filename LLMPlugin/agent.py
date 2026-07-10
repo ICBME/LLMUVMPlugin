@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import threading
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -39,6 +40,31 @@ class LLMAgentToolHarness(LLMAgentHarness, Protocol):
         ...
 
 
+class LLMAgentRuntime:
+    """Shared checkpoint and in-process session registry for harness agents."""
+
+    def __init__(self, *, checkpointer: Any | None = None) -> None:
+        self.checkpointer = checkpointer or create_memory_checkpointer()
+        self._sessions: dict[str, Any] = {}
+        self._session_lock = threading.RLock()
+
+    def get_session(self, thread_id: str) -> Any | None:
+        with self._session_lock:
+            return self._sessions.get(thread_id)
+
+    def set_session(self, thread_id: str, session: Any) -> None:
+        with self._session_lock:
+            self._sessions[thread_id] = session
+
+    def discard_session(self, thread_id: str, *, delete_checkpoint: bool = False) -> None:
+        with self._session_lock:
+            self._sessions.pop(thread_id, None)
+            if delete_checkpoint:
+                delete_thread = getattr(self.checkpointer, "delete_thread", None)
+                if callable(delete_thread):
+                    delete_thread(thread_id)
+
+
 @dataclass(frozen=True)
 class LLMAgentConfig:
     model: str | None = None
@@ -68,6 +94,7 @@ class LLMAgentRunner:
         *,
         backend: LLMBackend,
         config: LLMAgentConfig | None = None,
+        runtime: LLMAgentRuntime | None = None,
     ) -> None:
         self.harness = harness
         self.backend = backend
@@ -82,22 +109,39 @@ class LLMAgentRunner:
             or self.config.metadata.get("checkpoint_thread_id")
             or f"{self.config.run_name}-{uuid4().hex}"
         )
-        self.checkpointer = create_memory_checkpointer()
+        self.runtime = runtime or LLMAgentRuntime()
+        self.checkpointer = self.runtime.checkpointer
         self._graph = self._compile_graph()
 
     def run(self) -> dict[str, Any]:
-        state = {
-            "attempts": [],
-            "events": [],
-            "messages": [],
-            "observation": {},
-            "last_error": None,
-            "last_response": None,
-            "last_step": None,
-            "result": None,
-            "llm_attempt_count": 0,
-            "route": "start",
-        }
+        if self.last_state and not self.harness.is_done():
+            state = merge_state(
+                self.last_state,
+                result=None,
+                last_response=None,
+                last_step=None,
+                run_model_call_count=0,
+                run_start_attempt_count=len(self.last_state.get("attempts") or []),
+                model_call_budget=self.config.max_attempts,
+                route="start",
+            )
+        else:
+            state = {
+                "attempts": [],
+                "events": [],
+                "messages": [],
+                "observation": {},
+                "session_context": {},
+                "last_error": None,
+                "last_response": None,
+                "last_step": None,
+                "result": None,
+                "llm_attempt_count": 0,
+                "run_model_call_count": 0,
+                "run_start_attempt_count": 0,
+                "model_call_budget": self.config.max_attempts,
+                "route": "start",
+            }
         self.last_state = self._graph.invoke(
             state,
             config={"configurable": {"thread_id": self._thread_id}},
@@ -154,7 +198,8 @@ class LLMAgentRunner:
         return graph.compile(checkpointer=self.checkpointer)
 
     def _node_start_harness(self, state: dict[str, Any]) -> dict[str, Any]:
-        observation = self.harness.start()
+        observation = dict(self.harness.start())
+        supplied_session_context = observation.pop("session_context", None)
         self._started = True
         self._start_observation = dict(observation)
         events = append_event(
@@ -162,7 +207,13 @@ class LLMAgentRunner:
             "observation",
             {"phase": "start", "observation": observation},
         )
-        return merge_state(state, observation=observation, events=events)
+        session_context = state.get("session_context") or supplied_session_context or {}
+        return merge_state(
+            state,
+            observation=observation,
+            session_context=session_context,
+            events=events,
+        )
 
     def _node_build_context(self, state: dict[str, Any]) -> dict[str, Any]:
         observation = dict(state.get("observation") or self.harness.observe())
@@ -176,13 +227,19 @@ class LLMAgentRunner:
             tool_specs=self._tool_specs(),
             history_window=self.config.history_window,
             event_window=self.config.event_window,
-            current_attempt=int(state.get("llm_attempt_count") or 0) + 1,
-            max_attempts=self.config.max_attempts,
+            current_attempt=int(state.get("run_model_call_count") or 0) + 1,
+            max_attempts=int(state.get("model_call_budget") or 0),
+            session_context=(
+                dict(state.get("session_context") or {})
+                if isinstance(state.get("session_context"), dict)
+                else {}
+            ),
         )
         return merge_state(state, messages=messages)
 
     def _node_call_model(self, state: dict[str, Any]) -> dict[str, Any]:
         attempt_index = int(state.get("llm_attempt_count") or 0) + 1
+        run_model_call_count = int(state.get("run_model_call_count") or 0) + 1
         observation = dict(state.get("observation") or {})
         messages = list(state.get("messages") or [])
         attempts = list(state.get("attempts") or [])
@@ -206,6 +263,10 @@ class LLMAgentRunner:
                 **self.config.metadata,
                 "attempt_index": attempt_index,
                 "messages": messages,
+                "context_char_count": sum(len(str(item.get("content") or "")) for item in messages),
+                "observation_char_count": len(
+                    json.dumps(observation, ensure_ascii=False, sort_keys=True, default=str)
+                ),
                 "temperature": self.config.temperature,
                 "checkpoint_thread_id": self._thread_id,
             },
@@ -219,6 +280,7 @@ class LLMAgentRunner:
             return merge_state(
                 state,
                 llm_attempt_count=attempt_index,
+                run_model_call_count=run_model_call_count,
                 attempts=[*list(state.get("attempts") or []), attempt],
                 events=append_event(state, "error", {"phase": "call_model", "error": error}),
                 last_error=error,
@@ -231,6 +293,7 @@ class LLMAgentRunner:
             return merge_state(
                 state,
                 llm_attempt_count=attempt_index,
+                run_model_call_count=run_model_call_count,
                 attempts=[*list(state.get("attempts") or []), attempt],
                 events=append_event(state, "error", {"phase": "call_model", "error": error}),
                 last_error=error,
@@ -240,6 +303,7 @@ class LLMAgentRunner:
         return merge_state(
             state,
             llm_attempt_count=attempt_index,
+            run_model_call_count=run_model_call_count,
             last_response=response,
             events=append_event(
                 state,
@@ -357,9 +421,10 @@ class LLMAgentRunner:
         )
 
     def _route_after_observe(self, state: dict[str, Any]) -> str:
-        if self.harness.is_done() or self.config.max_attempts == 0:
+        budget = int(state.get("model_call_budget") or 0)
+        if self.harness.is_done() or budget == 0:
             return "finalize"
-        if int(state.get("llm_attempt_count") or 0) >= self.config.max_attempts:
+        if int(state.get("run_model_call_count") or 0) >= budget:
             return "finalize"
         return "continue"
 
@@ -369,7 +434,8 @@ class LLMAgentRunner:
             return "finalize"
         if route in {"harness_action", "tool_call"}:
             return route
-        if int(state.get("llm_attempt_count") or 0) >= self.config.max_attempts:
+        budget = int(state.get("model_call_budget") or 0)
+        if int(state.get("run_model_call_count") or 0) >= budget:
             return "finalize"
         return "continue"
 
@@ -404,13 +470,14 @@ class LLMAgentRunner:
         attempts = list(state.get("attempts") or [])
         result = dict(self.harness.result())
         if result.get("status") in {None, "running", "pending"}:
-            statuses = [str(item.get("status") or "") for item in attempts]
+            run_start = int(state.get("run_start_attempt_count") or 0)
+            statuses = [str(item.get("status") or "") for item in attempts[run_start:]]
             if any(status == "llm_unavailable" for status in statuses):
                 result["status"] = "llm_unavailable"
             elif statuses and all(status == "llm_invalid_response" for status in statuses):
                 result["status"] = "llm_invalid_response"
             else:
-                result["status"] = "repair_failed"
+                result["status"] = "resource_exhausted"
         result["attempts"] = attempts
         result["events"] = list(state.get("events") or [])
         result.setdefault(
@@ -423,6 +490,7 @@ class LLMAgentRunner:
                 "attempt_count": len(attempts),
                 "runtime": "langgraph",
                 "checkpoint": {"type": "memory", "thread_id": self._thread_id},
+                "resumable": not self.harness.is_done(),
                 "context_window": {
                     "attempts": self.config.history_window,
                     "events": self.config.event_window,
@@ -433,6 +501,7 @@ class LLMAgentRunner:
         result["llm_provenance"].setdefault("backend", getattr(self.backend, "name", type(self.backend).__name__))
         result["llm_provenance"].setdefault("model", self.config.model)
         result["llm_provenance"].setdefault("runtime", "langgraph")
+        result["llm_provenance"]["resumable"] = not self.harness.is_done()
         result["llm_provenance"].setdefault(
             "checkpoint",
             {"type": "memory", "thread_id": self._thread_id},
@@ -483,6 +552,16 @@ def create_memory_checkpointer() -> Any:
     return MemorySaver()
 
 
+_DEFAULT_AGENT_RUNTIME: LLMAgentRuntime | None = None
+
+
+def default_agent_runtime() -> LLMAgentRuntime:
+    global _DEFAULT_AGENT_RUNTIME
+    if _DEFAULT_AGENT_RUNTIME is None:
+        _DEFAULT_AGENT_RUNTIME = LLMAgentRuntime()
+    return _DEFAULT_AGENT_RUNTIME
+
+
 def merge_state(state: dict[str, Any], **updates: Any) -> dict[str, Any]:
     merged = dict(state)
     merged.update(updates)
@@ -500,6 +579,7 @@ def build_agent_messages(
     event_window: int = 8,
     current_attempt: int = 1,
     max_attempts: int | None = None,
+    session_context: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     instructions = str(observation.get("agent_instructions") or "Return one JSON action object.")
     runtime_instructions = (
@@ -512,6 +592,17 @@ def build_agent_messages(
         {"role": "system", "content": f"{instructions}\n\n{runtime_instructions}"}
     ]
     recent_attempts = attempts[-max(0, history_window) :] if history_window else []
+    if recent_attempts and session_context:
+        messages.append(
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {"kind": "session_context", "context": session_context},
+                    indent=2,
+                    sort_keys=True,
+                ),
+            }
+        )
     for attempt in recent_attempts:
         response = attempt.get("response")
         if isinstance(response, dict) and isinstance(response.get("content"), str):
@@ -546,7 +637,7 @@ def build_agent_messages(
             "remaining_model_calls_including_this_one": remaining_attempts,
         },
         "response_contract": {
-            "legacy_harness_action": {"action": "submit_semantic_spec_ir | mark_human_required | request_finalize"},
+            "legacy_harness_action": {"action": "harness-defined action name"},
             "modern_harness_action": {"type": "harness_action", "action": "action name"},
             "tool_call": {"type": "tool_call", "tool": "tool name", "arguments": {}},
             "final": {"type": "final"},
@@ -637,10 +728,10 @@ def compact_events(events: list[dict[str, Any]], *, limit: int = 8) -> list[dict
 def compact_event(event: dict[str, Any]) -> dict[str, Any]:
     compact = dict(event)
     content = compact.get("content")
-    if isinstance(content, dict) and "observation" in content:
+    if isinstance(content, dict):
+        content = dict(content)
         observation = content.get("observation")
         if isinstance(observation, dict):
-            content = dict(content)
             content["observation"] = {
                 "workflow": observation.get("workflow"),
                 "status": observation.get("status"),
@@ -652,7 +743,50 @@ def compact_event(event: dict[str, Any]) -> dict[str, Any]:
                     else None
                 ),
             }
-            compact["content"] = content
+        response = content.get("response")
+        if isinstance(response, dict):
+            content["response"] = {
+                "truncated": response.get("truncated", False),
+                "metadata": response.get("metadata", {}),
+            }
+        result = content.get("result")
+        if isinstance(result, dict):
+            content["result"] = compact_event_result(result)
+        compact["content"] = content
+    return compact
+
+
+def compact_event_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep event routing evidence without duplicating attempt/tool payloads."""
+
+    compact = {
+        key: result.get(key)
+        for key in (
+            "status",
+            "valid",
+            "accepted",
+            "review_status",
+            "candidate_review_status",
+            "artifact_revision",
+            "candidate_sha256",
+            "error",
+        )
+        if key in result
+    }
+    progress = result.get("progress")
+    if isinstance(progress, dict):
+        compact["progress"] = {
+            key: progress.get(key)
+            for key in (
+                "classification",
+                "made_progress",
+                "no_progress",
+                "resolved_count",
+                "persistent_count",
+                "introduced_count",
+            )
+            if key in progress
+        }
     return compact
 
 
@@ -661,7 +795,9 @@ def compact_response(response: LLMResponse) -> dict[str, Any]:
     return {
         "content": content[:4000],
         "truncated": len(content) > 4000,
-        "metadata": dict(response.metadata),
+        "metadata": {
+            key: value for key, value in response.metadata.items() if key != "messages"
+        },
     }
 
 
@@ -675,6 +811,16 @@ def compact_action(action: dict[str, Any]) -> dict[str, Any]:
             "semantic_element_count": len(candidate.get("semantic_elements", []))
             if isinstance(candidate.get("semantic_elements"), list)
             else None,
+        }
+    patch = compact.get("patch")
+    if isinstance(patch, dict):
+        operations = patch.get("operations")
+        compact["patch"] = {
+            "schema_version": patch.get("schema_version"),
+            "base_revision": patch.get("base_revision"),
+            "base_sha256": patch.get("base_sha256"),
+            "operation_count": len(operations) if isinstance(operations, list) else None,
+            "resolves": patch.get("resolves", []),
         }
     return compact
 

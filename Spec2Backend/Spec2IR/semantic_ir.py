@@ -422,6 +422,15 @@ def normalize_representation_ast_node(node: dict[str, Any], *, fallback_text: An
                 node.pop(key, None)
     if node_name == "semantic_claim" and not str(node.get("text") or "").strip():
         node["text"] = text_candidate or "Unformalized semantic claim."
+    if node_name == "compare":
+        node["op"] = {
+            "==": "eq",
+            "!=": "ne",
+            "<": "lt",
+            "<=": "le",
+            ">": "gt",
+            ">=": "ge",
+        }.get(node.get("op"), node.get("op"))
     clean_string_list(node, "subjects")
     clean_string_list(node, "participants")
     for value in list(node.values()):

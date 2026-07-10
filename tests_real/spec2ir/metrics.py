@@ -41,6 +41,14 @@ def aggregate_results(results: Iterable[RealDataCaseResult]) -> dict[str, Any]:
     agent_progress_submission_count = 0
     agent_no_progress_submission_count = 0
     agent_regressive_submission_count = 0
+    agent_patch_count = 0
+    agent_patch_accepted_count = 0
+    agent_patch_rejected_count = 0
+    agent_patch_operation_count = 0
+    agent_context_char_count = 0
+    agent_response_char_count = 0
+    agent_input_token_count = 0
+    agent_output_token_count = 0
     cases_with_claims = 0
     cases_needing_human = 0
     covered_claims = 0
@@ -48,6 +56,19 @@ def aggregate_results(results: Iterable[RealDataCaseResult]) -> dict[str, Any]:
     for result in processed:
         result_needs_human = False
         if result.repair_result:
+            patch_history = result.repair_result.get("patch_history", [])
+            if isinstance(patch_history, list):
+                agent_patch_count += len(patch_history)
+                for patch in patch_history:
+                    if not isinstance(patch, dict):
+                        continue
+                    if patch.get("accepted"):
+                        agent_patch_accepted_count += 1
+                    else:
+                        agent_patch_rejected_count += 1
+                    operations = patch.get("patch", {}).get("operations")
+                    if isinstance(operations, list):
+                        agent_patch_operation_count += len(operations)
             provenance = result.repair_result.get("llm_provenance", {})
             if isinstance(provenance, dict):
                 agent_model_call_count += int(provenance.get("attempt_count") or 0)
@@ -59,6 +80,20 @@ def aggregate_results(results: Iterable[RealDataCaseResult]) -> dict[str, Any]:
                 for attempt in attempts:
                     if not isinstance(attempt, dict):
                         continue
+                    response = attempt.get("response")
+                    if isinstance(response, dict):
+                        agent_response_char_count += len(str(response.get("content") or ""))
+                        metadata = response.get("metadata")
+                        if isinstance(metadata, dict):
+                            agent_context_char_count += int(metadata.get("context_char_count") or 0)
+                            usage = metadata.get("token_usage")
+                            if isinstance(usage, dict):
+                                agent_input_token_count += int(
+                                    usage.get("input_tokens") or usage.get("prompt_tokens") or 0
+                                )
+                                agent_output_token_count += int(
+                                    usage.get("output_tokens") or usage.get("completion_tokens") or 0
+                                )
                     progress = attempt.get("harness_result", {}).get("progress")
                     if not isinstance(progress, dict):
                         continue
@@ -120,6 +155,14 @@ def aggregate_results(results: Iterable[RealDataCaseResult]) -> dict[str, Any]:
         "agent_progress_submission_count": agent_progress_submission_count,
         "agent_no_progress_submission_count": agent_no_progress_submission_count,
         "agent_regressive_submission_count": agent_regressive_submission_count,
+        "agent_patch_count": agent_patch_count,
+        "agent_patch_accepted_count": agent_patch_accepted_count,
+        "agent_patch_rejected_count": agent_patch_rejected_count,
+        "agent_patch_operation_count": agent_patch_operation_count,
+        "agent_context_char_count": agent_context_char_count,
+        "agent_response_char_count": agent_response_char_count,
+        "agent_input_token_count": agent_input_token_count,
+        "agent_output_token_count": agent_output_token_count,
     }
 
 

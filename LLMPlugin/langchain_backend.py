@@ -72,13 +72,16 @@ class LangChainLLMBackend:
             default_headers={"User-Agent": user_agent},
         )
         try:
+            trace_metadata = {
+                key: value for key, value in request.metadata.items() if key != "messages"
+            }
             response = llm.invoke(
                 request_messages(request, SystemMessage=SystemMessage, HumanMessage=HumanMessage, AIMessage=AIMessage),
                 config={
                     "run_name": request.run_name,
                     "tags": list(request.tags),
                     "metadata": {
-                        **request.metadata,
+                        **trace_metadata,
                         "model": model,
                         "provider": self.name,
                     },
@@ -87,15 +90,21 @@ class LangChainLLMBackend:
         except Exception as exc:  # noqa: BLE001 - normalize provider errors for callers
             raise LLMBackendError(f"LangChain backend invocation failed: {exc}") from exc
         content = message_content_to_text(response.content)
+        usage_metadata = getattr(response, "usage_metadata", None)
+        if not isinstance(usage_metadata, dict):
+            response_metadata = getattr(response, "response_metadata", None)
+            token_usage = response_metadata.get("token_usage") if isinstance(response_metadata, dict) else None
+            usage_metadata = dict(token_usage) if isinstance(token_usage, dict) else {}
         return LLMResponse(
             content=content,
             raw=response,
             metadata={
-                **request.metadata,
+                **trace_metadata,
                 "backend": self.name,
                 "model": model,
                 "base_url": base_url,
                 "user_agent": user_agent,
+                "token_usage": dict(usage_metadata),
             },
         )
 

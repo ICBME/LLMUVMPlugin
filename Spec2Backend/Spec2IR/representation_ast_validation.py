@@ -329,11 +329,21 @@ def validate_concat(value: dict[str, Any], path: str, manifest_fields: set[str],
 
 def validate_slice(value: dict[str, Any], path: str, manifest_fields: set[str], issues: list[SemanticSpecIRIssue]) -> None:
     validate_required_node(value, "value", path, manifest_fields, issues)
-    validate_positive_int(value, "msb", path, issues, required=True)
-    if "lsb" not in value:
-        issues.append(SemanticSpecIRIssue(f"{path}.lsb", "is required"))
-    elif not isinstance(value["lsb"], int) or value["lsb"] < 0:
-        issues.append(SemanticSpecIRIssue(f"{path}.lsb", "must be a non-negative integer"))
+    msb = value.get("msb")
+    lsb = value.get("lsb")
+    for key, index in (("msb", msb), ("lsb", lsb)):
+        if key not in value:
+            issues.append(SemanticSpecIRIssue(f"{path}.{key}", "is required"))
+        elif not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            issues.append(SemanticSpecIRIssue(f"{path}.{key}", "must be a non-negative integer"))
+    if (
+        isinstance(msb, int)
+        and not isinstance(msb, bool)
+        and isinstance(lsb, int)
+        and not isinstance(lsb, bool)
+        and msb < lsb
+    ):
+        issues.append(SemanticSpecIRIssue(path, "must satisfy msb >= lsb"))
 
 
 def validate_reduce(value: dict[str, Any], path: str, manifest_fields: set[str], issues: list[SemanticSpecIRIssue]) -> None:

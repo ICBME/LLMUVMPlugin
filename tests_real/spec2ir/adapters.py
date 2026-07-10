@@ -18,7 +18,7 @@ class VerilogPort:
     width_expr: str | None = None
 
     def manifest_kind(self) -> str:
-        return "bool" if self.width == 1 else "uint"
+        return "bool" if self.width == 1 else "bitvector"
 
 
 @dataclass(frozen=True)
@@ -192,12 +192,67 @@ def render_spec(
     ref_text: str,
     ports: Iterable[VerilogPort],
 ) -> str:
+    ports = tuple(ports)
     lines = [
         f"# VerilogEval {case.case_id}",
         "",
     ]
+    interface_lines = [
+        f"{port.direction} {port.name}: {port.manifest_kind()}[{port.width}]"
+        for port in ports
+    ]
+    if interface_lines:
+        lines.extend(
+            [
+                "```text",
+                "Interface context (non-normative):",
+                *interface_lines,
+                "```",
+                "",
+            ]
+        )
     lines.extend([behavior_prompt_text(prompt_text, ports=ports), ""])
     return "\n".join(lines)
+
+
+def augment_semantic_ir_interface_context(
+    semantic_ir: dict[str, object],
+    ports: Iterable[VerilogPort],
+) -> None:
+    semantic_context = semantic_ir.setdefault(
+        "semantic_context",
+        {"version": 1, "symbols": [], "constraints": []},
+    )
+    if not isinstance(semantic_context, dict):
+        return
+    symbols = semantic_context.setdefault("symbols", [])
+    if not isinstance(symbols, list):
+        return
+    by_name = {
+        str(item.get("name")): item
+        for item in symbols
+        if isinstance(item, dict) and item.get("name")
+    }
+    for port in ports:
+        symbol_type = (
+            {"kind": "bool"}
+            if port.width == 1
+            else {"kind": "bitvector", "width": port.width}
+        )
+        symbol = by_name.get(port.name)
+        if symbol is None:
+            symbol = {"name": port.name}
+            symbols.append(symbol)
+            by_name[port.name] = symbol
+        symbol.update(
+            {
+                "kind": "signal",
+                "type": symbol_type,
+                "direction": port.direction,
+                "roles": ["source" if port.direction == "input" else "destination"],
+                "source": "verilog_interface",
+            }
+        )
 
 
 def behavior_prompt_text(prompt_text: str, *, ports: Iterable[VerilogPort] = ()) -> str:
